@@ -11,6 +11,7 @@ import {
   type AlarmSchedulingGateway,
   type AwakeResponseDependencies,
   processAwakeResponseFailSafe,
+  processStepThresholdFailSafe,
   scheduleAlarmNotificationsFailSafe,
 } from '../src/alarmOrchestrator';
 import type { StoredAlarm } from '../src/alarmStorage';
@@ -32,7 +33,7 @@ const validResponse = {
   cycleId: activeAlarm.cycleId,
   mainAlarmId: activeAlarm.mainAlarmId,
   checkInNotificationId: activeAlarm.checkInNotificationId!,
-  confirmedAtMs: 50_000,
+  confirmedAtMs: 60_000,
 };
 
 function createResponseDependencies(options?: {
@@ -152,6 +153,75 @@ test('a fully matching awake response cancels then saves suppressed state', asyn
   ]);
   assert.equal(result.status, 'suppressed');
   assert.equal(saved[0]?.confirmedAtMs, validResponse.confirmedAtMs);
+});
+
+test('100 fresh steps cancel then save suppressed state', async () => {
+  const { calls, dependencies, saved } = createResponseDependencies({
+    alarm: { ...activeAlarm, checkInNotificationId: undefined },
+  });
+
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 100,
+    observedAtMs: 50_000,
+  });
+
+  assert.deepEqual(calls, [
+    'load',
+    `cancel:${activeAlarm.mainAlarmId}`,
+    'save:suppressed',
+  ]);
+  assert.equal(result.status, 'suppressed');
+  assert.equal(saved[0]?.stepCount, 100);
+  assert.equal(saved[0]?.confirmedAtMs, 50_000);
+});
+
+test('99 steps never attempt cancellation', async () => {
+  const { calls, dependencies, saved } = createResponseDependencies();
+
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 99,
+    observedAtMs: 50_000,
+  });
+
+  assert.deepEqual(result, {
+    status: 'alarm_remains',
+    reason: 'NOT_EXPLICIT_CONFIRMATION',
+  });
+  assert.deepEqual(calls, ['load']);
+  assert.deepEqual(saved, []);
+});
+
+test('100 steps at the due time never cancel', async () => {
+  const { calls, dependencies } = createResponseDependencies();
+
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 100,
+    observedAtMs: activeAlarm.dueAtMs,
+  });
+
+  assert.deepEqual(result, {
+    status: 'alarm_remains',
+    reason: 'ALARM_DUE_OR_PAST',
+  });
+  assert.deepEqual(calls, ['load']);
+});
+
+test('unverified step cancellation never saves suppressed state', async () => {
+  const { calls, dependencies, saved } = createResponseDependencies({
+    cancellationSucceeded: false,
+  });
+
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 100,
+    observedAtMs: 50_000,
+  });
+
+  assert.deepEqual(result, {
+    status: 'alarm_remains',
+    reason: 'CANCEL_NOT_VERIFIED',
+  });
+  assert.deepEqual(calls, ['load', `cancel:${activeAlarm.mainAlarmId}`]);
+  assert.deepEqual(saved, []);
 });
 
 test('default taps are ignored before storage or cancellation is touched', async () => {
