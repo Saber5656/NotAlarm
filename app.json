@@ -1,13 +1,20 @@
 {
   "expo": {
-    "name": "shipathonv1",
-    "slug": "shipathonv1",
+    "name": "AlreadyUp",
+    "slug": "already-up",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-notifications"
+    ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "app.alreadyup.prototype",
+      "infoPlist": {
+        "NSMotionUsageDescription": "起床確認のため、アプリを開いている間の歩数を計測します。"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -16,7 +23,12 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "app.alreadyup.prototype",
+      "permissions": [
+        "android.permission.ACTIVITY_RECOGNITION",
+        "android.permission.SCHEDULE_EXACT_ALARM"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
