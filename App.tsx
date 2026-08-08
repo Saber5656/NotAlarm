@@ -378,10 +378,10 @@ export default function App() {
                   void cancelScheduledNotification(
                     result.alarm.checkInNotificationId,
                   );
-                  setPedometerStatus('100歩を検知・アラーム停止済み');
+                  setPedometerStatus('20歩を検知・アラーム停止済み');
                   setNotice({
                     tone: 'success',
-                    text: '100歩を検知しました。起床済みとして今回のアラームを停止しました。',
+                    text: '20歩を検知しました。起床済みとして今回のアラームを停止しました。',
                   });
                   return;
                 }
@@ -394,13 +394,13 @@ export default function App() {
                 void saveStoredAlarm(failedUpdate);
                 setNotice({
                   tone: 'danger',
-                  text: '100歩を検知しましたが、アラーム停止を確認できませんでした。アラームは有効です。',
+                  text: '20歩を検知しましたが、アラーム停止を確認できませんでした。アラームは有効です。',
                 });
               })
               .catch(() => {
                 setNotice({
                   tone: 'danger',
-                  text: '100歩の停止処理に失敗しました。安全のためアラームは有効です。',
+                  text: '20歩の停止処理に失敗しました。安全のためアラームは有効です。',
                 });
               })
               .finally(() => {
@@ -501,10 +501,10 @@ export default function App() {
               tone: 'success',
               text:
                 scheduleMode === 'demo'
-                  ? '30秒デモを開始しました。100歩で自動停止します。'
+                  ? '30秒デモを開始しました。20歩で自動停止します。'
                   : scheduleMode === 'fastDemo'
-                    ? '10秒デモを開始しました。100歩で自動停止します。'
-                    : `${formatClock(dueAtMs)}にセットしました。100歩で自動停止します。`,
+                    ? '10秒デモを開始しました。20歩で自動停止します。'
+                    : `${formatClock(dueAtMs)}にセットしました。20歩で自動停止します。`,
             },
       );
     } catch (error) {
@@ -604,7 +604,7 @@ export default function App() {
         eyebrow: 'CONFIRMED',
         title: '起床を確認しました',
         description: stoppedBySteps
-          ? '100歩を検知したため、今回のアラームを自動停止しました。'
+          ? '20歩を検知したため、今回のアラームを自動停止しました。'
           : '明示確認が期限内に届いたため、今回だけ停止しました。',
         tone: 'success' as NoticeTone,
       };
@@ -614,7 +614,7 @@ export default function App() {
       return {
         eyebrow: 'ARMED',
         title: `${formatClock(alarm.dueAtMs)} にセット`,
-        description: '100歩に到達すると、今回のアラームを自動停止します。',
+        description: '20歩に到達すると、今回のアラームを自動停止します。',
         tone: 'neutral' as NoticeTone,
       };
     }
@@ -622,7 +622,7 @@ export default function App() {
     return {
       eyebrow: 'ARMED',
       title: `${formatClock(alarm.dueAtMs)} にセット`,
-      description: '100歩に到達すると、今回のアラームを自動停止します。',
+      description: '20歩に到達すると、今回のアラームを自動停止します。',
       tone: 'neutral' as NoticeTone,
     };
   }, [alarm]);
@@ -809,9 +809,9 @@ export default function App() {
               </View>
               <View style={styles.ruleDivider} />
               <View style={styles.ruleRow}>
-                <Text style={styles.ruleIcon}>100</Text>
+                <Text style={styles.ruleIcon}>20</Text>
                 <Text style={styles.ruleText}>
-                  100歩 → 起床確定。今回のアラームを自動停止
+                  20歩 → 起床確定。今回のアラームを自動停止
                 </Text>
               </View>
               <View style={styles.ruleDivider} />
@@ -868,7 +868,7 @@ export default function App() {
         <View style={styles.safetyCard}>
           <Text style={styles.safetyTitle}>MVPの安全原則</Text>
           <Text style={styles.safetyText}>
-            100歩または明示操作で起床を確認できた場合だけ停止します。画面表示中はループ音を再生し、バックグラウンドでは通知音を使います。FocusなどOS設定の影響は残ります。
+            20歩または明示操作で起床を確認できた場合だけ停止します。画面表示中はループ音を再生し、バックグラウンドでは通知音を使います。FocusなどOS設定の影響は残ります。
           </Text>
         </View>
       </ScrollView>

@@ -175,11 +175,11 @@ test('100 fresh steps cancel then save suppressed state', async () => {
   assert.equal(saved[0]?.confirmedAtMs, 50_000);
 });
 
-test('99 steps never attempt cancellation', async () => {
+test('19 steps never attempt cancellation', async () => {
   const { calls, dependencies, saved } = createResponseDependencies();
 
   const result = await processStepThresholdFailSafe(dependencies, {
-    steps: 99,
+    steps: 19,
     observedAtMs: 50_000,
   });
 
@@ -191,7 +191,7 @@ test('99 steps never attempt cancellation', async () => {
   assert.deepEqual(saved, []);
 });
 
-test('100 steps at the due time never cancel', async () => {
+test('20 steps at the due time never cancel', async () => {
   const { calls, dependencies } = createResponseDependencies();
 
   const result = await processStepThresholdFailSafe(dependencies, {

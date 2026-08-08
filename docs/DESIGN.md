@@ -2,7 +2,7 @@
 
 ## 1. 目的
 
-AlreadyUp は、設定時刻に実際の音を鳴らし、アラーム前に 100 歩の起床行動または本人の明示操作を確認できたときだけ、対応するメインアラームを抑止するアプリである。
+AlreadyUp は、設定時刻に実際の音を鳴らし、アラーム前に 20 歩の起床行動または本人の明示操作を確認できたときだけ、対応するメインアラームを抑止するアプリである。
 
 最優先の安全要件は次の 1 文に集約される。
 
@@ -18,7 +18,7 @@ AlreadyUp は、設定時刻に実際の音を鳴らし、アラーム前に 100
 - 起床時刻を時刻ピッカーで設定し、発表用には 30 秒後の短縮経路を用意する
 - 通常は最大 60 秒前、30 秒デモでは 15 秒前に起床確認通知を表示する
 - 確認通知の「起きています」アクションで、対応するメインアラームだけを停止する
-- iPhone の Pedometer で foreground 中の 100 歩を起床確定として検知し、対応するメインアラームだけを停止する
+- iPhone の Pedometer で foreground 中の 20 歩を起床確定として検知し、対応するメインアラームだけを停止する
 - 期限到達時、foreground ではループ音、background では local notification の通知音を鳴らす
 - iPhone の actionable notification を Apple Watch に転送して操作できるようにする
 - 有効なアラーム周期を端末内に保存し、古い応答と区別する
@@ -40,14 +40,14 @@ HealthKit や Apple Watch の自動睡眠判定は、Watch を着けていない
 | 用語 | 意味 | アラーム停止の根拠になるか |
 |---|---|---|
 | `UNKNOWN` | 起床を確定できる情報がない | ならない |
-| `STEP_THRESHOLD_REACHED` | アラーム設定後、期限前に iPhone が 100 歩を検知 | なる |
+| `STEP_THRESHOLD_REACHED` | アラーム設定後、期限前に iPhone が 20 歩を検知 | なる |
 | `CONFIRMED_AWAKE` | 有効な確認通知で、期限前に「起きています」を明示操作 | なる |
 | `STALE` | 古い周期、別のアラーム、期限外の確認 | ならない |
 | `ERROR` | 権限、センサー、保存、応答、キャンセル等の失敗 | ならない |
 
-100 歩は睡眠そのものの推定ではなく、この MVP が採用する明確な起床行動である。99 歩以下、期限後の到達、センサー欠落・例外は停止根拠にしない。100 歩到達時も OS 上の対象通知が消えたことを確認できるまで `suppressed` にしない。
+20 歩は睡眠そのものの推定ではなく、この MVP が採用する明確な起床行動である。19 歩以下、期限後の到達、センサー欠落・例外は停止根拠にしない。20 歩到達時も OS 上の対象通知が消えたことを確認できるまで `suppressed` にしない。
 
-`CONFIRMED_AWAKE` はアラーム直前に提示した通知への能動操作であり、100 歩と並ぶ正の証拠である。確認後に再睡眠する残余リスクはあるが、本人の能動操作として採用する。
+`CONFIRMED_AWAKE` はアラーム直前に提示した通知への能動操作であり、20 歩と並ぶ正の証拠である。確認後に再睡眠する残余リスクはあるが、本人の能動操作として採用する。
 
 ## 4. 全体構成
 
@@ -63,7 +63,7 @@ flowchart LR
     UI --> Policy
     Policy <--> Store
     Audio["Foreground alarm audio"]
-    Ped -->|"100 steps before due"| Policy
+    Ped -->|"20 steps before due"| Policy
     Policy -->|"schedule main first"| IOS
     Policy -->|"schedule check-in at T-15s / max T-60s"| IOS
     Policy -->|"start loop at due while foreground"| Audio
@@ -124,16 +124,16 @@ category / action identifier は固定値とし、表示文字列で判定しな
 
 ## 7. 判定フロー
 
-### 7.1 100 歩を検知した場合
+### 7.1 20 歩を検知した場合
 
 1. 現在の周期に対する歩数を更新する。
-2. 100 歩未満ではメインアラームを変更しない。
-3. 100 歩以上でも、現在周期が active かつ期限前であることを検証する。
+2. 20 歩未満ではメインアラームを変更しない。
+3. 20 歩以上でも、現在周期が active かつ期限前であることを検証する。
 4. 保存済みの正本 ID を使い、メイン通知 1 件だけをキャンセルする。
 5. OS の scheduled notification 一覧で対象 ID の消失を確認できた場合だけ `suppressed` を保存する。
 6. 確認通知は best-effort で取り消し、失敗してもメイン通知の停止結果を巻き戻さない。
 
-期限後、古い周期、99 歩以下、キャンセル例外、またはキャンセル結果を確認できない場合は `suppressed` に遷移せず、アラームを残す。
+期限後、古い周期、19 歩以下、キャンセル例外、またはキャンセル結果を確認できない場合は `suppressed` に遷移せず、アラームを残す。
 
 ### 7.2 「起きています」を操作した場合
 
@@ -163,8 +163,8 @@ stateDiagram-v2
     Idle --> Arming: set alarm
     Arming --> Armed: main notification scheduled
     Arming --> Idle: main scheduling failed
-    Armed --> Armed: fewer than 100 steps / unknown / no response
-    Armed --> SuppressionPending: 100 steps or valid confirm_awake before due
+    Armed --> Armed: fewer than 20 steps / unknown / no response
+    Armed --> SuppressionPending: 20 steps or valid confirm_awake before due
     SuppressionPending --> Suppressed: exact main cancellation succeeded
     SuppressionPending --> Armed: validation or cancellation failed
     Armed --> Ringing: due reached
@@ -174,7 +174,7 @@ stateDiagram-v2
     Dismissed --> [*]
 ```
 
-100 歩到達は抑止処理の入口だが、OS 上の対象通知のキャンセル成功を確認した場合だけ `Suppressed` へ遷移する。
+20 歩到達は抑止処理の入口だが、OS 上の対象通知のキャンセル成功を確認した場合だけ `Suppressed` へ遷移する。
 
 ## 9. Watch routing matrix
 
@@ -199,7 +199,7 @@ iOS の通知は通常、iPhone と Watch の両方に同時表示されるの�
 | action response を取得できない | メインを残す |
 | 古い action response を再取得 | cycle / ID / deadline 検証で無視する |
 | 保存読み込み失敗 | メインを推測でキャンセルしない |
-| Pedometer 権限拒否・停止 | 100 歩を確認できないためメインを残す |
+| Pedometer 権限拒否・停止 | 20 歩を確認できないためメインを残す |
 | 確認通知の登録失敗 | メインを残し、確認不能を表示する |
 | メイン通知のキャンセル失敗 | `suppressed` にせず、メインを残す |
 | OS 時刻変更・再起動 | 現 MVP では完全未対応。メインを推測で消さない |
@@ -224,8 +224,8 @@ iOS の通知は通常、iPhone と Watch の両方に同時表示されるの�
 | ID | 条件 | 期待結果 |
 |---|---|---|
 | POL-01 | 証拠なしで期限到達 | 鳴る |
-| POL-02 | 99 歩以下で期限到達 | 鳴る |
-| POL-03 | 現在周期で期限前に 100 歩へ到達し、対象通知の消失を検証 | 対象だけ抑止 |
+| POL-02 | 19 歩以下で期限到達 | 鳴る |
+| POL-03 | 現在周期で期限前に 20 歩へ到達し、対象通知の消失を検証 | 対象だけ抑止 |
 | POL-04 | 正しい周期・確認通知 ID の `confirm_awake` を確認可能時刻以降・期限前に操作 | 対象だけ抑止 |
 | POL-05 | 古い周期の `confirm_awake` | 現在のアラームは鳴る |
 | POL-06 | 別メイン ID の `confirm_awake` | 現在のアラームは鳴る |
