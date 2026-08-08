@@ -12,7 +12,8 @@
         "expo-audio",
         {
           "microphonePermission": false,
-          "recordAudioAndroid": false
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": true
         }
       ],
       "@react-native-community/datetimepicker",

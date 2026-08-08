@@ -33,7 +33,7 @@ export async function startForegroundAlarmSound(): Promise<void> {
     await setAudioModeAsync({
       interruptionMode: 'doNotMix',
       playsInSilentMode: true,
-      shouldPlayInBackground: false,
+      shouldPlayInBackground: true,
     });
 
     const player = createAudioPlayer(ensureAlarmToneUri());

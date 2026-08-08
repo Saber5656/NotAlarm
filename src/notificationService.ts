@@ -125,6 +125,7 @@ export async function scheduleMainAlarmNotification(input: {
       title: '⏰ 起きる時間です',
       body: '起床が確認できなかったため、アラームを鳴らしています。',
       sound: 'default',
+      interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
       data: {
         kind: MAIN_ALARM_KIND,
