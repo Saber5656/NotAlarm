@@ -23,7 +23,7 @@
 
 ## 技術構成
 
-- Expo SDK 57 / React Native / TypeScript
+- Expo SDK 54 / React Native / TypeScript
 - `expo-notifications`: メインアラーム、60 秒前の確認通知、通知アクション
 - `expo-sensors` (`Pedometer`): アプリ実行中の歩数検知
 - `@react-native-async-storage/async-storage`: 有効なアラーム周期の復元
@@ -40,7 +40,7 @@
 - iPhone とペアリング済みの Apple Watch（Watch 経由の確認を試す場合）
 - iPhone と開発マシンが接続できるネットワーク
 
-このリポジトリは Expo SDK 57 を固定しています。実装時は [Expo SDK 57 の versioned docs](https://docs.expo.dev/versions/v57.0.0/) を参照してください。
+このリポジトリは、App Store 版 Expo Go を使った iPhone 実機確認のため Expo SDK 54 を固定しています。Expo 公式も SDK 57 移行期間中の物理デバイスでは SDK 54 を使うよう案内しています。実装時は [Expo SDK 54 の versioned docs](https://docs.expo.dev/versions/v54.0.0/) を参照してください。
 
 ```sh
 npm ci
@@ -49,7 +49,7 @@ npm start
 
 ターミナルに表示された QR コードを iPhone で読み取り、Expo Go で開きます。接続できない場合は、ネットワークポリシーを確認したうえで `npx expo start --tunnel` を試せます。
 
-初回起動時は通知とモーションの権限を許可します。Apple Watch で確認する場合は、Watch アプリの通知設定で iPhone 側アプリの通知ミラーリングを有効にし、Watch を手首に装着してロック解除してください。
+初回起動時は通知とモーションの権限を許可します。Expo Go で Apple Watch の確認を試す場合は、Watch アプリの通知設定で「Expo Go」の通知ミラーリングを有効にし、Watch を手首に装着してロック解除してください。
 
 ## 手動確認
 
@@ -99,12 +99,13 @@ Web では Apple Watch 転送、ローカル通知、Pedometer のネイティ�
 - 通知アクションを押した時点で JavaScript 実行環境が終了済みの場合、キャンセル処理が走らずアラームが鳴る可能性があります。これは安全側の失敗ですが、UX としては未解決です。
 - 通常通知のため、Focus や消音などを越えて鳴る保証はありません。
 - 現開発環境には Xcode / CocoaPods / iOS Simulator がなく、native build と実機 E2E は未検証です。
-- Git remote がないため、残作業は GitHub Issue には未登録です。[docs/REMAINING_ISSUES.md](docs/REMAINING_ISSUES.md) をそのまま Issue 化できる形式で管理します。
-- `npm audit` は現 lockfile に 18 件（moderate 7 / high 11）の transitive advisory を報告します。自動修正候補が Expo 53 / React Native 0.72 への非互換な downgrade のため、MVP では強制修正せず `ALR-014` で追跡します。
+- 残作業は [docs/REMAINING_ISSUES.md](docs/REMAINING_ISSUES.md) で Issue 化できる形式にまとめています。
+- `npm audit --omit=dev` は現 lockfile に 19 件（moderate 8 / high 11）の advisory を報告します。自動修正候補は Expo SDK 57 への更新や React Native 0.72 への非互換な変更を含み、App Store 版 Expo Go との互換性を失うため、MVP では強制修正せず `ALR-014` で追跡します。
 
 ## 参照資料
 
-- [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
-- [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
+- [Expo Notifications — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/notifications/)
+- [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
+- [Expo: Create a project（物理デバイスの Expo Go は SDK 54）](https://docs.expo.dev/get-started/create-a-project/)
 - [Apple: Taking advantage of notification forwarding](https://developer.apple.com/documentation/watchos-apps/taking-advantage-of-notification-forwarding)
 - [Apple: Notifications on Apple Watch](https://support.apple.com/guide/watch/notifications-apd9b833c9f3/watchos)
