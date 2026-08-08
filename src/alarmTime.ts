@@ -1,4 +1,5 @@
 export const DEMO_DELAY_MS = 30_000;
+export const FAST_DEMO_DELAY_MS = 10_000;
 
 export function getNextAlarmAtMs(
   nowMs: number,
@@ -30,4 +31,11 @@ export function getDemoAlarmAtMs(nowMs: number): number {
     throw new Error('現在時刻を取得できません。');
   }
   return nowMs + DEMO_DELAY_MS;
+}
+
+export function getFastDemoAlarmAtMs(nowMs: number): number {
+  if (!Number.isFinite(nowMs)) {
+    throw new Error('現在時刻を取得できません。');
+  }
+  return nowMs + FAST_DEMO_DELAY_MS;
 }

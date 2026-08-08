@@ -35,9 +35,11 @@ import {
 } from './src/alarmSound';
 import {
   getDemoAlarmAtMs,
+  getFastDemoAlarmAtMs,
   getNextAlarmAtMs,
 } from './src/alarmTime';
 import {
+  clearStoredAlarm,
   type StoredAlarm,
   loadStoredAlarm,
   saveStoredAlarm,
@@ -54,7 +56,7 @@ import {
 
 installForegroundNotificationHandler();
 
-type ScheduleMode = 'clock' | 'demo';
+type ScheduleMode = 'clock' | 'demo' | 'fastDemo';
 
 type NoticeTone = 'neutral' | 'success' | 'warning' | 'danger';
 
@@ -441,11 +443,13 @@ export default function App() {
       const dueAtMs =
         scheduleMode === 'demo'
           ? getDemoAlarmAtMs(armedAtMs)
-          : getNextAlarmAtMs(
-              armedAtMs,
-              selectedTime.getHours(),
-              selectedTime.getMinutes(),
-            );
+          : scheduleMode === 'fastDemo'
+            ? getFastDemoAlarmAtMs(armedAtMs)
+            : getNextAlarmAtMs(
+                armedAtMs,
+                selectedTime.getHours(),
+                selectedTime.getMinutes(),
+              );
       if (dueAtMs - armedAtMs < MIN_ARM_LEAD_MS) {
         throw new Error('アラームは10秒以上先に設定してください。');
       }
@@ -498,7 +502,9 @@ export default function App() {
               text:
                 scheduleMode === 'demo'
                   ? '30秒デモを開始しました。100歩で自動停止します。'
-                  : `${formatClock(dueAtMs)}にセットしました。100歩で自動停止します。`,
+                  : scheduleMode === 'fastDemo'
+                    ? '10秒デモを開始しました。100歩で自動停止します。'
+                    : `${formatClock(dueAtMs)}にセットしました。100歩で自動停止します。`,
             },
       );
     } catch (error) {
@@ -536,6 +542,42 @@ export default function App() {
       setIsBusy(false);
     }
   }, [isBusy, persistCurrentAlarm]);
+
+  const resetAlarm = useCallback(async () => {
+    const current = alarmRef.current;
+    if (!current || isBusy) {
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      stopForegroundAlarmSound();
+      if (current.phase === 'armed' || current.phase === 'step_candidate') {
+        const canceled = await cancelScheduledNotification(current.mainAlarmId);
+        if (!canceled) {
+          throw new Error('アラームを解除できませんでした。通知は維持されています。');
+        }
+      } else {
+        await dismissDeliveredNotification(current.mainAlarmId);
+        await cancelScheduledNotification(current.mainAlarmId);
+      }
+      await cancelScheduledNotification(current.checkInNotificationId);
+      await clearStoredAlarm();
+      setCurrentAlarm(null);
+      setPedometerStatus(Platform.OS === 'web' ? '実機のみ対応' : '待機中');
+      setNotice({ tone: 'neutral', text: 'アラームをリセットしました。' });
+    } catch (error) {
+      setNotice({
+        tone: 'danger',
+        text:
+          error instanceof Error
+            ? error.message
+            : 'アラームのリセットに失敗しました。',
+      });
+    } finally {
+      setIsBusy(false);
+    }
+  }, [isBusy, setCurrentAlarm]);
 
   const phasePresentation = useMemo(() => {
     if (!alarm || alarm.phase === 'dismissed') {
@@ -658,13 +700,15 @@ export default function App() {
                 <Text style={styles.timeCardValue}>
                   {scheduleMode === 'demo'
                     ? '30秒後'
-                    : formatClock(
-                        getNextAlarmAtMs(
-                          nowMs,
-                          selectedTime.getHours(),
-                          selectedTime.getMinutes(),
-                        ),
-                      )}
+                    : scheduleMode === 'fastDemo'
+                      ? '10秒後'
+                      : formatClock(
+                          getNextAlarmAtMs(
+                            nowMs,
+                            selectedTime.getHours(),
+                            selectedTime.getMinutes(),
+                          ),
+                        )}
                 </Text>
               </View>
               <DateTimePicker
@@ -696,6 +740,24 @@ export default function App() {
                 ]}
               >
                 発表用：30秒後に鳴らす
+              </Text>
+            </Pressable>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setScheduleMode('fastDemo')}
+              style={[
+                styles.demoButton,
+                scheduleMode === 'fastDemo' && styles.demoButtonSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.demoButtonText,
+                  scheduleMode === 'fastDemo' && styles.demoButtonTextSelected,
+                ]}
+              >
+                発表用：10秒後にセット
               </Text>
             </Pressable>
 
@@ -761,6 +823,18 @@ export default function App() {
               </View>
             </View>
 
+            <Pressable
+              accessibilityRole="button"
+              disabled={isBusy}
+              onPress={() => void resetAlarm()}
+              style={({ pressed }) => [
+                styles.resetButton,
+                (isBusy || pressed) && styles.buttonDimmed,
+              ]}
+            >
+              <Text style={styles.resetButtonText}>アラームをリセット</Text>
+            </Pressable>
+
           </View>
         ) : null}
 
@@ -776,6 +850,17 @@ export default function App() {
               ]}
             >
               <Text style={styles.stopButtonText}>起きました・停止</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              disabled={isBusy}
+              onPress={() => void resetAlarm()}
+              style={({ pressed }) => [
+                styles.resetButton,
+                (isBusy || pressed) && styles.buttonDimmed,
+              ]}
+            >
+              <Text style={styles.resetButtonText}>アラームをリセット</Text>
             </Pressable>
           </View>
         ) : null}
@@ -1133,6 +1218,21 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '900',
+  },
+  resetButton: {
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#D6DDE7',
+    backgroundColor: '#FFFFFF',
+  },
+  resetButtonText: {
+    color: '#526078',
+    fontSize: 14,
+    fontWeight: '800',
   },
   safetyCard: {
     marginTop: 30,
