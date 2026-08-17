@@ -1,6 +1,6 @@
 export const STEP_THRESHOLD = 20;
 export const CHECK_IN_LEAD_MS = 60_000;
-export const MIN_ARM_LEAD_MS = 90_000;
+export const MIN_ARM_LEAD_MS = 10_000;
 
 /**
  * The minimum immutable identity and timing data needed to decide whether a
@@ -9,7 +9,7 @@ export const MIN_ARM_LEAD_MS = 90_000;
 export interface AlarmRecord {
   cycleId: string;
   mainAlarmId: string;
-  checkInNotificationId: string;
+  checkInNotificationId?: string;
   armedAtMs: number;
   dueAtMs: number;
 }
@@ -29,7 +29,7 @@ export type StepEvidence =
       steps: number;
     }
   | {
-      kind: "STEP_CANDIDATE";
+      kind: "STEP_THRESHOLD_REACHED";
       observedAtMs: number;
       steps: number;
     }
@@ -49,6 +49,9 @@ export type SuppressionRejectionReason =
   | "INVALID_PROCESSING_TIME"
   | "ALARM_DUE_OR_PAST"
   | "NOT_EXPLICIT_CONFIRMATION"
+  | "INVALID_STEP_TIME"
+  | "STALE_STEP_EVIDENCE"
+  | "STEP_AT_OR_AFTER_DUE"
   | "WRONG_CYCLE"
   | "WRONG_MAIN_ALARM"
   | "WRONG_CHECK_IN"
@@ -59,14 +62,14 @@ export type SuppressionRejectionReason =
   | "CONFIRMATION_IN_FUTURE";
 
 export type SuppressionDecision =
-  | { canSuppress: true; reason: "CONFIRMED_AWAKE" }
+  | { canSuppress: true; reason: "CONFIRMED_AWAKE" | "STEP_THRESHOLD_REACHED" }
   | { canSuppress: false; reason: SuppressionRejectionReason };
 
 export type SuppressionOutcome = "SUPPRESSED" | "ALARM_REMAINS_ARMED";
 
 /**
- * Converts pedometer output into wake evidence. Even at or above the threshold,
- * the result is only a candidate and can never cancel an alarm by itself.
+ * Converts pedometer output into wake evidence. Reaching 20 steps is treated
+ * as sufficient wake evidence for the presentation MVP.
  */
 export function classifyStepEvidence(
   steps: number,
@@ -81,7 +84,7 @@ export function classifyStepEvidence(
   }
 
   return {
-    kind: steps >= STEP_THRESHOLD ? "STEP_CANDIDATE" : "STEP_MONITORING",
+    kind: steps >= STEP_THRESHOLD ? "STEP_THRESHOLD_REACHED" : "STEP_MONITORING",
     observedAtMs,
     steps,
   };
@@ -90,16 +93,18 @@ export function classifyStepEvidence(
 /**
  * Returns the desired time for the single pre-alarm awake check-in.
  */
-export function getCheckInAtMs(dueAtMs: number): number {
-  return dueAtMs - CHECK_IN_LEAD_MS;
+export function getCheckInAtMs(dueAtMs: number, armedAtMs: number): number {
+  const availableLeadMs = dueAtMs - armedAtMs;
+  const leadMs = Math.min(CHECK_IN_LEAD_MS, Math.floor(availableLeadMs / 2));
+  return dueAtMs - leadMs;
 }
 
 /**
  * Fail-closed cancellation policy.
  *
- * Only an explicit confirmation for the exact active cycle and main alarm may
- * authorize cancellation. Unknown/error/step evidence and every malformed or
- * stale timestamp leave the alarm armed.
+ * A 100-step threshold observation or an explicit confirmation for the exact
+ * active cycle may authorize cancellation. Unknown/error/stale evidence leaves
+ * the alarm armed.
  */
 export function canSuppressAlarm(
   record: AlarmRecord,
@@ -119,6 +124,25 @@ export function canSuppressAlarm(
     return { canSuppress: false, reason: "ALARM_DUE_OR_PAST" };
   }
 
+  if (confirmation.kind === "STEP_THRESHOLD_REACHED") {
+    if (
+      !Number.isFinite(confirmation.observedAtMs) ||
+      !Number.isFinite(confirmation.steps)
+    ) {
+      return { canSuppress: false, reason: "INVALID_STEP_TIME" };
+    }
+    if (confirmation.observedAtMs < record.armedAtMs) {
+      return { canSuppress: false, reason: "STALE_STEP_EVIDENCE" };
+    }
+    if (confirmation.observedAtMs >= record.dueAtMs) {
+      return { canSuppress: false, reason: "STEP_AT_OR_AFTER_DUE" };
+    }
+    if (confirmation.steps < STEP_THRESHOLD) {
+      return { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" };
+    }
+    return { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" };
+  }
+
   if (confirmation.kind !== "EXPLICIT_AWAKE_CONFIRMATION") {
     return { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" };
   }
@@ -131,7 +155,10 @@ export function canSuppressAlarm(
     return { canSuppress: false, reason: "WRONG_MAIN_ALARM" };
   }
 
-  if (confirmation.checkInNotificationId !== record.checkInNotificationId) {
+  if (
+    typeof record.checkInNotificationId !== "string" ||
+    confirmation.checkInNotificationId !== record.checkInNotificationId
+  ) {
     return { canSuppress: false, reason: "WRONG_CHECK_IN" };
   }
 
@@ -143,7 +170,10 @@ export function canSuppressAlarm(
     return { canSuppress: false, reason: "STALE_CONFIRMATION" };
   }
 
-  if (confirmation.confirmedAtMs < getCheckInAtMs(record.dueAtMs)) {
+  if (
+    confirmation.confirmedAtMs <
+    getCheckInAtMs(record.dueAtMs, record.armedAtMs)
+  ) {
     return {
       canSuppress: false,
       reason: "CONFIRMATION_BEFORE_CHECK_IN_WINDOW",
@@ -183,8 +213,6 @@ function isValidAlarmRecord(record: AlarmRecord): boolean {
     record.cycleId.length > 0 &&
     typeof record.mainAlarmId === "string" &&
     record.mainAlarmId.length > 0 &&
-    typeof record.checkInNotificationId === "string" &&
-    record.checkInNotificationId.length > 0 &&
     Number.isFinite(record.armedAtMs) &&
     Number.isFinite(record.dueAtMs) &&
     record.dueAtMs - record.armedAtMs >= MIN_ARM_LEAD_MS

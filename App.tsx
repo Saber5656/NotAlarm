@@ -1,6 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
 import { Pedometer } from 'expo-sensors';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -25,9 +26,20 @@ import {
 } from './src/alarmContracts';
 import {
   processAwakeResponseFailSafe,
+  processStepThresholdFailSafe,
   scheduleAlarmNotificationsFailSafe,
 } from './src/alarmOrchestrator';
 import {
+  startForegroundAlarmSound,
+  stopForegroundAlarmSound,
+} from './src/alarmSound';
+import {
+  getDemoAlarmAtMs,
+  getFastDemoAlarmAtMs,
+  getNextAlarmAtMs,
+} from './src/alarmTime';
+import {
+  clearStoredAlarm,
   type StoredAlarm,
   loadStoredAlarm,
   saveStoredAlarm,
@@ -44,7 +56,7 @@ import {
 
 installForegroundNotificationHandler();
 
-const DELAY_OPTIONS_MINUTES = [2, 5, 10];
+type ScheduleMode = 'clock' | 'demo' | 'fastDemo';
 
 type NoticeTone = 'neutral' | 'success' | 'warning' | 'danger';
 
@@ -67,6 +79,15 @@ function formatClock(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function defaultWakeTime(): Date {
+  const next = new Date();
+  next.setHours(7, 0, 0, 0);
+  if (next.getTime() <= Date.now()) {
+    next.setDate(next.getDate() + 1);
+  }
+  return next;
+}
+
 function formatCountdown(milliseconds: number): string {
   if (milliseconds <= 0) {
     return '時刻になりました';
@@ -86,7 +107,8 @@ export default function App() {
   const [alarm, setAlarm] = useState<StoredAlarm | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
-  const [delayMinutes, setDelayMinutes] = useState(5);
+  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('clock');
+  const [selectedTime, setSelectedTime] = useState(defaultWakeTime);
   const [nowMs, setNowMs] = useState(Date.now());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [pedometerStatus, setPedometerStatus] = useState(
@@ -95,6 +117,7 @@ export default function App() {
 
   const alarmRef = useRef<StoredAlarm | null>(null);
   const responseInFlightRef = useRef<string | null>(null);
+  const stepSuppressionInFlightRef = useRef(false);
   const stepOffsetRef = useRef(0);
 
   const setCurrentAlarm = useCallback((next: StoredAlarm | null) => {
@@ -146,6 +169,22 @@ export default function App() {
       mounted = false;
     };
   }, [setCurrentAlarm]);
+
+  useEffect(() => {
+    if (alarm?.phase !== 'ringing') {
+      stopForegroundAlarmSound();
+      return;
+    }
+
+    void startForegroundAlarmSound().catch(() => {
+      setNotice({
+        tone: 'danger',
+        text: '端末内アラーム音を開始できませんでした。通知音と画面で確認してください。',
+      });
+    });
+
+    return stopForegroundAlarmSound;
+  }, [alarm?.phase]);
 
   const handleAwakeResponse = useCallback(
     async (response: Notifications.NotificationResponse) => {
@@ -316,29 +355,67 @@ export default function App() {
             return;
           }
 
-          const becameCandidate =
-            evidence.kind === 'STEP_CANDIDATE' &&
-            !current.stepCandidateRecorded;
+          if (evidence.kind === 'STEP_THRESHOLD_REACHED') {
+            if (stepSuppressionInFlightRef.current) {
+              return;
+            }
+            stepSuppressionInFlightRef.current = true;
+
+            void processStepThresholdFailSafe(
+              {
+                loadAlarm: loadStoredAlarm,
+                saveAlarm: saveStoredAlarm,
+                cancelScheduled: cancelScheduledNotification,
+              },
+              {
+                steps: evidence.steps,
+                observedAtMs: evidence.observedAtMs,
+              },
+            )
+              .then((result) => {
+                if (result.status === 'suppressed') {
+                  setCurrentAlarm(result.alarm);
+                  void cancelScheduledNotification(
+                    result.alarm.checkInNotificationId,
+                  );
+                  setPedometerStatus('20歩を検知・アラーム停止済み');
+                  setNotice({
+                    tone: 'success',
+                    text: '20歩を検知しました。起床済みとして今回のアラームを停止しました。',
+                  });
+                  return;
+                }
+
+                const failedUpdate: StoredAlarm = {
+                  ...current,
+                  stepCount: evidence.steps,
+                };
+                setCurrentAlarm(failedUpdate);
+                void saveStoredAlarm(failedUpdate);
+                setNotice({
+                  tone: 'danger',
+                  text: '20歩を検知しましたが、アラーム停止を確認できませんでした。アラームは有効です。',
+                });
+              })
+              .catch(() => {
+                setNotice({
+                  tone: 'danger',
+                  text: '20歩の停止処理に失敗しました。安全のためアラームは有効です。',
+                });
+              })
+              .finally(() => {
+                stepSuppressionInFlightRef.current = false;
+              });
+            return;
+          }
+
           const updated: StoredAlarm = {
             ...current,
-            phase: becameCandidate ? 'step_candidate' : current.phase,
             stepCount: evidence.steps,
-            stepCandidateAtMs: becameCandidate
-              ? evidence.observedAtMs
-              : current.stepCandidateAtMs,
-            stepCandidateRecorded:
-              current.stepCandidateRecorded || becameCandidate,
           };
 
           setCurrentAlarm(updated);
           void saveStoredAlarm(updated);
-
-          if (becameCandidate) {
-            setNotice({
-              tone: 'neutral',
-              text: '20歩を検知しました。ただし再入眠に備え、アラームはまだ解除しません。',
-            });
-          }
         });
       } catch {
         if (!disposed) {
@@ -363,9 +440,18 @@ export default function App() {
 
     try {
       const armedAtMs = Date.now();
-      const dueAtMs = armedAtMs + delayMinutes * 60_000;
+      const dueAtMs =
+        scheduleMode === 'demo'
+          ? getDemoAlarmAtMs(armedAtMs)
+          : scheduleMode === 'fastDemo'
+            ? getFastDemoAlarmAtMs(armedAtMs)
+            : getNextAlarmAtMs(
+                armedAtMs,
+                selectedTime.getHours(),
+                selectedTime.getMinutes(),
+              );
       if (dueAtMs - armedAtMs < MIN_ARM_LEAD_MS) {
-        throw new Error('アラームは90秒以上先に設定してください。');
+        throw new Error('アラームは10秒以上先に設定してください。');
       }
 
       await prepareNotifications();
@@ -378,7 +464,7 @@ export default function App() {
         {
           cycleId,
           dueAtMs,
-          checkInAtMs: getCheckInAtMs(dueAtMs),
+          checkInAtMs: getCheckInAtMs(dueAtMs, armedAtMs),
         },
       );
 
@@ -413,7 +499,12 @@ export default function App() {
             }
           : {
               tone: 'success',
-              text: 'メインアラームを先に予約しました。1分前に起床確認を送ります。',
+              text:
+                scheduleMode === 'demo'
+                  ? '30秒デモを開始しました。20歩で自動停止します。'
+                  : scheduleMode === 'fastDemo'
+                    ? '10秒デモを開始しました。20歩で自動停止します。'
+                    : `${formatClock(dueAtMs)}にセットしました。20歩で自動停止します。`,
             },
       );
     } catch (error) {
@@ -427,7 +518,7 @@ export default function App() {
     } finally {
       setIsBusy(false);
     }
-  }, [delayMinutes, isBusy, setCurrentAlarm]);
+  }, [isBusy, scheduleMode, selectedTime, setCurrentAlarm]);
 
   const stopRinging = useCallback(async () => {
     const current = alarmRef.current;
@@ -437,6 +528,7 @@ export default function App() {
 
     setIsBusy(true);
     try {
+      stopForegroundAlarmSound();
       await dismissDeliveredNotification(current.mainAlarmId);
       const dismissed = { ...current, phase: 'dismissed' as const };
       await persistCurrentAlarm(dismissed);
@@ -450,6 +542,42 @@ export default function App() {
       setIsBusy(false);
     }
   }, [isBusy, persistCurrentAlarm]);
+
+  const resetAlarm = useCallback(async () => {
+    const current = alarmRef.current;
+    if (!current || isBusy) {
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      stopForegroundAlarmSound();
+      if (current.phase === 'armed' || current.phase === 'step_candidate') {
+        const canceled = await cancelScheduledNotification(current.mainAlarmId);
+        if (!canceled) {
+          throw new Error('アラームを解除できませんでした。通知は維持されています。');
+        }
+      } else {
+        await dismissDeliveredNotification(current.mainAlarmId);
+        await cancelScheduledNotification(current.mainAlarmId);
+      }
+      await cancelScheduledNotification(current.checkInNotificationId);
+      await clearStoredAlarm();
+      setCurrentAlarm(null);
+      setPedometerStatus(Platform.OS === 'web' ? '実機のみ対応' : '待機中');
+      setNotice({ tone: 'neutral', text: 'アラームをリセットしました。' });
+    } catch (error) {
+      setNotice({
+        tone: 'danger',
+        text:
+          error instanceof Error
+            ? error.message
+            : 'アラームのリセットに失敗しました。',
+      });
+    } finally {
+      setIsBusy(false);
+    }
+  }, [isBusy, setCurrentAlarm]);
 
   const phasePresentation = useMemo(() => {
     if (!alarm || alarm.phase === 'dismissed') {
@@ -471,27 +599,30 @@ export default function App() {
     }
 
     if (alarm.phase === 'suppressed') {
+      const stoppedBySteps = alarm.stepCount >= STEP_THRESHOLD;
       return {
         eyebrow: 'CONFIRMED',
         title: '起床を確認しました',
-        description: '明示確認が期限内に届いたため、今回だけ停止しました。',
+        description: stoppedBySteps
+          ? '20歩を検知したため、今回のアラームを自動停止しました。'
+          : '明示確認が期限内に届いたため、今回だけ停止しました。',
         tone: 'success' as NoticeTone,
       };
     }
 
     if (alarm.phase === 'step_candidate') {
       return {
-        eyebrow: 'WAKE CANDIDATE',
-        title: '20歩を検知しました',
-        description: '再入眠の可能性があるため、アラームはまだ有効です。',
-        tone: 'warning' as NoticeTone,
+        eyebrow: 'ARMED',
+        title: `${formatClock(alarm.dueAtMs)} にセット`,
+        description: '20歩に到達すると、今回のアラームを自動停止します。',
+        tone: 'neutral' as NoticeTone,
       };
     }
 
     return {
       eyebrow: 'ARMED',
       title: `${formatClock(alarm.dueAtMs)} にセット`,
-      description: '1分前の確認に応答がなければ、そのまま鳴ります。',
+      description: '20歩に到達すると、今回のアラームを自動停止します。',
       tone: 'neutral' as NoticeTone,
     };
   }, [alarm]);
@@ -499,6 +630,13 @@ export default function App() {
   const active = isMonitoring(alarm);
   const canArm = Platform.OS !== 'web' && !active && !isBusy;
   const countdown = alarm ? formatCountdown(alarm.dueAtMs - nowMs) : null;
+  const checkInLeadSeconds = alarm
+    ? Math.round(
+        (alarm.dueAtMs -
+          getCheckInAtMs(alarm.dueAtMs, alarm.armedAtMs)) /
+          1_000,
+      )
+    : 60;
 
   if (!isLoaded) {
     return (
@@ -555,32 +693,73 @@ export default function App() {
 
         {!active && alarm?.phase !== 'ringing' ? (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>何分後に鳴らしますか？</Text>
-            <View style={styles.delayRow}>
-              {DELAY_OPTIONS_MINUTES.map((minutes) => {
-                const selected = delayMinutes === minutes;
-                return (
-                  <Pressable
-                    key={minutes}
-                    accessibilityRole="button"
-                    onPress={() => setDelayMinutes(minutes)}
-                    style={[
-                      styles.delayButton,
-                      selected && styles.delayButtonSelected,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.delayButtonText,
-                        selected && styles.delayButtonTextSelected,
-                      ]}
-                    >
-                      {minutes}分
-                    </Text>
-                  </Pressable>
-                );
-              })}
+            <Text style={styles.sectionLabel}>起きたい時刻</Text>
+            <View style={styles.timeCard}>
+              <View>
+                <Text style={styles.timeCardLabel}>次のアラーム</Text>
+                <Text style={styles.timeCardValue}>
+                  {scheduleMode === 'demo'
+                    ? '30秒後'
+                    : scheduleMode === 'fastDemo'
+                      ? '10秒後'
+                      : formatClock(
+                          getNextAlarmAtMs(
+                            nowMs,
+                            selectedTime.getHours(),
+                            selectedTime.getMinutes(),
+                          ),
+                        )}
+                </Text>
+              </View>
+              <DateTimePicker
+                accessibilityLabel="起きたい時刻を選択"
+                display={Platform.OS === 'ios' ? 'compact' : 'default'}
+                mode="time"
+                onChange={(_, date) => {
+                  if (date) {
+                    setSelectedTime(date);
+                    setScheduleMode('clock');
+                  }
+                }}
+                value={selectedTime}
+              />
             </View>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setScheduleMode('demo')}
+              style={[
+                styles.demoButton,
+                scheduleMode === 'demo' && styles.demoButtonSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.demoButtonText,
+                  scheduleMode === 'demo' && styles.demoButtonTextSelected,
+                ]}
+              >
+                発表用：30秒後に鳴らす
+              </Text>
+            </Pressable>
+
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setScheduleMode('fastDemo')}
+              style={[
+                styles.demoButton,
+                scheduleMode === 'fastDemo' && styles.demoButtonSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.demoButtonText,
+                  scheduleMode === 'fastDemo' && styles.demoButtonTextSelected,
+                ]}
+              >
+                発表用：10秒後にセット
+              </Text>
+            </Pressable>
 
             <Pressable
               accessibilityRole="button"
@@ -615,8 +794,8 @@ export default function App() {
                 <Text style={styles.metricLabel}>検知した歩数 / {STEP_THRESHOLD}</Text>
               </View>
               <View style={styles.metricCard}>
-                <Text style={styles.metricValue}>1</Text>
-                <Text style={styles.metricLabel}>分前に最終確認</Text>
+                <Text style={styles.metricValue}>{checkInLeadSeconds}</Text>
+                <Text style={styles.metricLabel}>秒前にWatch確認</Text>
               </View>
             </View>
             <Text style={styles.sensorStatus}>{pedometerStatus}</Text>
@@ -630,9 +809,9 @@ export default function App() {
               </View>
               <View style={styles.ruleDivider} />
               <View style={styles.ruleRow}>
-                <Text style={styles.ruleIconMuted}>20</Text>
+                <Text style={styles.ruleIcon}>20</Text>
                 <Text style={styles.ruleText}>
-                  20歩 → 起床候補。再入眠に備えて停止しない
+                  20歩 → 起床確定。今回のアラームを自動停止
                 </Text>
               </View>
               <View style={styles.ruleDivider} />
@@ -643,6 +822,18 @@ export default function App() {
                 </Text>
               </View>
             </View>
+
+            <Pressable
+              accessibilityRole="button"
+              disabled={isBusy}
+              onPress={() => void resetAlarm()}
+              style={({ pressed }) => [
+                styles.resetButton,
+                (isBusy || pressed) && styles.buttonDimmed,
+              ]}
+            >
+              <Text style={styles.resetButtonText}>アラームをリセット</Text>
+            </Pressable>
 
           </View>
         ) : null}
@@ -660,13 +851,24 @@ export default function App() {
             >
               <Text style={styles.stopButtonText}>起きました・停止</Text>
             </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              disabled={isBusy}
+              onPress={() => void resetAlarm()}
+              style={({ pressed }) => [
+                styles.resetButton,
+                (isBusy || pressed) && styles.buttonDimmed,
+              ]}
+            >
+              <Text style={styles.resetButtonText}>アラームをリセット</Text>
+            </Pressable>
           </View>
         ) : null}
 
         <View style={styles.safetyCard}>
           <Text style={styles.safetyTitle}>MVPの安全原則</Text>
           <Text style={styles.safetyText}>
-            「起きている」と確定できない場合は、必ず鳴らす側に倒します。通常の通知はFocus・消音・音量設定の影響を受けるため、本番用の“絶対に鳴る”保証はまだありません。
+            20歩または明示操作で起床を確認できた場合だけ停止します。画面表示中はループ音を再生し、バックグラウンドでは通知音を使います。FocusなどOS設定の影響は残ります。
           </Text>
         </View>
       </ScrollView>
@@ -836,6 +1038,51 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
+  timeCard: {
+    minHeight: 82,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: '#D6DDE7',
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+  },
+  timeCardLabel: {
+    color: '#7A879C',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  timeCardValue: {
+    marginTop: 4,
+    color: '#10213B',
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  demoButton: {
+    alignItems: 'center',
+    marginTop: 10,
+    paddingVertical: 13,
+    borderWidth: 1,
+    borderColor: '#F2B1A6',
+    borderRadius: 16,
+    backgroundColor: '#FFF3F0',
+  },
+  demoButtonSelected: {
+    borderColor: '#A13A2C',
+    backgroundColor: '#A13A2C',
+  },
+  demoButtonText: {
+    color: '#A13A2C',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  demoButtonTextSelected: {
+    color: '#FFFFFF',
+  },
   delayRow: {
     flexDirection: 'row',
     gap: 10,
@@ -971,6 +1218,21 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '900',
+  },
+  resetButton: {
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#D6DDE7',
+    backgroundColor: '#FFFFFF',
+  },
+  resetButtonText: {
+    color: '#526078',
+    fontSize: 14,
+    fontWeight: '800',
   },
   safetyCard: {
     marginTop: 30,

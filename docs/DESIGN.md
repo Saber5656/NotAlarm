@@ -2,7 +2,7 @@
 
 ## 1. 目的
 
-AlreadyUp は、アラームの直前に「起きている」と確定できたときだけメインアラームを抑止するアプリである。
+AlreadyUp は、設定時刻に実際の音を鳴らし、アラーム前に 20 歩の起床行動または本人の明示操作を確認できたときだけ、対応するメインアラームを抑止するアプリである。
 
 最優先の安全要件は次の 1 文に集約される。
 
@@ -15,9 +15,11 @@ AlreadyUp は、アラームの直前に「起きている」と確定できた�
 ### 含む
 
 - 1 件のメインアラームをローカル通知として先にスケジュールする
-- アラーム時刻の 60 秒前に起床確認通知を表示する
+- 起床時刻を時刻ピッカーで設定し、発表用には 30 秒後の短縮経路を用意する
+- 通常は最大 60 秒前、30 秒デモでは 15 秒前に起床確認通知を表示する
 - 確認通知の「起きています」アクションで、対応するメインアラームだけを停止する
-- iPhone の Pedometer で foreground 中の 20 歩を起床候補として検知する
+- iPhone の Pedometer で foreground 中の 20 歩を起床確定として検知し、対応するメインアラームだけを停止する
+- 期限到達時、foreground ではループ音、background では local notification の通知音を鳴らす
 - iPhone の actionable notification を Apple Watch に転送して操作できるようにする
 - 有効なアラーム周期を端末内に保存し、古い応答と区別する
 
@@ -38,14 +40,14 @@ HealthKit や Apple Watch の自動睡眠判定は、Watch を着けていない
 | 用語 | 意味 | アラーム停止の根拠になるか |
 |---|---|---|
 | `UNKNOWN` | 起床を確定できる情報がない | ならない |
-| `STEP_CANDIDATE` | アラーム設定後に iPhone が 20 歩を検知 | ならない |
+| `STEP_THRESHOLD_REACHED` | アラーム設定後、期限前に iPhone が 20 歩を検知 | なる |
 | `CONFIRMED_AWAKE` | 有効な確認通知で、期限前に「起きています」を明示操作 | なる |
 | `STALE` | 古い周期、別のアラーム、期限外の確認 | ならない |
 | `ERROR` | 権限、センサー、保存、応答、キャンセル等の失敗 | ならない |
 
-20 歩は「一度動いた」証拠にすぎず、その後の再睡眠を否定できない。座って作業していて歩数が増えない場合との区別にも使えないため、歩数の多寡から睡眠を推定しない。
+20 歩は睡眠そのものの推定ではなく、この MVP が採用する明確な起床行動である。19 歩以下、期限後の到達、センサー欠落・例外は停止根拠にしない。20 歩到達時も OS 上の対象通知が消えたことを確認できるまで `suppressed` にしない。
 
-`CONFIRMED_AWAKE` はアラーム直前に提示した通知への能動操作であり、MVP で唯一の正の証拠である。確認後 60 秒以内に再睡眠する残余リスクはあるが、早い時間の歩数より新鮮な証拠として採用する。
+`CONFIRMED_AWAKE` はアラーム直前に提示した通知への能動操作であり、20 歩と並ぶ正の証拠である。確認後に再睡眠する残余リスクはあるが、本人の能動操作として採用する。
 
 ## 4. 全体構成
 
@@ -60,9 +62,11 @@ flowchart LR
 
     UI --> Policy
     Policy <--> Store
-    Ped -->|"20 steps = candidate only"| Policy
+    Audio["Foreground alarm audio"]
+    Ped -->|"20 steps before due"| Policy
     Policy -->|"schedule main first"| IOS
-    Policy -->|"schedule check-in at T-60s"| IOS
+    Policy -->|"schedule check-in at T-15s / max T-60s"| IOS
+    Policy -->|"start loop at due while foreground"| Audio
     IOS --> Watch
     Watch -->|"confirm_awake action"| Policy
     Policy -->|"cancel exact main notification"| IOS
@@ -112,7 +116,7 @@ category / action identifier は固定値とし、表示文字列で判定しな
 1. 通知権限と通知カテゴリを準備する。
 2. `cycleId` と `dueAtMs` を確定する。
 3. メインアラームを OS にスケジュールし、`mainAlarmId` を得る。
-4. `dueAtMs - 60 秒` に確認通知をスケジュールし、その通知 ID を得る。
+4. 通常は最大 `dueAtMs - 60 秒`、30 秒デモでは `dueAtMs - 15 秒` に確認通知をスケジュールし、その通知 ID を得る。
 5. メイン ID と確認通知 ID を含む有効周期を保存する。
 6. Pedometer の foreground 監視を開始する。
 
@@ -123,11 +127,13 @@ category / action identifier は固定値とし、表示文字列で判定しな
 ### 7.1 20 歩を検知した場合
 
 1. 現在の周期に対する歩数を更新する。
-2. 20 歩以上になったら `STEP_CANDIDATE` として記録する。
-3. UI に起床候補であることを表示する。
-4. メインアラームはキャンセルせず、60 秒前の確認通知を待つ。
+2. 20 歩未満ではメインアラームを変更しない。
+3. 20 歩以上でも、現在周期が active かつ期限前であることを検証する。
+4. 保存済みの正本 ID を使い、メイン通知 1 件だけをキャンセルする。
+5. OS の scheduled notification 一覧で対象 ID の消失を確認できた場合だけ `suppressed` を保存する。
+6. 確認通知は best-effort で取り消し、失敗してもメイン通知の停止結果を巻き戻さない。
 
-20 歩到達直後の操作を抑止根拠にすると、アラームまでに再睡眠する時間が長くなる。したがって MVP で抑止可能な `confirm_awake` は `dueAtMs - 60 秒` にスケジュールした現在の確認通知に限定する。
+期限後、古い周期、19 歩以下、キャンセル例外、またはキャンセル結果を確認できない場合は `suppressed` に遷移せず、アラームを残す。
 
 ### 7.2 「起きています」を操作した場合
 
@@ -138,7 +144,7 @@ category / action identifier は固定値とし、表示文字列で判定しな
 3. payload の `cycleId` が現在有効な周期と一致する。
 4. payload の `mainAlarmId` が現在有効なメイン通知 ID と一致する。
 5. response の通知 ID が現在の `checkInNotificationId` と一致する。
-6. 確認時刻が `dueAtMs - 60 秒` 以降かつ `dueAtMs` より前である。
+6. 確認時刻がその周期の `checkInAtMs` 以降かつ `dueAtMs` より前である。
 7. 現在の周期がまだ `armed` または `step_candidate` である。
 
 条件を満たしたら、payload ではなく保存済みの正本 ID を使ってメイン通知 1 件だけをキャンセルする。キャンセル前後の OS の scheduled notification 一覧で対象 ID の存在と消失を検証し、成功を確認したあとに `suppressed` と `confirmedAt` を保存する。
@@ -157,8 +163,8 @@ stateDiagram-v2
     Idle --> Arming: set alarm
     Arming --> Armed: main notification scheduled
     Arming --> Idle: main scheduling failed
-    Armed --> Armed: 20 steps / unknown / no response
-    Armed --> SuppressionPending: valid confirm_awake before due
+    Armed --> Armed: fewer than 20 steps / unknown / no response
+    Armed --> SuppressionPending: 20 steps or valid confirm_awake before due
     SuppressionPending --> Suppressed: exact main cancellation succeeded
     SuppressionPending --> Armed: validation or cancellation failed
     Armed --> Ringing: due reached
@@ -168,7 +174,7 @@ stateDiagram-v2
     Dismissed --> [*]
 ```
 
-歩数の状態とアラームの状態は分離する。`STEP_CANDIDATE` が `Suppressed` への遷移を直接起こす経路は存在しない。
+20 歩到達は抑止処理の入口だが、OS 上の対象通知のキャンセル成功を確認した場合だけ `Suppressed` へ遷移する。
 
 ## 9. Watch routing matrix
 
@@ -193,16 +199,18 @@ iOS の通知は通常、iPhone と Watch の両方に同時表示されるの�
 | action response を取得できない | メインを残す |
 | 古い action response を再取得 | cycle / ID / deadline 検証で無視する |
 | 保存読み込み失敗 | メインを推測でキャンセルしない |
-| Pedometer 権限拒否・停止 | 歩数候補なし。メインを残す |
+| Pedometer 権限拒否・停止 | 20 歩を確認できないためメインを残す |
 | 確認通知の登録失敗 | メインを残し、確認不能を表示する |
 | メイン通知のキャンセル失敗 | `suppressed` にせず、メインを残す |
 | OS 時刻変更・再起動 | 現 MVP では完全未対応。メインを推測で消さない |
 
 `getLastNotificationResponse` 等で cold start 時の応答を回収しても、必ず有効周期との相関を検証する。アプリが terminated の状態で Watch の action が JavaScript まで届くことは未検証であり、本番化前の P0 Issue とする。
 
-## 11. 通知の限界
+## 11. 鳴動方式と限界
 
-本 MVP のメインアラームは通常の local notification である。したがって、次を越えた鳴動保証はない。
+期限到達時にアプリが foreground なら、`expo-audio` で端末内生成した WAV をループ再生する。`playsInSilentMode` を有効にするが、JavaScript が停止する background / terminated 状態ではこのループは継続保証できない。その場合は先に登録した通常の local notification の通知音を使う。
+
+したがって、次を越えた鳴動保証はない。
 
 - 通知権限の拒否または変更
 - iPhone の消音、通知音量、Focus、Scheduled Summary 等
@@ -216,12 +224,12 @@ iOS の通知は通常、iPhone と Watch の両方に同時表示されるの�
 | ID | 条件 | 期待結果 |
 |---|---|---|
 | POL-01 | 証拠なしで期限到達 | 鳴る |
-| POL-02 | 20 歩未満で期限到達 | 鳴る |
-| POL-03 | 20 歩以上、明示確認なし | 鳴る |
-| POL-04 | 正しい周期・確認通知 ID の `confirm_awake` を T-60 秒以降・期限前に操作 | 対象だけ抑止 |
+| POL-02 | 19 歩以下で期限到達 | 鳴る |
+| POL-03 | 現在周期で期限前に 20 歩へ到達し、対象通知の消失を検証 | 対象だけ抑止 |
+| POL-04 | 正しい周期・確認通知 ID の `confirm_awake` を確認可能時刻以降・期限前に操作 | 対象だけ抑止 |
 | POL-05 | 古い周期の `confirm_awake` | 現在のアラームは鳴る |
 | POL-06 | 別メイン ID の `confirm_awake` | 現在のアラームは鳴る |
-| POL-07 | T-60 秒より前、または別の確認通知からの応答 | 鳴る |
+| POL-07 | 確認可能時刻より前、または別の確認通知からの応答 | 鳴る |
 | POL-08 | `dueAtMs` と同時または後の応答 | 鳴る |
 | POL-09 | キャンセル API が失敗 | 鳴る側を維持 |
 | POL-10 | 前周期で確認後、新しい周期を設定 | 新周期は自動抑止されない |
@@ -234,8 +242,11 @@ iOS の通知は通常、iPhone と Watch の両方に同時表示されるの�
 
 ## 13. 公式資料
 
-- [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
-- [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
+- [Expo Notifications — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/notifications/)
+- [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
+- [Expo Audio — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/audio/)
+- [Expo FileSystem — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/filesystem/)
+- [Expo: Create a project（物理デバイスの Expo Go は SDK 54）](https://docs.expo.dev/get-started/create-a-project/)
 - [Taking advantage of notification forwarding](https://developer.apple.com/documentation/watchos-apps/taking-advantage-of-notification-forwarding)
 - [Adding actions to notifications on watchOS](https://developer.apple.com/documentation/watchos-apps/adding-actions-to-notifications-on-watchos)
 - [Apple Watch notifications](https://support.apple.com/guide/watch/notifications-apd9b833c9f3/watchos)

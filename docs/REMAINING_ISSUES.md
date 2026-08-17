@@ -128,7 +128,7 @@ MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で
 - [ ] development build が clean install から起動する
 - [ ] iPhone 上で通知権限とモーション権限を取得できる
 - [ ] iPhone ロック中に Watch へ確認 action が届く
-- [ ] 有効な確認では抑止し、20 歩だけ・無応答・失敗時にはメインが残る
+- [ ] 有効な確認または期限前の 20 歩では抑止し、19 歩以下・無応答・失敗時にはメインが残る
 - [ ] 再現可能な E2E チェックリストと evidence が保存されている
 
 ---
@@ -162,21 +162,21 @@ MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で
 
 ### 背景
 
-Expo Pedometer の live update は foreground PoC であり、iPhone ロック後やアプリ終了後の 20 歩を保証しない。一方、歩数は候補にすぎないため、欠落してもメインアラームの安全性には影響させてはならない。
+Expo Pedometer の live update は foreground PoC であり、iPhone ロック後やアプリ終了後の 20 歩を保証しない。歩数を取得できない場合は起床を確定せず、メインアラームを残す必要がある。
 
 ### スコープ
 
 - foreground / background / suspended / terminated の計測範囲を実測する
 - `getStepCountAsync` と native `CMPedometer` の利用可否を評価する
 - 再起動、日付跨ぎ、権限変更時の baseline を定義する
-- 20 歩到達時の候補表示と重複更新を定義する
+- 20 歩到達時の停止処理と重複イベントの冪等性を定義する
 
 ### 受け入れ条件
 
 - [ ] サポートする計測状態と非サポート状態が明文化されている
-- [ ] 歩数欠落・誤差・API 失敗がメイン通知の自動キャンセルにつながらない
-- [ ] 1 周期につき候補状態の更新が無制限に増えない
-- [ ] 20 歩後に再睡眠しても、明示確認なしならメインが鳴るテストがある
+- [ ] 歩数欠落・19 歩以下・API 失敗がメイン通知の自動キャンセルにつながらない
+- [ ] 1 周期につき 20 歩到達時の停止処理が重複実行されない
+- [ ] 期限前の 20 歩だけが、OS キャンセル確認後にメインを停止するテストがある
 
 ---
 
@@ -353,12 +353,12 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 ### 背景
 
-2026-08-08 時点の `npm audit --omit=dev` は、Expo SDK 57 の transitive dependency を中心に 18 件（moderate 7 / high 11、critical 0）を報告する。`npm audit fix --force` の提案は Expo 53 / React Native 0.72 への非互換な downgrade を含み、プロジェクトの SDK 57 固定と衝突するため実行していない。
+2026-08-08 時点の `npm audit --omit=dev` は、Expo SDK 54 の dependency を中心に 19 件（moderate 8 / high 11、critical 0）を報告する。自動修正候補は Expo SDK 57 への更新や React Native 0.72 への非互換な変更を含み、App Store 版 Expo Go による iPhone 実機確認という MVP 要件と衝突するため実行していない。
 
 ### スコープ
 
 - 各 advisory の到達可能性を mobile runtime / Metro・CLI・asset 処理に分けて評価する
-- Expo SDK 57 の修正版または上位 SDK への安全な更新経路を確認する
+- Expo SDK 54 の修正版、または development build を併用した上位 SDK への安全な更新経路を確認する
 - untrusted asset を Metro / `image-size` に入力する開発フローを制限する
 - 強制 downgrade や `--force` を使わず lockfile を更新する
 
@@ -367,7 +367,7 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 - [ ] high / critical advisory が 0、または非到達性と期限付き risk acceptance が記録されている
 - [ ] `npx expo-doctor` が全チェックを通過する
 - [ ] `npm test` / `npm run typecheck` / `npm run export:web` が更新後も通る
-- [ ] Expo SDK 57 から外れる場合は、versioned docs に基づく移行差分が記録されている
+- [ ] Expo SDK 54 から外れる場合は、versioned docs に基づく移行差分と実機配布方法が記録されている
 
 ---
 

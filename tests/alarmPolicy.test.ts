@@ -17,7 +17,7 @@ import {
 
 const ARMED_AT_MS = 1_000;
 const DUE_AT_MS = 100_000;
-const CHECK_IN_AT_MS = DUE_AT_MS - CHECK_IN_LEAD_MS;
+const CHECK_IN_AT_MS = getCheckInAtMs(DUE_AT_MS, ARMED_AT_MS);
 
 const activeAlarm: AlarmRecord = {
   cycleId: "cycle-current",
@@ -34,8 +34,8 @@ function explicitConfirmation(
     kind: "EXPLICIT_AWAKE_CONFIRMATION",
     cycleId: activeAlarm.cycleId,
     mainAlarmId: activeAlarm.mainAlarmId,
-    checkInNotificationId: activeAlarm.checkInNotificationId,
-    confirmedAtMs: 50_000,
+    checkInNotificationId: activeAlarm.checkInNotificationId!,
+    confirmedAtMs: 60_000,
     ...overrides,
   };
 }
@@ -43,18 +43,19 @@ function explicitConfirmation(
 test("MVP timing constants are fixed", () => {
   assert.equal(STEP_THRESHOLD, 20);
   assert.equal(CHECK_IN_LEAD_MS, 60_000);
-  assert.equal(MIN_ARM_LEAD_MS, 90_000);
-  assert.equal(getCheckInAtMs(120_000), 60_000);
+  assert.equal(MIN_ARM_LEAD_MS, 10_000);
+  assert.equal(getCheckInAtMs(120_000, 0), 60_000);
+  assert.equal(getCheckInAtMs(30_000, 0), 15_000);
 });
 
-test("20 steps is only STEP_CANDIDATE", () => {
+test("20 steps reaches the automatic suppression threshold", () => {
   assert.deepEqual(classifyStepEvidence(19, 2_000), {
     kind: "STEP_MONITORING",
     observedAtMs: 2_000,
     steps: 19,
   });
   assert.deepEqual(classifyStepEvidence(20, 2_000), {
-    kind: "STEP_CANDIDATE",
+    kind: "STEP_THRESHOLD_REACHED",
     observedAtMs: 2_000,
     steps: 20,
   });
@@ -71,17 +72,37 @@ test("invalid step samples become error evidence", () => {
   });
 });
 
-test("step evidence alone never suppresses the alarm", () => {
-  const decision = canSuppressAlarm(
-    activeAlarm,
-    classifyStepEvidence(20, 5_000),
-    50_000,
+test("step evidence below 20 never suppresses the alarm", () => {
+  assert.deepEqual(
+    canSuppressAlarm(activeAlarm, classifyStepEvidence(19, 5_000), 5_000),
+    { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" },
   );
+});
 
-  assert.deepEqual(decision, {
-    canSuppress: false,
-    reason: "NOT_EXPLICIT_CONFIRMATION",
-  });
+test("100 fresh steps authorize suppression", () => {
+  assert.deepEqual(
+    canSuppressAlarm(activeAlarm, classifyStepEvidence(20, 5_000), 5_000),
+    { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" },
+  );
+});
+
+test("stale or due-time step evidence never suppresses", () => {
+  assert.deepEqual(
+    canSuppressAlarm(
+      activeAlarm,
+      classifyStepEvidence(20, ARMED_AT_MS - 1),
+      5_000,
+    ),
+    { canSuppress: false, reason: "STALE_STEP_EVIDENCE" },
+  );
+  assert.deepEqual(
+    canSuppressAlarm(
+      activeAlarm,
+      classifyStepEvidence(20, DUE_AT_MS),
+      DUE_AT_MS,
+    ),
+    { canSuppress: false, reason: "ALARM_DUE_OR_PAST" },
+  );
 });
 
 test("unknown and error evidence never suppress the alarm", () => {
@@ -115,7 +136,7 @@ test("confirmation from a different cycle is rejected", () => {
     canSuppressAlarm(
       activeAlarm,
       explicitConfirmation({ cycleId: "cycle-old" }),
-      50_000,
+      60_000,
     ),
     { canSuppress: false, reason: "WRONG_CYCLE" },
   );
@@ -126,7 +147,7 @@ test("confirmation for a different main notification is rejected", () => {
     canSuppressAlarm(
       activeAlarm,
       explicitConfirmation({ mainAlarmId: "notification-old" }),
-      50_000,
+      60_000,
     ),
     { canSuppress: false, reason: "WRONG_MAIN_ALARM" },
   );
@@ -137,7 +158,7 @@ test("confirmation from a different check-in notification is rejected", () => {
     canSuppressAlarm(
       activeAlarm,
       explicitConfirmation({ checkInNotificationId: "check-in-early" }),
-      50_000,
+      60_000,
     ),
     { canSuppress: false, reason: "WRONG_CHECK_IN" },
   );
@@ -202,8 +223,8 @@ test("a future-dated confirmation fails closed", () => {
   assert.deepEqual(
     canSuppressAlarm(
       activeAlarm,
-      explicitConfirmation({ confirmedAtMs: 60_000 }),
-      50_000,
+      explicitConfirmation({ confirmedAtMs: 70_000 }),
+      60_000,
     ),
     { canSuppress: false, reason: "CONFIRMATION_IN_FUTURE" },
   );
@@ -224,7 +245,7 @@ test("cancellation must succeed before the alarm is considered suppressed", () =
   const accepted = canSuppressAlarm(
     activeAlarm,
     explicitConfirmation(),
-    50_000,
+    60_000,
   );
 
   assert.equal(finalizeSuppression(accepted, true), "SUPPRESSED");

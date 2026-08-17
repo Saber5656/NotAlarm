@@ -61,3 +61,7 @@ export async function loadStoredAlarm(): Promise<StoredAlarm | null> {
 export async function saveStoredAlarm(alarm: StoredAlarm): Promise<void> {
   await AsyncStorage.setItem(ACTIVE_ALARM_STORAGE_KEY, JSON.stringify(alarm));
 }
+
+export async function clearStoredAlarm(): Promise<void> {
+  await AsyncStorage.removeItem(ACTIVE_ALARM_STORAGE_KEY);
+}

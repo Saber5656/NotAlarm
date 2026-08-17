@@ -74,6 +74,11 @@ export type AwakeResponseResult =
   | { status: 'alarm_remains'; reason: string }
   | { status: 'suppressed'; alarm: StoredAlarm };
 
+export interface StepThresholdInput {
+  steps: number;
+  observedAtMs: number;
+}
+
 export async function processAwakeResponseFailSafe(
   dependencies: AwakeResponseDependencies,
   input: AwakeResponseInput,
@@ -135,6 +140,59 @@ export async function processAwakeResponseFailSafe(
     ...activeAlarm,
     phase: 'suppressed',
     confirmedAtMs: input.confirmedAtMs,
+  };
+  await dependencies.saveAlarm(suppressed);
+  return { status: 'suppressed', alarm: suppressed };
+}
+
+export async function processStepThresholdFailSafe(
+  dependencies: AwakeResponseDependencies,
+  input: StepThresholdInput,
+): Promise<AwakeResponseResult> {
+  const activeAlarm = await dependencies.loadAlarm();
+  if (
+    !activeAlarm ||
+    (activeAlarm.phase !== 'armed' && activeAlarm.phase !== 'step_candidate')
+  ) {
+    return { status: 'alarm_remains', reason: 'NO_ACTIVE_ALARM' };
+  }
+
+  const decision = canSuppressAlarm(
+    {
+      cycleId: activeAlarm.cycleId,
+      mainAlarmId: activeAlarm.mainAlarmId,
+      checkInNotificationId: activeAlarm.checkInNotificationId,
+      armedAtMs: activeAlarm.armedAtMs,
+      dueAtMs: activeAlarm.dueAtMs,
+    },
+    {
+      kind: 'STEP_THRESHOLD_REACHED',
+      steps: input.steps,
+      observedAtMs: input.observedAtMs,
+    },
+    input.observedAtMs,
+  );
+
+  if (!decision.canSuppress) {
+    return { status: 'alarm_remains', reason: decision.reason };
+  }
+
+  const cancellationSucceeded = await dependencies.cancelScheduled(
+    activeAlarm.mainAlarmId,
+  );
+  if (
+    finalizeSuppression(decision, cancellationSucceeded) !== 'SUPPRESSED'
+  ) {
+    return { status: 'alarm_remains', reason: 'CANCEL_NOT_VERIFIED' };
+  }
+
+  const suppressed: StoredAlarm = {
+    ...activeAlarm,
+    phase: 'suppressed',
+    stepCount: Math.max(activeAlarm.stepCount, input.steps),
+    stepCandidateRecorded: true,
+    stepCandidateAtMs: input.observedAtMs,
+    confirmedAtMs: input.observedAtMs,
   };
   await dependencies.saveAlarm(suppressed);
   return { status: 'suppressed', alarm: suppressed };
