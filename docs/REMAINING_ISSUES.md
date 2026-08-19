@@ -1,15 +1,15 @@
 # Remaining Issues
 
-MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で管理する。
+リリース候補版で意図的に残した作業を、GitHub Issue に転記できる粒度で管理する。
 
-現在のリポジトリには Git remote が設定されていないため、以下は GitHub 上には未作成である。remote と公開先が確定したら、各 `ALR-*` を 1 Issue として作成する。
+複数アラーム、今日だけ・毎日・平日・曜日指定の繰り返し、および 100 歩の起床判定は Issue #3 で実装した。以下は、本番アラームとして公開する前に追加検証または実装が必要な項目である。
 
 ## Priority の定義
 
 | Priority | 意味 |
 |---|---|
-| P0 | 本番アラームとして使う前、または MVP の安全主張を検証するために必須 |
-| P1 | MVP 後の信頼性・継続利用に必要 |
+| P0 | 本番アラームとして使う前、または安全主張を検証するために必須 |
+| P1 | 継続利用に必要 |
 | P2 | 機能拡張・品質向上 |
 
 ## 一覧
@@ -25,12 +25,13 @@ MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で
 | ALR-007 | P1 | アラーム周期の永続化・競合・冪等性を強化する | 古い応答で誤抑止 |
 | ALR-008 | P1 | OS 時刻変更・再起動・通知削除に対応する | 表示状態と OS 状態がずれる |
 | ALR-009 | P1 | 詳細なエラー状態と復旧 UX を実装する | 利用者が安全状態を判断できない |
-| ALR-010 | P1 | 複数アラーム・繰り返し・スヌーズを設計する | 実利用に不足 |
+| ALR-010 | P0 | 繰り返しの継続補充・編集・スヌーズを実装する | 数日後に通知予約が途切れる／実利用に不足 |
 | ALR-011 | P1 | プライバシー・ログ・観測性を設計する | 不具合を再現できない／過剰収集 |
 | ALR-012 | P2 | HealthKit / watchOS 専用アプリを評価する | 将来の精度・UX 改善余地 |
 | ALR-013 | P2 | アクセシビリティと国際化を行う | 操作できない利用者が残る |
 | ALR-014 | P1 | Expo / React Native の依存 advisory を解消する | 開発・bundle 処理時の既知脆弱性が残る |
 | ALR-015 | P2 | App controller・sensor・UIを分割する | UI変更が安全中核へ波及しやすい |
+| ALR-016 | P0 | 本番用アプリ識別子とストア素材を確定する | prototype 識別子のまま別アプリとして配布される |
 
 ---
 
@@ -128,7 +129,7 @@ MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で
 - [ ] development build が clean install から起動する
 - [ ] iPhone 上で通知権限とモーション権限を取得できる
 - [ ] iPhone ロック中に Watch へ確認 action が届く
-- [ ] 有効な確認または期限前の 20 歩では抑止し、19 歩以下・無応答・失敗時にはメインが残る
+- [ ] 有効な確認または期限前の 100 歩では抑止し、99 歩以下・無応答・失敗時にはメインが残る
 - [ ] 再現可能な E2E チェックリストと evidence が保存されている
 
 ---
@@ -143,7 +144,7 @@ MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で
 
 ### スコープ
 
-- [設計上の routing matrix](DESIGN.md#watch-routing-matrix) の各セルを実機検証する
+- iPhone / Watch の配送条件を routing matrix に整理し、各セルを実機検証する
 - 通知ミラーリング無効、Bluetooth 切断、Watch 電源断、Focus 同期を含める
 - action が iPhone / Watch のどちらから押されたか区別できるか確認する
 
@@ -162,21 +163,23 @@ MVP で意図的に残した作業を、GitHub Issue に転記できる粒度で
 
 ### 背景
 
-Expo Pedometer の live update は foreground PoC であり、iPhone ロック後やアプリ終了後の 20 歩を保証しない。歩数を取得できない場合は起床を確定せず、メインアラームを残す必要がある。
+Expo Pedometer の live update は foreground 向けであり、iPhone ロック後やアプリ終了後の 100 歩を保証しない。歩数を取得できない場合は起床を確定せず、メインアラームを残す必要がある。
 
 ### スコープ
 
 - foreground / background / suspended / terminated の計測範囲を実測する
 - `getStepCountAsync` と native `CMPedometer` の利用可否を評価する
 - 再起動、日付跨ぎ、権限変更時の baseline を定義する
-- 20 歩到達時の停止処理と重複イベントの冪等性を定義する
+- 通常の日中歩行が翌朝の周期へ混入しない監視開始時刻とリセット条件を定義する
+- 100 歩到達時の停止処理と重複イベントの冪等性を定義する
 
 ### 受け入れ条件
 
 - [ ] サポートする計測状態と非サポート状態が明文化されている
-- [ ] 歩数欠落・19 歩以下・API 失敗がメイン通知の自動キャンセルにつながらない
-- [ ] 1 周期につき 20 歩到達時の停止処理が重複実行されない
-- [ ] 期限前の 20 歩だけが、OS キャンセル確認後にメインを停止するテストがある
+- [ ] 前日の日中歩行や別周期の歩数が、次のアラーム停止根拠にならない
+- [ ] 歩数欠落・99 歩以下・API 失敗がメイン通知の自動キャンセルにつながらない
+- [ ] 1 周期につき 100 歩到達時の停止処理が重複実行されない
+- [ ] 期限前の 100 歩だけが、OS キャンセル確認後にメインを停止するテストがある
 
 ---
 
@@ -234,7 +237,7 @@ Expo Pedometer の live update は foreground PoC であり、iPhone ロック�
 
 ### 背景
 
-MVP では fail-safe の核を優先し、細かなエラーハンドリングを後続に分離した。単なる `console.error` では、利用者がアラームの安全状態を判断できない。
+現状は fail-safe の核を優先し、細かなエラーハンドリングを後続に分離している。単なる `console.error` では、利用者がアラームの安全状態を判断できない。
 
 ### スコープ
 
@@ -252,26 +255,27 @@ MVP では fail-safe の核を優先し、細かなエラーハンドリング�
 
 ---
 
-## ALR-010: 複数アラーム・繰り返し・スヌーズを設計する
+## ALR-010: 繰り返しの継続補充・編集・スヌーズを実装する
 
-**Priority:** P1
+**Priority:** P0
 
 ### 背景
 
-MVP は 1 件の単発アラームのみを対象とする。複数化すると action と対象通知の相関、曜日、再設定、スヌーズの安全規則が必要になる。
+複数アラームと曜日繰り返しは実装済みで、通知上限を守るため各アラームの直近 3 回分を one-shot 通知として予約する。アプリを長期間起動しない場合の継続補充、既存アラームの編集、スヌーズは未実装である。
 
 ### スコープ
 
-- 複数周期の ID・保存モデルを設計する
-- 曜日繰り返し、翌日繰り越し、スヌーズを定義する
-- 確認が他アラームへ波及しないことを保証する
+- background/native 経路で直近 3 回分を期限前に継続補充する
+- 端末再起動・タイムゾーン変更・通知削除時に保存状態と OS 通知を照合する
+- 時刻・繰り返し条件を安全に編集する
+- スヌーズの通知 ID、回数、期限、起床確認との優先順位を定義する
 
 ### 受け入れ条件
 
-- [ ] 1 回の確認が対応する 1 アラームだけを抑止する
-- [ ] 翌日・別曜日の確認状態が引き継がれない
+- [ ] アプリを 30 日間起動しなくても、有効な繰り返しアラームの通知が途切れない
+- [ ] 編集前の不要な通知だけを削除し、編集後の直近周期が再予約される
 - [ ] スヌーズ後も「不明なら鳴る」が維持される
-- [ ] 複数 notification の上限と cleanup 方針がある
+- [ ] 予約通知数が iOS の上限内に保たれ、上限超過時は成功表示しない
 
 ---
 
@@ -353,7 +357,7 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 ### 背景
 
-2026-08-08 時点の `npm audit --omit=dev` は、Expo SDK 54 の dependency を中心に 19 件（moderate 8 / high 11、critical 0）を報告する。自動修正候補は Expo SDK 57 への更新や React Native 0.72 への非互換な変更を含み、App Store 版 Expo Go による iPhone 実機確認という MVP 要件と衝突するため実行していない。
+2026-08-20 時点の `npm audit --omit=dev` は、Expo SDK 54 の dependency を中心に 17 件（moderate 8 / high 9、critical 0）を報告する。自動修正候補は Expo SDK 57 への更新を含み、App Store 版 Expo Go による iPhone 実機確認という現行要件と衝突するため実行していない。
 
 ### スコープ
 
@@ -377,7 +381,7 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 ### 背景
 
-安全判定と通知順序は純粋な policy / orchestrator に分離済みだが、`App.tsx` には通知listener、Pedometer lifecycle、画面状態、表示component、stylesが集中している。MVPの即時安全欠陥ではないが、将来のUI変更とライフサイクル変更の影響範囲が広い。
+安全判定と通知順序は純粋な policy / orchestrator に分離済みだが、`App.tsx` には通知listener、Pedometer lifecycle、画面状態、表示component、stylesが集中している。即時の安全欠陥ではないが、将来のUI変更とライフサイクル変更の影響範囲が広い。
 
 ### スコープ
 
@@ -390,5 +394,29 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 - [ ] 通知response、Pedometer、UI renderingの責務が別moduleになっている
 - [ ] `alarmPolicy` / `alarmOrchestrator` にReact Native依存が入らない
-- [ ] 現在の33テスト相当以上が通過する
+- [ ] 現在の 54 テスト相当以上が通過する
 - [ ] armed / step candidate / suppressed / ringingの画面回帰を確認できる
+
+---
+
+## ALR-016: 本番用アプリ識別子とストア素材を確定する
+
+**Priority:** P0
+
+### 背景
+
+現行の iOS bundle identifier と Android package は `app.alreadyup.prototype` である。既存インストールとの同一性、署名、ストア登録、deep link、通知権限の引き継ぎに影響するため、本 task では自己判断で変更していない。
+
+### スコープ
+
+- 正式な bundle identifier / Android package / display name / slug を確定する
+- production icon、adaptive icon、splash、privacy policy、support URL、ストア説明を用意する
+- development / preview / production の識別子と配布経路を分離する
+- identifier 変更時の既存ローカルデータ・通知・権限の移行方針を決める
+
+### 受け入れ条件
+
+- [ ] 人間が本番識別子と所有主体を承認している
+- [ ] iOS / Android の署名・ストア登録と一致する
+- [ ] prototype 識別子や仮素材が production build に含まれない
+- [ ] clean install と upgrade の両経路で通知・モーション権限を確認できる
