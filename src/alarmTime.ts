@@ -1,6 +1,3 @@
-export const DEMO_DELAY_MS = 30_000;
-export const FAST_DEMO_DELAY_MS = 10_000;
-
 export function getNextAlarmAtMs(
   nowMs: number,
   hour: number,
@@ -24,18 +21,4 @@ export function getNextAlarmAtMs(
     candidate.setDate(candidate.getDate() + 1);
   }
   return candidate.getTime();
-}
-
-export function getDemoAlarmAtMs(nowMs: number): number {
-  if (!Number.isFinite(nowMs)) {
-    throw new Error('現在時刻を取得できません。');
-  }
-  return nowMs + DEMO_DELAY_MS;
-}
-
-export function getFastDemoAlarmAtMs(nowMs: number): number {
-  if (!Number.isFinite(nowMs)) {
-    throw new Error('現在時刻を取得できません。');
-  }
-  return nowMs + FAST_DEMO_DELAY_MS;
 }

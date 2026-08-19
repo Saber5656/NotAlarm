@@ -40,24 +40,24 @@ function explicitConfirmation(
   };
 }
 
-test("MVP timing constants are fixed", () => {
-  assert.equal(STEP_THRESHOLD, 20);
+test("alarm timing and wake thresholds are fixed", () => {
+  assert.equal(STEP_THRESHOLD, 100);
   assert.equal(CHECK_IN_LEAD_MS, 60_000);
   assert.equal(MIN_ARM_LEAD_MS, 10_000);
   assert.equal(getCheckInAtMs(120_000, 0), 60_000);
   assert.equal(getCheckInAtMs(30_000, 0), 15_000);
 });
 
-test("20 steps reaches the automatic suppression threshold", () => {
-  assert.deepEqual(classifyStepEvidence(19, 2_000), {
+test("100 steps reaches the automatic suppression threshold", () => {
+  assert.deepEqual(classifyStepEvidence(99, 2_000), {
     kind: "STEP_MONITORING",
     observedAtMs: 2_000,
-    steps: 19,
+    steps: 99,
   });
-  assert.deepEqual(classifyStepEvidence(20, 2_000), {
+  assert.deepEqual(classifyStepEvidence(100, 2_000), {
     kind: "STEP_THRESHOLD_REACHED",
     observedAtMs: 2_000,
-    steps: 20,
+    steps: 100,
   });
 });
 
@@ -72,16 +72,16 @@ test("invalid step samples become error evidence", () => {
   });
 });
 
-test("step evidence below 20 never suppresses the alarm", () => {
+test("step evidence below 100 never suppresses the alarm", () => {
   assert.deepEqual(
-    canSuppressAlarm(activeAlarm, classifyStepEvidence(19, 5_000), 5_000),
+    canSuppressAlarm(activeAlarm, classifyStepEvidence(99, 5_000), 5_000),
     { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" },
   );
 });
 
 test("100 fresh steps authorize suppression", () => {
   assert.deepEqual(
-    canSuppressAlarm(activeAlarm, classifyStepEvidence(20, 5_000), 5_000),
+    canSuppressAlarm(activeAlarm, classifyStepEvidence(100, 5_000), 5_000),
     { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" },
   );
 });
@@ -90,7 +90,7 @@ test("stale or due-time step evidence never suppresses", () => {
   assert.deepEqual(
     canSuppressAlarm(
       activeAlarm,
-      classifyStepEvidence(20, ARMED_AT_MS - 1),
+      classifyStepEvidence(100, ARMED_AT_MS - 1),
       5_000,
     ),
     { canSuppress: false, reason: "STALE_STEP_EVIDENCE" },
@@ -98,7 +98,7 @@ test("stale or due-time step evidence never suppresses", () => {
   assert.deepEqual(
     canSuppressAlarm(
       activeAlarm,
-      classifyStepEvidence(20, DUE_AT_MS),
+      classifyStepEvidence(100, DUE_AT_MS),
       DUE_AT_MS,
     ),
     { canSuppress: false, reason: "ALARM_DUE_OR_PAST" },

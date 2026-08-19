@@ -6,8 +6,13 @@ import { canSuppressAlarm, finalizeSuppression } from './alarmPolicy';
 import type { StoredAlarm } from './alarmStorage';
 
 export interface AlarmSchedulingGateway {
-  scheduleMain(input: { cycleId: string; dueAtMs: number }): Promise<string>;
+  scheduleMain(input: {
+    alarmId: string;
+    cycleId: string;
+    dueAtMs: number;
+  }): Promise<string>;
   scheduleCheckIn(input: {
+    alarmId: string;
     cycleId: string;
     mainAlarmId: string;
     checkInAtMs: number;
@@ -23,15 +28,22 @@ export interface ScheduledAlarmNotifications {
 
 export async function scheduleAlarmNotificationsFailSafe(
   gateway: AlarmSchedulingGateway,
-  input: { cycleId: string; dueAtMs: number; checkInAtMs: number },
+  input: {
+    alarmId: string;
+    cycleId: string;
+    dueAtMs: number;
+    checkInAtMs: number;
+  },
 ): Promise<ScheduledAlarmNotifications> {
   const mainAlarmId = await gateway.scheduleMain({
+    alarmId: input.alarmId,
     cycleId: input.cycleId,
     dueAtMs: input.dueAtMs,
   });
 
   try {
     const checkInNotificationId = await gateway.scheduleCheckIn({
+      alarmId: input.alarmId,
       cycleId: input.cycleId,
       mainAlarmId,
       checkInAtMs: input.checkInAtMs,

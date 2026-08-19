@@ -4,15 +4,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  DEMO_DELAY_MS,
-  getDemoAlarmAtMs,
   getNextAlarmAtMs,
 } from '../src/alarmTime';
-
-test('demo alarm is exactly 30 seconds later', () => {
-  assert.equal(DEMO_DELAY_MS, 30_000);
-  assert.equal(getDemoAlarmAtMs(1_000), 31_000);
-});
 
 test('future clock time resolves to today', () => {
   const now = new Date(2026, 7, 8, 6, 30, 45).getTime();

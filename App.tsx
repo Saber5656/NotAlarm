@@ -1,50 +1,57 @@
-import { StatusBar } from 'expo-status-bar';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Notifications from 'expo-notifications';
 import { Pedometer } from 'expo-sensors';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
 
 import {
-  MIN_ARM_LEAD_MS,
-  STEP_THRESHOLD,
-  classifyStepEvidence,
-  getCheckInAtMs,
-} from './src/alarmPolicy';
+  getNextMonitoringCycle,
+  getRingingCycle,
+  fillAlarmDefinitionSchedule,
+} from './src/alarmScheduling';
 import {
-  CONFIRM_AWAKE_ACTION,
-  MAIN_ALARM_KIND,
-} from './src/alarmContracts';
+  MAX_ALARM_COUNT,
+  formatRepeatLabel,
+  getNextAlarmTime,
+  makeAlarmRepeat,
+  type RepeatKind,
+  type Weekday,
+} from './src/alarmSchedule';
 import {
   processAwakeResponseFailSafe,
   processStepThresholdFailSafe,
-  scheduleAlarmNotificationsFailSafe,
 } from './src/alarmOrchestrator';
+import {
+  MIN_ARM_LEAD_MS,
+  STEP_THRESHOLD,
+  classifyStepEvidence,
+} from './src/alarmPolicy';
 import {
   startForegroundAlarmSound,
   stopForegroundAlarmSound,
 } from './src/alarmSound';
 import {
-  getDemoAlarmAtMs,
-  getFastDemoAlarmAtMs,
-  getNextAlarmAtMs,
-} from './src/alarmTime';
-import {
-  clearStoredAlarm,
   type StoredAlarm,
-  loadStoredAlarm,
+  type StoredAlarmDefinition,
+  loadStoredAlarmByCycleId,
+  markDueCyclesRinging,
+  mutateAlarmDefinitions,
   saveStoredAlarm,
 } from './src/alarmStorage';
 import {
+  cancelNotificationIfPresent,
   cancelScheduledNotification,
   dismissDeliveredNotification,
   installForegroundNotificationHandler,
@@ -53,10 +60,12 @@ import {
   scheduleCheckInNotification,
   scheduleMainAlarmNotification,
 } from './src/notificationService';
+import {
+  CONFIRM_AWAKE_ACTION,
+  MAIN_ALARM_KIND,
+} from './src/alarmContracts';
 
 installForegroundNotificationHandler();
-
-type ScheduleMode = 'clock' | 'demo' | 'fastDemo';
 
 type NoticeTone = 'neutral' | 'success' | 'warning' | 'danger';
 
@@ -65,113 +74,271 @@ interface Notice {
   text: string;
 }
 
-function makeCycleId(): string {
-  return `cycle-${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 8)}`;
-}
+const REPEAT_OPTIONS: Array<{ kind: RepeatKind; label: string }> = [
+  { kind: 'today', label: '今日だけ' },
+  { kind: 'daily', label: '毎日' },
+  { kind: 'weekdays', label: '平日' },
+  { kind: 'custom', label: '曜日指定' },
+];
 
-function formatClock(timestamp: number): string {
-  return new Intl.DateTimeFormat('ja-JP', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date(timestamp));
+const WEEKDAY_OPTIONS: Array<{ value: Weekday; label: string }> = [
+  { value: 1, label: '月' },
+  { value: 2, label: '火' },
+  { value: 3, label: '水' },
+  { value: 4, label: '木' },
+  { value: 5, label: '金' },
+  { value: 6, label: '土' },
+  { value: 0, label: '日' },
+];
+
+const schedulingGateway = {
+  scheduleMain: scheduleMainAlarmNotification,
+  scheduleCheckIn: scheduleCheckInNotification,
+};
+
+function makeAlarmId(): string {
+  return `alarm-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
 }
 
 function defaultWakeTime(): Date {
-  const next = new Date();
-  next.setHours(7, 0, 0, 0);
-  if (next.getTime() <= Date.now()) {
-    next.setDate(next.getDate() + 1);
-  }
-  return next;
+  const wakeTime = new Date();
+  wakeTime.setHours(7, 0, 0, 0);
+  return wakeTime;
+}
+
+function formatAlarmTime(hour: number, minute: number): string {
+  return `${hour.toString().padStart(2, '0')}:${minute
+    .toString()
+    .padStart(2, '0')}`;
+}
+
+function formatNextDate(timestampMs: number): string {
+  return new Intl.DateTimeFormat('ja-JP', {
+    month: 'numeric',
+    day: 'numeric',
+    weekday: 'short',
+  }).format(new Date(timestampMs));
 }
 
 function formatCountdown(milliseconds: number): string {
   if (milliseconds <= 0) {
-    return '時刻になりました';
+    return 'まもなく鳴ります';
   }
 
-  const totalSeconds = Math.ceil(milliseconds / 1_000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}分${seconds.toString().padStart(2, '0')}秒後`;
+  const totalMinutes = Math.max(1, Math.ceil(milliseconds / 60_000));
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+
+  if (days > 0) {
+    return `${days}日${hours}時間後`;
+  }
+  if (hours > 0) {
+    return `${hours}時間${minutes > 0 ? `${minutes}分` : ''}後`;
+  }
+  return `${minutes}分後`;
 }
 
-function isMonitoring(alarm: StoredAlarm | null): boolean {
-  return alarm?.phase === 'armed' || alarm?.phase === 'step_candidate';
+function isMonitoring(cycle: StoredAlarm): boolean {
+  return cycle.phase === 'armed' || cycle.phase === 'step_candidate';
+}
+
+function nextCycleForDefinition(
+  definition: StoredAlarmDefinition,
+  nowMs: number,
+): StoredAlarm | null {
+  return (
+    definition.cycles
+      .filter((cycle) => isMonitoring(cycle) && cycle.dueAtMs > nowMs)
+      .sort((left, right) => left.dueAtMs - right.dueAtMs)[0] ?? null
+  );
+}
+
+async function fillEnabledSchedules(
+  alarms: StoredAlarmDefinition[],
+  nowMs: number,
+): Promise<{ alarms: StoredAlarmDefinition[]; warnings: string[] }> {
+  const next: StoredAlarmDefinition[] = [];
+  const warnings: string[] = [];
+
+  for (const alarm of alarms) {
+    if (!alarm.enabled) {
+      next.push(alarm);
+      continue;
+    }
+
+    try {
+      const filled = await fillAlarmDefinitionSchedule(
+        alarm,
+        nowMs,
+        schedulingGateway,
+      );
+      next.push(filled.definition);
+      warnings.push(...filled.warnings);
+    } catch (error) {
+      next.push(alarm);
+      warnings.push(
+        error instanceof Error
+          ? `${formatAlarmTime(alarm.hour, alarm.minute)}: ${error.message}`
+          : `${formatAlarmTime(alarm.hour, alarm.minute)}の通知を予約できませんでした。`,
+      );
+    }
+  }
+
+  return { alarms: next, warnings };
+}
+
+async function cancelDefinitionNotifications(
+  definition: StoredAlarmDefinition,
+): Promise<void> {
+  for (const cycle of definition.cycles) {
+    await cancelNotificationIfPresent(cycle.checkInNotificationId);
+    await cancelNotificationIfPresent(cycle.mainAlarmId);
+    await dismissDeliveredNotification(cycle.checkInNotificationId);
+    await dismissDeliveredNotification(cycle.mainAlarmId);
+  }
 }
 
 export default function App() {
-  const [alarm, setAlarm] = useState<StoredAlarm | null>(null);
+  const [alarms, setAlarms] = useState<StoredAlarmDefinition[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
-  const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('clock');
+  const [isComposerOpen, setIsComposerOpen] = useState(false);
   const [selectedTime, setSelectedTime] = useState(defaultWakeTime);
+  const [repeatKind, setRepeatKind] = useState<RepeatKind>('weekdays');
+  const [customWeekdays, setCustomWeekdays] = useState<Weekday[]>([1, 2, 3, 4, 5]);
   const [nowMs, setNowMs] = useState(Date.now());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [pedometerStatus, setPedometerStatus] = useState(
-    Platform.OS === 'web' ? '実機のみ対応' : '待機中',
+    Platform.OS === 'web' ? '実機のみ対応' : '次のアラームを待機中',
   );
 
-  const alarmRef = useRef<StoredAlarm | null>(null);
+  const alarmsRef = useRef<StoredAlarmDefinition[]>([]);
   const responseInFlightRef = useRef<string | null>(null);
   const stepSuppressionInFlightRef = useRef(false);
+  const dueTransitionInFlightRef = useRef(false);
   const stepOffsetRef = useRef(0);
 
-  const setCurrentAlarm = useCallback((next: StoredAlarm | null) => {
-    alarmRef.current = next;
-    setAlarm(next);
+  const setCurrentAlarms = useCallback((next: StoredAlarmDefinition[]) => {
+    alarmsRef.current = next;
+    setAlarms(next);
   }, []);
 
-  const persistCurrentAlarm = useCallback(
-    async (next: StoredAlarm): Promise<void> => {
-      setCurrentAlarm(next);
-      await saveStoredAlarm(next);
+  const refreshAfterCycleCompletion = useCallback(
+    async (completedCycle: StoredAlarm): Promise<void> => {
+      const now = Date.now();
+      const warnings: string[] = [];
+      const next = await mutateAlarmDefinitions(async (current) => {
+        const updated: StoredAlarmDefinition[] = [];
+
+        for (const definition of current) {
+          if (definition.id !== completedCycle.alarmId) {
+            updated.push(definition);
+            continue;
+          }
+
+          const base =
+            definition.repeat.kind === 'today'
+              ? { ...definition, enabled: false }
+              : definition;
+          if (!base.enabled) {
+            updated.push(base);
+            continue;
+          }
+
+          const filled = await fillAlarmDefinitionSchedule(
+            base,
+            now,
+            schedulingGateway,
+          );
+          updated.push(filled.definition);
+          warnings.push(...filled.warnings);
+        }
+
+        return updated;
+      });
+      setCurrentAlarms(next);
+      if (warnings.length > 0) {
+        setNotice({
+          tone: 'warning',
+          text: '次回分の一部を予約できませんでした。アプリを開いて状態を確認してください。',
+        });
+      }
     },
-    [setCurrentAlarm],
+    [setCurrentAlarms],
   );
 
   useEffect(() => {
     let mounted = true;
 
-    void loadStoredAlarm()
-      .then(async (stored) => {
-        if (!mounted || !stored) {
-          return;
+    void (async () => {
+      try {
+        let restored = await markDueCyclesRinging(Date.now());
+
+        if (
+          Platform.OS !== 'web' &&
+          restored.some((definition) => definition.enabled)
+        ) {
+          try {
+            await prepareNotifications();
+            const fillWarnings: string[] = [];
+            restored = await mutateAlarmDefinitions(async (current) => {
+              const filled = await fillEnabledSchedules(current, Date.now());
+              fillWarnings.push(...filled.warnings);
+              return filled.alarms;
+            });
+            if (fillWarnings.length > 0 && mounted) {
+              setNotice({
+                tone: 'warning',
+                text: '一部の通知を再予約できませんでした。各アラームの状態を確認してください。',
+              });
+            }
+          } catch (error) {
+            if (mounted) {
+              setNotice({
+                tone: 'warning',
+                text:
+                  error instanceof Error
+                    ? error.message
+                    : '通知状態を更新できませんでした。',
+              });
+            }
+          }
         }
 
-        if (isMonitoring(stored) && Date.now() >= stored.dueAtMs) {
-          const ringing = { ...stored, phase: 'ringing' as const };
-          setCurrentAlarm(ringing);
-          await saveStoredAlarm(ringing);
-          return;
+        if (mounted) {
+          setCurrentAlarms(restored);
+          setIsComposerOpen(restored.length === 0);
         }
-
-        setCurrentAlarm(stored);
-      })
-      .catch(() => {
+      } catch {
         if (mounted) {
           setNotice({
-            tone: 'warning',
-            text: '保存状態を読めませんでした。既に予約済みの通知は解除していません。',
+            tone: 'danger',
+            text: '保存済みのアラームを読み取れませんでした。予約済み通知は解除していません。',
           });
         }
-      })
-      .finally(() => {
+      } finally {
         if (mounted) {
           setIsLoaded(true);
         }
-      });
+      }
+    })();
 
     return () => {
       mounted = false;
     };
-  }, [setCurrentAlarm]);
+  }, [setCurrentAlarms]);
+
+  const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
+  const monitoringCycle = useMemo(
+    () => (ringingCycle ? null : getNextMonitoringCycle(alarms, nowMs)),
+    [alarms, nowMs, ringingCycle],
+  );
 
   useEffect(() => {
-    if (alarm?.phase !== 'ringing') {
+    if (!ringingCycle) {
       stopForegroundAlarmSound();
       return;
     }
@@ -179,12 +346,11 @@ export default function App() {
     void startForegroundAlarmSound().catch(() => {
       setNotice({
         tone: 'danger',
-        text: '端末内アラーム音を開始できませんでした。通知音と画面で確認してください。',
+        text: '端末内のアラーム音を開始できませんでした。通知音と画面で確認してください。',
       });
     });
-
     return stopForegroundAlarmSound;
-  }, [alarm?.phase]);
+  }, [ringingCycle?.cycleId]);
 
   const handleAwakeResponse = useCallback(
     async (response: Notifications.NotificationResponse) => {
@@ -194,19 +360,24 @@ export default function App() {
 
       const data = readAlarmNotificationData(response);
       const responseKey = `${data?.cycleId ?? 'invalid'}:${
-        data?.mainAlarmId ?? 'invalid'
-      }:${response.notification.request.identifier}`;
+        response.notification.request.identifier
+      }`;
       if (responseInFlightRef.current === responseKey) {
         return;
       }
       responseInFlightRef.current = responseKey;
 
       try {
-        const confirmedAtMs = Date.now();
+        const cycleId = data?.cycleId;
         const result = await processAwakeResponseFailSafe(
           {
-            loadAlarm: loadStoredAlarm,
-            saveAlarm: saveStoredAlarm,
+            loadAlarm: () =>
+              typeof cycleId === 'string'
+                ? loadStoredAlarmByCycleId(cycleId)
+                : Promise.resolve(null),
+            saveAlarm: async (cycle) => {
+              await saveStoredAlarm(cycle);
+            },
             cancelScheduled: cancelScheduledNotification,
           },
           {
@@ -216,42 +387,40 @@ export default function App() {
             mainAlarmId: data?.mainAlarmId,
             checkInNotificationId:
               response.notification.request.identifier,
-            confirmedAtMs,
+            confirmedAtMs: Date.now(),
           },
         );
 
         if (result.status === 'ignored') {
           return;
         }
-
         if (result.status === 'alarm_remains') {
           setNotice({
-            tone:
-              result.reason === 'CANCEL_NOT_VERIFIED' ? 'danger' : 'warning',
+            tone: result.reason === 'CANCEL_NOT_VERIFIED' ? 'danger' : 'warning',
             text:
               result.reason === 'CANCEL_NOT_VERIFIED'
-                ? 'メインアラームの停止を確認できませんでした。鳴る前提で扱ってください。'
-                : `安全条件を満たさない確認（${result.reason}）のため、アラームは鳴ります。`,
+                ? 'アラーム停止を確認できませんでした。鳴る前提で扱ってください。'
+                : 'この確認は現在のアラーム周期と一致しないため、アラームを維持します。',
           });
           return;
         }
 
-        setCurrentAlarm(result.alarm);
-        void cancelScheduledNotification(result.alarm.checkInNotificationId);
+        await cancelNotificationIfPresent(result.alarm.checkInNotificationId);
+        await refreshAfterCycleCompletion(result.alarm);
         setNotice({
           tone: 'success',
-          text: '「起きています」を確認しました。今回のアラームだけ停止しました。',
+          text: '起床を確認しました。この時刻のアラームだけ停止しました。',
         });
       } catch {
         setNotice({
           tone: 'danger',
-          text: '起床確認の処理に失敗しました。安全のためアラームは鳴る前提です。',
+          text: '起床確認の処理に失敗しました。安全のためアラームは維持します。',
         });
       } finally {
         responseInFlightRef.current = null;
       }
     },
-    [setCurrentAlarm],
+    [refreshAfterCycleCompletion],
   );
 
   useEffect(() => {
@@ -263,25 +432,31 @@ export default function App() {
       Notifications.addNotificationResponseReceivedListener((response) => {
         void handleAwakeResponse(response);
       });
-
     const receivedSubscription = Notifications.addNotificationReceivedListener(
       (notification) => {
         const data = notification.request.content.data;
-        const current = alarmRef.current;
-
         if (
           data?.kind !== MAIN_ALARM_KIND ||
-          typeof data.cycleId !== 'string' ||
-          !current ||
-          current.cycleId !== data.cycleId ||
-          !isMonitoring(current)
+          typeof data.cycleId !== 'string'
         ) {
           return;
         }
 
-        const ringing = { ...current, phase: 'ringing' as const };
-        setCurrentAlarm(ringing);
-        void saveStoredAlarm(ringing);
+        void loadStoredAlarmByCycleId(data.cycleId)
+          .then(async (cycle) => {
+            if (!cycle || !isMonitoring(cycle)) {
+              return;
+            }
+            const updated = { ...cycle, phase: 'ringing' as const };
+            const next = await saveStoredAlarm(updated);
+            setCurrentAlarms(next);
+          })
+          .catch(() => {
+            setNotice({
+              tone: 'danger',
+              text: '鳴動中のアラーム状態を保存できませんでした。',
+            });
+          });
       },
     );
 
@@ -296,36 +471,47 @@ export default function App() {
       responseSubscription.remove();
       receivedSubscription.remove();
     };
-  }, [handleAwakeResponse, isLoaded, setCurrentAlarm]);
+  }, [handleAwakeResponse, isLoaded, setCurrentAlarms]);
 
   useEffect(() => {
     const interval = setInterval(() => {
       const tick = Date.now();
       setNowMs(tick);
 
-      const current = alarmRef.current;
-      if (current && isMonitoring(current) && tick >= current.dueAtMs) {
-        const ringing = { ...current, phase: 'ringing' as const };
-        setCurrentAlarm(ringing);
-        void saveStoredAlarm(ringing);
+      const hasDueCycle = alarmsRef.current.some((definition) =>
+        definition.cycles.some(
+          (cycle) => isMonitoring(cycle) && cycle.dueAtMs <= tick,
+        ),
+      );
+      if (!hasDueCycle || dueTransitionInFlightRef.current) {
+        return;
       }
+
+      dueTransitionInFlightRef.current = true;
+      void markDueCyclesRinging(tick)
+        .then(setCurrentAlarms)
+        .catch(() => {
+          setNotice({
+            tone: 'danger',
+            text: 'アラーム時刻になりましたが、状態更新に失敗しました。',
+          });
+        })
+        .finally(() => {
+          dueTransitionInFlightRef.current = false;
+        });
     }, 1_000);
 
     return () => clearInterval(interval);
-  }, [setCurrentAlarm]);
+  }, [setCurrentAlarms]);
 
   useEffect(() => {
-    if (
-      Platform.OS === 'web' ||
-      !isMonitoring(alarm) ||
-      !alarm?.cycleId
-    ) {
+    if (Platform.OS === 'web' || !monitoringCycle) {
       return;
     }
 
     let disposed = false;
     let subscription: ReturnType<typeof Pedometer.watchStepCount> | undefined;
-    stepOffsetRef.current = alarm.stepCount;
+    stepOffsetRef.current = monitoringCycle.stepCount;
 
     void (async () => {
       try {
@@ -341,15 +527,20 @@ export default function App() {
           return;
         }
 
-        setPedometerStatus('計測中（アプリ表示中のみ）');
+        setPedometerStatus('100歩まで計測中（アプリ表示中のみ）');
         subscription = Pedometer.watchStepCount(({ steps }) => {
-          const current = alarmRef.current;
-          if (!current || !isMonitoring(current) || Date.now() >= current.dueAtMs) {
+          const current = getNextMonitoringCycle(
+            alarmsRef.current,
+            Date.now(),
+          );
+          if (!current || current.cycleId !== monitoringCycle.cycleId) {
             return;
           }
 
-          const totalSteps = stepOffsetRef.current + steps;
-          const evidence = classifyStepEvidence(totalSteps, Date.now());
+          const evidence = classifyStepEvidence(
+            stepOffsetRef.current + steps,
+            Date.now(),
+          );
           if (evidence.kind === 'ERROR') {
             setPedometerStatus('歩数データ異常（アラームは維持）');
             return;
@@ -363,8 +554,10 @@ export default function App() {
 
             void processStepThresholdFailSafe(
               {
-                loadAlarm: loadStoredAlarm,
-                saveAlarm: saveStoredAlarm,
+                loadAlarm: () => loadStoredAlarmByCycleId(current.cycleId),
+                saveAlarm: async (cycle) => {
+                  await saveStoredAlarm(cycle);
+                },
                 cancelScheduled: cancelScheduledNotification,
               },
               {
@@ -372,35 +565,32 @@ export default function App() {
                 observedAtMs: evidence.observedAtMs,
               },
             )
-              .then((result) => {
+              .then(async (result) => {
                 if (result.status === 'suppressed') {
-                  setCurrentAlarm(result.alarm);
-                  void cancelScheduledNotification(
+                  await cancelNotificationIfPresent(
                     result.alarm.checkInNotificationId,
                   );
-                  setPedometerStatus('20歩を検知・アラーム停止済み');
+                  await refreshAfterCycleCompletion(result.alarm);
+                  setPedometerStatus('100歩を検知・アラーム停止済み');
                   setNotice({
                     tone: 'success',
-                    text: '20歩を検知しました。起床済みとして今回のアラームを停止しました。',
+                    text: '100歩を検知しました。この時刻のアラームだけ停止しました。',
                   });
                   return;
                 }
 
-                const failedUpdate: StoredAlarm = {
-                  ...current,
-                  stepCount: evidence.steps,
-                };
-                setCurrentAlarm(failedUpdate);
-                void saveStoredAlarm(failedUpdate);
+                const failedUpdate = { ...current, stepCount: evidence.steps };
+                const next = await saveStoredAlarm(failedUpdate);
+                setCurrentAlarms(next);
                 setNotice({
                   tone: 'danger',
-                  text: '20歩を検知しましたが、アラーム停止を確認できませんでした。アラームは有効です。',
+                  text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
                 });
               })
               .catch(() => {
                 setNotice({
                   tone: 'danger',
-                  text: '20歩の停止処理に失敗しました。安全のためアラームは有効です。',
+                  text: '100歩の確認処理に失敗しました。安全のためアラームは有効です。',
                 });
               })
               .finally(() => {
@@ -409,13 +599,12 @@ export default function App() {
             return;
           }
 
-          const updated: StoredAlarm = {
-            ...current,
-            stepCount: evidence.steps,
-          };
-
-          setCurrentAlarm(updated);
-          void saveStoredAlarm(updated);
+          const updated = { ...current, stepCount: evidence.steps };
+          void saveStoredAlarm(updated)
+            .then(setCurrentAlarms)
+            .catch(() => {
+              setPedometerStatus('歩数の保存に失敗（アラームは維持）');
+            });
         });
       } catch {
         if (!disposed) {
@@ -428,110 +617,229 @@ export default function App() {
       disposed = true;
       subscription?.remove();
     };
-  }, [alarm?.cycleId, alarm ? isMonitoring(alarm) : false, setCurrentAlarm]);
+  }, [monitoringCycle?.cycleId, refreshAfterCycleCompletion, setCurrentAlarms]);
 
-  const armAlarm = useCallback(async () => {
-    if (isBusy || isMonitoring(alarmRef.current)) {
+  const addAlarm = useCallback(async () => {
+    if (isBusy) {
       return;
     }
 
     setIsBusy(true);
     setNotice(null);
-
     try {
-      const armedAtMs = Date.now();
-      const dueAtMs =
-        scheduleMode === 'demo'
-          ? getDemoAlarmAtMs(armedAtMs)
-          : scheduleMode === 'fastDemo'
-            ? getFastDemoAlarmAtMs(armedAtMs)
-            : getNextAlarmAtMs(
-                armedAtMs,
-                selectedTime.getHours(),
-                selectedTime.getMinutes(),
-              );
-      if (dueAtMs - armedAtMs < MIN_ARM_LEAD_MS) {
-        throw new Error('アラームは10秒以上先に設定してください。');
+      const createdAtMs = Date.now();
+      const repeat = makeAlarmRepeat(repeatKind, createdAtMs, customWeekdays);
+      const nextAtMs = getNextAlarmTime(
+        createdAtMs,
+        selectedTime.getHours(),
+        selectedTime.getMinutes(),
+        repeat,
+      );
+      if (!nextAtMs || nextAtMs - createdAtMs < MIN_ARM_LEAD_MS) {
+        throw new Error(
+          repeatKind === 'today'
+            ? '「今日だけ」は現在より後の時刻を選択してください。'
+            : '次回のアラーム時刻を計算できません。',
+        );
       }
 
       await prepareNotifications();
-      const cycleId = makeCycleId();
-      const scheduled = await scheduleAlarmNotificationsFailSafe(
-        {
-          scheduleMain: scheduleMainAlarmNotification,
-          scheduleCheckIn: scheduleCheckInNotification,
-        },
-        {
-          cycleId,
-          dueAtMs,
-          checkInAtMs: getCheckInAtMs(dueAtMs, armedAtMs),
-        },
-      );
-
-      const next: StoredAlarm = {
-        cycleId,
-        mainAlarmId: scheduled.mainAlarmId,
-        checkInNotificationId: scheduled.checkInNotificationId,
-        armedAtMs,
-        dueAtMs,
-        phase: 'armed',
-        stepCount: 0,
-        stepCandidateRecorded: false,
+      const definition: StoredAlarmDefinition = {
+        id: makeAlarmId(),
+        hour: selectedTime.getHours(),
+        minute: selectedTime.getMinutes(),
+        repeat,
+        enabled: true,
+        createdAtMs,
+        cycles: [],
       };
+      const fillWarnings: string[] = [];
+      const next = await mutateAlarmDefinitions(async (current) => {
+        if (current.length >= MAX_ALARM_COUNT) {
+          throw new Error(
+            `登録できるアラームは最大${MAX_ALARM_COUNT}件です。`,
+          );
+        }
 
-      setCurrentAlarm(next);
-      try {
-        await saveStoredAlarm(next);
-      } catch {
-        setNotice({
-          tone: 'warning',
-          text: 'アラームは予約済みですが、状態保存に失敗しました。通知は解除していません。',
-        });
-        return;
-      }
-
-      setPedometerStatus('歩数権限を確認中…');
-      setNotice(
-        scheduled.checkInWarning
-          ? {
-              tone: 'warning',
-              text: 'メインアラームは予約済みです。起床確認通知だけ予約できませんでした。',
-            }
-          : {
-              tone: 'success',
-              text:
-                scheduleMode === 'demo'
-                  ? '30秒デモを開始しました。20歩で自動停止します。'
-                  : scheduleMode === 'fastDemo'
-                    ? '10秒デモを開始しました。20歩で自動停止します。'
-                    : `${formatClock(dueAtMs)}にセットしました。20歩で自動停止します。`,
-            },
-      );
+        const filled = await fillAlarmDefinitionSchedule(
+          definition,
+          createdAtMs,
+          schedulingGateway,
+        );
+        fillWarnings.push(...filled.warnings);
+        return [...current, filled.definition];
+      });
+      setCurrentAlarms(next);
+      setIsComposerOpen(false);
+      setNotice({
+        tone: fillWarnings.length > 0 ? 'warning' : 'success',
+        text:
+          fillWarnings.length > 0
+            ? 'アラームは登録しましたが、一部の起床確認通知を予約できませんでした。'
+            : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。`,
+      });
     } catch (error) {
       setNotice({
         tone: 'danger',
         text:
           error instanceof Error
             ? error.message
-            : 'アラームを予約できませんでした。',
+            : 'アラームを追加できませんでした。',
       });
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, scheduleMode, selectedTime, setCurrentAlarm]);
+  }, [customWeekdays, isBusy, repeatKind, selectedTime, setCurrentAlarms]);
+
+  const toggleAlarm = useCallback(
+    async (definition: StoredAlarmDefinition, enabled: boolean) => {
+      if (isBusy) {
+        return;
+      }
+
+      setIsBusy(true);
+      setNotice(null);
+      try {
+        if (!enabled) {
+          const next = await mutateAlarmDefinitions(async (current) => {
+            const latest = current.find(
+              (alarm) => alarm.id === definition.id,
+            );
+            if (!latest) {
+              throw new Error('対象のアラームが見つかりません。');
+            }
+            await cancelDefinitionNotifications(latest);
+            return current.map((alarm) =>
+              alarm.id === definition.id
+                ? { ...alarm, enabled: false, cycles: [] }
+                : alarm,
+            );
+          });
+          setCurrentAlarms(next);
+          setNotice({ tone: 'neutral', text: 'アラームをオフにしました。' });
+          return;
+        }
+
+        await prepareNotifications();
+        const next = await mutateAlarmDefinitions(async (current) => {
+          const latest = current.find(
+            (alarm) => alarm.id === definition.id,
+          );
+          if (!latest) {
+            throw new Error('対象のアラームが見つかりません。');
+          }
+
+          const now = Date.now();
+          const repeat =
+            latest.repeat.kind === 'today'
+              ? makeAlarmRepeat('today', now)
+              : latest.repeat;
+          const nextAtMs = getNextAlarmTime(
+            now,
+            latest.hour,
+            latest.minute,
+            repeat,
+          );
+          if (!nextAtMs || nextAtMs - now < MIN_ARM_LEAD_MS) {
+            throw new Error(
+              'この「今日だけ」アラームは時刻を過ぎています。削除して新しい時刻を追加してください。',
+            );
+          }
+          const enabledDefinition = {
+            ...latest,
+            repeat,
+            enabled: true,
+            cycles: [],
+          };
+          const filled = await fillAlarmDefinitionSchedule(
+            enabledDefinition,
+            now,
+            schedulingGateway,
+          );
+          return current.map((alarm) =>
+            alarm.id === definition.id ? filled.definition : alarm,
+          );
+        });
+        setCurrentAlarms(next);
+        setNotice({ tone: 'success', text: 'アラームをオンにしました。' });
+      } catch (error) {
+        setNotice({
+          tone: 'danger',
+          text:
+            error instanceof Error
+              ? error.message
+              : 'アラームの状態を変更できませんでした。',
+        });
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [isBusy, setCurrentAlarms],
+  );
+
+  const deleteAlarm = useCallback(
+    async (definition: StoredAlarmDefinition) => {
+      if (isBusy) {
+        return;
+      }
+
+      setIsBusy(true);
+      try {
+        const next = await mutateAlarmDefinitions(async (current) => {
+          const latest = current.find((alarm) => alarm.id === definition.id);
+          if (!latest) {
+            throw new Error('対象のアラームが見つかりません。');
+          }
+          await cancelDefinitionNotifications(latest);
+          return current.filter((alarm) => alarm.id !== definition.id);
+        });
+        setCurrentAlarms(next);
+        setNotice({ tone: 'neutral', text: 'アラームを削除しました。' });
+      } catch {
+        setNotice({
+          tone: 'danger',
+          text: '通知の解除を確認できなかったため、アラームを削除していません。',
+        });
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [isBusy, setCurrentAlarms],
+  );
+
+  const confirmDeleteAlarm = useCallback(
+    (definition: StoredAlarmDefinition) => {
+      Alert.alert(
+        'アラームを削除しますか？',
+        `${formatAlarmTime(definition.hour, definition.minute)}（${formatRepeatLabel(
+          definition.repeat,
+        )}）を削除します。`,
+        [
+          { text: 'キャンセル', style: 'cancel' },
+          {
+            text: '削除',
+            style: 'destructive',
+            onPress: () => void deleteAlarm(definition),
+          },
+        ],
+      );
+    },
+    [deleteAlarm],
+  );
 
   const stopRinging = useCallback(async () => {
-    const current = alarmRef.current;
-    if (!current || current.phase !== 'ringing' || isBusy) {
+    if (!ringingCycle || isBusy) {
       return;
     }
 
     setIsBusy(true);
     try {
       stopForegroundAlarmSound();
-      await dismissDeliveredNotification(current.mainAlarmId);
-      const dismissed = { ...current, phase: 'dismissed' as const };
-      await persistCurrentAlarm(dismissed);
+      await dismissDeliveredNotification(ringingCycle.mainAlarmId);
+      await cancelNotificationIfPresent(ringingCycle.checkInNotificationId);
+      const dismissed = { ...ringingCycle, phase: 'dismissed' as const };
+      await saveStoredAlarm(dismissed);
+      await refreshAfterCycleCompletion(dismissed);
       setNotice({ tone: 'neutral', text: 'アラームを停止しました。' });
     } catch {
       setNotice({
@@ -541,108 +849,38 @@ export default function App() {
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, persistCurrentAlarm]);
+  }, [isBusy, refreshAfterCycleCompletion, ringingCycle]);
 
-  const resetAlarm = useCallback(async () => {
-    const current = alarmRef.current;
-    if (!current || isBusy) {
-      return;
-    }
-
-    setIsBusy(true);
-    try {
-      stopForegroundAlarmSound();
-      if (current.phase === 'armed' || current.phase === 'step_candidate') {
-        const canceled = await cancelScheduledNotification(current.mainAlarmId);
-        if (!canceled) {
-          throw new Error('アラームを解除できませんでした。通知は維持されています。');
+  const orderedAlarms = useMemo(
+    () =>
+      [...alarms].sort((left, right) => {
+        const leftNext = nextCycleForDefinition(left, nowMs)?.dueAtMs;
+        const rightNext = nextCycleForDefinition(right, nowMs)?.dueAtMs;
+        if (leftNext !== undefined && rightNext !== undefined) {
+          return leftNext - rightNext;
         }
-      } else {
-        await dismissDeliveredNotification(current.mainAlarmId);
-        await cancelScheduledNotification(current.mainAlarmId);
-      }
-      await cancelScheduledNotification(current.checkInNotificationId);
-      await clearStoredAlarm();
-      setCurrentAlarm(null);
-      setPedometerStatus(Platform.OS === 'web' ? '実機のみ対応' : '待機中');
-      setNotice({ tone: 'neutral', text: 'アラームをリセットしました。' });
-    } catch (error) {
-      setNotice({
-        tone: 'danger',
-        text:
-          error instanceof Error
-            ? error.message
-            : 'アラームのリセットに失敗しました。',
-      });
-    } finally {
-      setIsBusy(false);
-    }
-  }, [isBusy, setCurrentAlarm]);
+        if (leftNext !== undefined) {
+          return -1;
+        }
+        if (rightNext !== undefined) {
+          return 1;
+        }
+        return left.hour * 60 + left.minute - (right.hour * 60 + right.minute);
+      }),
+    [alarms, nowMs],
+  );
 
-  const phasePresentation = useMemo(() => {
-    if (!alarm || alarm.phase === 'dismissed') {
-      return {
-        eyebrow: 'READY',
-        title: '寝ていたら、鳴らす。',
-        description: '確実な起床確認がない限り、アラームを残します。',
-        tone: 'neutral' as NoticeTone,
-      };
-    }
-
-    if (alarm.phase === 'ringing') {
-      return {
-        eyebrow: 'ALARM',
-        title: '起きる時間です',
-        description: '起床を確認できなかったため、アラームを鳴らしています。',
-        tone: 'danger' as NoticeTone,
-      };
-    }
-
-    if (alarm.phase === 'suppressed') {
-      const stoppedBySteps = alarm.stepCount >= STEP_THRESHOLD;
-      return {
-        eyebrow: 'CONFIRMED',
-        title: '起床を確認しました',
-        description: stoppedBySteps
-          ? '20歩を検知したため、今回のアラームを自動停止しました。'
-          : '明示確認が期限内に届いたため、今回だけ停止しました。',
-        tone: 'success' as NoticeTone,
-      };
-    }
-
-    if (alarm.phase === 'step_candidate') {
-      return {
-        eyebrow: 'ARMED',
-        title: `${formatClock(alarm.dueAtMs)} にセット`,
-        description: '20歩に到達すると、今回のアラームを自動停止します。',
-        tone: 'neutral' as NoticeTone,
-      };
-    }
-
-    return {
-      eyebrow: 'ARMED',
-      title: `${formatClock(alarm.dueAtMs)} にセット`,
-      description: '20歩に到達すると、今回のアラームを自動停止します。',
-      tone: 'neutral' as NoticeTone,
-    };
-  }, [alarm]);
-
-  const active = isMonitoring(alarm);
-  const canArm = Platform.OS !== 'web' && !active && !isBusy;
-  const countdown = alarm ? formatCountdown(alarm.dueAtMs - nowMs) : null;
-  const checkInLeadSeconds = alarm
-    ? Math.round(
-        (alarm.dueAtMs -
-          getCheckInAtMs(alarm.dueAtMs, alarm.armedAtMs)) /
-          1_000,
-      )
-    : 60;
+  const monitoringDefinition = monitoringCycle
+    ? alarms.find((alarm) => alarm.id === monitoringCycle.alarmId)
+    : undefined;
+  const canAdd =
+    Platform.OS !== 'web' && alarms.length < MAX_ALARM_COUNT && !isBusy;
 
   if (!isLoaded) {
     return (
       <SafeAreaView style={styles.loadingScreen}>
-        <ActivityIndicator color="#FF6B55" size="large" />
-        <Text style={styles.loadingText}>状態を安全に確認しています…</Text>
+        <ActivityIndicator color="#4F67E8" size="large" />
+        <Text style={styles.loadingText}>アラームを確認しています…</Text>
       </SafeAreaView>
     );
   }
@@ -658,31 +896,28 @@ export default function App() {
           <View style={styles.logoMark}>
             <Text style={styles.logoGlyph}>A</Text>
           </View>
-          <View>
-            <Text style={styles.brandName}>AlreadyUp</Text>
-            <Text style={styles.prototypeLabel}>FAIL-SAFE MVP</Text>
-          </View>
+          <Text style={styles.brandName}>AlreadyUp</Text>
         </View>
 
-        <View
-          style={[
-            styles.heroCard,
-            phasePresentation.tone === 'danger' && styles.heroDanger,
-            phasePresentation.tone === 'success' && styles.heroSuccess,
-            phasePresentation.tone === 'warning' && styles.heroWarning,
-          ]}
-        >
-          <Text style={styles.heroEyebrow}>{phasePresentation.eyebrow}</Text>
-          <Text style={styles.heroTitle}>{phasePresentation.title}</Text>
-          <Text style={styles.heroDescription}>
-            {phasePresentation.description}
-          </Text>
-          {active && countdown ? (
-            <View style={styles.countdownPill}>
-              <View style={styles.liveDot} />
-              <Text style={styles.countdownText}>{countdown}</Text>
-            </View>
-          ) : null}
+        <View style={styles.titleRow}>
+          <View style={styles.titleCopy}>
+            <Text style={styles.screenTitle}>アラーム</Text>
+            <Text style={styles.screenSubtitle}>
+              起きて100歩歩いた朝は、もう一度鳴らしません。
+            </Text>
+          </View>
+          <Pressable
+            accessibilityLabel="アラームを追加"
+            accessibilityRole="button"
+            disabled={!canAdd}
+            onPress={() => setIsComposerOpen(true)}
+            style={({ pressed }) => [
+              styles.addButton,
+              (!canAdd || pressed) && styles.buttonDimmed,
+            ]}
+          >
+            <Text style={styles.addButtonText}>＋</Text>
+          </Pressable>
         </View>
 
         {notice ? (
@@ -691,155 +926,16 @@ export default function App() {
           </View>
         ) : null}
 
-        {!active && alarm?.phase !== 'ringing' ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>起きたい時刻</Text>
-            <View style={styles.timeCard}>
-              <View>
-                <Text style={styles.timeCardLabel}>次のアラーム</Text>
-                <Text style={styles.timeCardValue}>
-                  {scheduleMode === 'demo'
-                    ? '30秒後'
-                    : scheduleMode === 'fastDemo'
-                      ? '10秒後'
-                      : formatClock(
-                          getNextAlarmAtMs(
-                            nowMs,
-                            selectedTime.getHours(),
-                            selectedTime.getMinutes(),
-                          ),
-                        )}
-                </Text>
-              </View>
-              <DateTimePicker
-                accessibilityLabel="起きたい時刻を選択"
-                display={Platform.OS === 'ios' ? 'compact' : 'default'}
-                mode="time"
-                onChange={(_, date) => {
-                  if (date) {
-                    setSelectedTime(date);
-                    setScheduleMode('clock');
-                  }
-                }}
-                value={selectedTime}
-              />
-            </View>
-
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setScheduleMode('demo')}
-              style={[
-                styles.demoButton,
-                scheduleMode === 'demo' && styles.demoButtonSelected,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.demoButtonText,
-                  scheduleMode === 'demo' && styles.demoButtonTextSelected,
-                ]}
-              >
-                発表用：30秒後に鳴らす
-              </Text>
-            </Pressable>
-
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setScheduleMode('fastDemo')}
-              style={[
-                styles.demoButton,
-                scheduleMode === 'fastDemo' && styles.demoButtonSelected,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.demoButtonText,
-                  scheduleMode === 'fastDemo' && styles.demoButtonTextSelected,
-                ]}
-              >
-                発表用：10秒後にセット
-              </Text>
-            </Pressable>
-
-            <Pressable
-              accessibilityRole="button"
-              disabled={!canArm}
-              onPress={() => void armAlarm()}
-              style={({ pressed }) => [
-                styles.primaryButton,
-                (!canArm || pressed) && styles.buttonDimmed,
-              ]}
-            >
-              {isBusy ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
-                <Text style={styles.primaryButtonText}>
-                  アラームをセット
-                </Text>
+        {ringingCycle ? (
+          <View style={styles.ringingCard}>
+            <Text style={styles.ringingLabel}>ALARM</Text>
+            <Text style={styles.ringingTime}>
+              {formatAlarmTime(
+                new Date(ringingCycle.dueAtMs).getHours(),
+                new Date(ringingCycle.dueAtMs).getMinutes(),
               )}
-            </Pressable>
-            {Platform.OS === 'web' ? (
-              <Text style={styles.webHint}>
-                Webでは通知・歩数を使えません。iPhone実機で試してください。
-              </Text>
-            ) : null}
-          </View>
-        ) : null}
-
-        {active ? (
-          <View style={styles.section}>
-            <View style={styles.metricRow}>
-              <View style={styles.metricCard}>
-                <Text style={styles.metricValue}>{alarm?.stepCount ?? 0}</Text>
-                <Text style={styles.metricLabel}>検知した歩数 / {STEP_THRESHOLD}</Text>
-              </View>
-              <View style={styles.metricCard}>
-                <Text style={styles.metricValue}>{checkInLeadSeconds}</Text>
-                <Text style={styles.metricLabel}>秒前にWatch確認</Text>
-              </View>
-            </View>
-            <Text style={styles.sensorStatus}>{pedometerStatus}</Text>
-
-            <View style={styles.ruleCard}>
-              <View style={styles.ruleRow}>
-                <Text style={styles.ruleIcon}>✓</Text>
-                <Text style={styles.ruleText}>
-                  Watch / iPhoneで「起きています」 → 今回だけ停止
-                </Text>
-              </View>
-              <View style={styles.ruleDivider} />
-              <View style={styles.ruleRow}>
-                <Text style={styles.ruleIcon}>20</Text>
-                <Text style={styles.ruleText}>
-                  20歩 → 起床確定。今回のアラームを自動停止
-                </Text>
-              </View>
-              <View style={styles.ruleDivider} />
-              <View style={styles.ruleRow}>
-                <Text style={styles.ruleIconAlert}>?</Text>
-                <Text style={styles.ruleText}>
-                  未確認・エラー・期限切れ → アラームを維持
-                </Text>
-              </View>
-            </View>
-
-            <Pressable
-              accessibilityRole="button"
-              disabled={isBusy}
-              onPress={() => void resetAlarm()}
-              style={({ pressed }) => [
-                styles.resetButton,
-                (isBusy || pressed) && styles.buttonDimmed,
-              ]}
-            >
-              <Text style={styles.resetButtonText}>アラームをリセット</Text>
-            </Pressable>
-
-          </View>
-        ) : null}
-
-        {alarm?.phase === 'ringing' ? (
-          <View style={styles.section}>
+            </Text>
+            <Text style={styles.ringingTitle}>起きる時間です</Text>
             <Pressable
               accessibilityRole="button"
               disabled={isBusy}
@@ -851,24 +947,263 @@ export default function App() {
             >
               <Text style={styles.stopButtonText}>起きました・停止</Text>
             </Pressable>
+          </View>
+        ) : monitoringCycle && monitoringDefinition ? (
+          <View style={styles.nextAlarmCard}>
+            <View style={styles.nextAlarmHeader}>
+              <View>
+                <Text style={styles.nextAlarmLabel}>次のアラーム</Text>
+                <Text style={styles.nextAlarmTime}>
+                  {formatAlarmTime(
+                    monitoringDefinition.hour,
+                    monitoringDefinition.minute,
+                  )}
+                </Text>
+              </View>
+              <View style={styles.nextAlarmMeta}>
+                <Text style={styles.nextAlarmDate}>
+                  {formatNextDate(monitoringCycle.dueAtMs)}
+                </Text>
+                <Text style={styles.nextAlarmCountdown}>
+                  {formatCountdown(monitoringCycle.dueAtMs - nowMs)}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${Math.min(
+                      100,
+                      (monitoringCycle.stepCount / STEP_THRESHOLD) * 100,
+                    )}%`,
+                  },
+                ]}
+              />
+            </View>
+            <View style={styles.progressCopy}>
+              <Text style={styles.progressText}>
+                {monitoringCycle.stepCount} / {STEP_THRESHOLD}歩
+              </Text>
+              <Text style={styles.progressStatus}>{pedometerStatus}</Text>
+            </View>
+          </View>
+        ) : null}
+
+        {isComposerOpen ? (
+          <View style={styles.composerCard}>
+            <View style={styles.composerHeader}>
+              <Text style={styles.composerTitle}>アラームを追加</Text>
+              {alarms.length > 0 ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setIsComposerOpen(false)}
+                >
+                  <Text style={styles.cancelText}>キャンセル</Text>
+                </Pressable>
+              ) : null}
+            </View>
+
+            <View style={styles.timePickerRow}>
+              <View>
+                <Text style={styles.fieldLabel}>時刻</Text>
+                <Text style={styles.pickerTimePreview}>
+                  {formatAlarmTime(
+                    selectedTime.getHours(),
+                    selectedTime.getMinutes(),
+                  )}
+                </Text>
+              </View>
+              <DateTimePicker
+                accessibilityLabel="アラーム時刻を選択"
+                display={Platform.OS === 'ios' ? 'compact' : 'default'}
+                mode="time"
+                onChange={(_, date) => date && setSelectedTime(date)}
+                value={selectedTime}
+              />
+            </View>
+
+            <Text style={styles.fieldLabel}>繰り返し</Text>
+            <View style={styles.optionGrid}>
+              {REPEAT_OPTIONS.map((option) => {
+                const selected = repeatKind === option.kind;
+                return (
+                  <Pressable
+                    accessibilityRole="button"
+                    key={option.kind}
+                    onPress={() => setRepeatKind(option.kind)}
+                    style={[
+                      styles.optionButton,
+                      selected && styles.optionButtonSelected,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.optionButtonText,
+                        selected && styles.optionButtonTextSelected,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {repeatKind === 'custom' ? (
+              <View style={styles.weekdayRow}>
+                {WEEKDAY_OPTIONS.map((option) => {
+                  const selected = customWeekdays.includes(option.value);
+                  return (
+                    <Pressable
+                      accessibilityLabel={`${option.label}曜日`}
+                      accessibilityRole="button"
+                      key={option.value}
+                      onPress={() =>
+                        setCustomWeekdays((current) =>
+                          selected
+                            ? current.filter((day) => day !== option.value)
+                            : ([...current, option.value].sort(
+                                (left, right) => left - right,
+                              ) as Weekday[]),
+                        )
+                      }
+                      style={[
+                        styles.weekdayButton,
+                        selected && styles.weekdayButtonSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.weekdayButtonText,
+                          selected && styles.weekdayButtonTextSelected,
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
+
+            <View style={styles.behaviorNote}>
+              <Text style={styles.behaviorNoteTitle}>起床確認</Text>
+              <Text style={styles.behaviorNoteText}>
+                アラーム前に100歩を検知するか、「起きています」を押した場合、その時刻だけ停止します。
+              </Text>
+            </View>
+
             <Pressable
               accessibilityRole="button"
-              disabled={isBusy}
-              onPress={() => void resetAlarm()}
+              disabled={!canAdd}
+              onPress={() => void addAlarm()}
               style={({ pressed }) => [
-                styles.resetButton,
-                (isBusy || pressed) && styles.buttonDimmed,
+                styles.primaryButton,
+                (!canAdd || pressed) && styles.buttonDimmed,
               ]}
             >
-              <Text style={styles.resetButtonText}>アラームをリセット</Text>
+              {isBusy ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.primaryButtonText}>追加する</Text>
+              )}
             </Pressable>
           </View>
         ) : null}
 
-        <View style={styles.safetyCard}>
-          <Text style={styles.safetyTitle}>MVPの安全原則</Text>
-          <Text style={styles.safetyText}>
-            20歩または明示操作で起床を確認できた場合だけ停止します。画面表示中はループ音を再生し、バックグラウンドでは通知音を使います。FocusなどOS設定の影響は残ります。
+        <View style={styles.listHeader}>
+          <Text style={styles.sectionTitle}>設定済み</Text>
+          <Text style={styles.alarmCount}>
+            {alarms.length} / {MAX_ALARM_COUNT}
+          </Text>
+        </View>
+
+        {orderedAlarms.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyTitle}>アラームはまだありません</Text>
+            <Text style={styles.emptyText}>
+              時刻と繰り返しを選んで、最初のアラームを追加してください。
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.alarmList}>
+            {orderedAlarms.map((definition) => {
+              const nextCycle = nextCycleForDefinition(definition, nowMs);
+              return (
+                <View
+                  key={definition.id}
+                  style={[
+                    styles.alarmCard,
+                    !definition.enabled && styles.alarmCardDisabled,
+                  ]}
+                >
+                  <View style={styles.alarmCardMain}>
+                    <View style={styles.alarmCardCopy}>
+                      <Text
+                        style={[
+                          styles.alarmTime,
+                          !definition.enabled && styles.textDisabled,
+                        ]}
+                      >
+                        {formatAlarmTime(definition.hour, definition.minute)}
+                      </Text>
+                      <Text style={styles.repeatText}>
+                        {formatRepeatLabel(definition.repeat)}
+                        {nextCycle
+                          ? ` ・ 次回 ${formatNextDate(nextCycle.dueAtMs)}`
+                          : definition.enabled
+                            ? ' ・ 次回予約なし'
+                            : ' ・ オフ'}
+                      </Text>
+                    </View>
+                    <Switch
+                      accessibilityLabel={`${formatAlarmTime(
+                        definition.hour,
+                        definition.minute,
+                      )}のアラーム`}
+                      disabled={isBusy || Platform.OS === 'web'}
+                      onValueChange={(enabled) =>
+                        void toggleAlarm(definition, enabled)
+                      }
+                      trackColor={{ false: '#CDD3DC', true: '#AEB9FA' }}
+                      thumbColor={definition.enabled ? '#4F67E8' : '#F5F6F8'}
+                      value={definition.enabled}
+                    />
+                  </View>
+                  <View style={styles.alarmCardFooter}>
+                    <Text style={styles.scheduleSummary}>
+                      {definition.enabled
+                        ? `${definition.cycles.filter((cycle) => isMonitoring(cycle)).length}回分を予約済み`
+                        : '通知は予約されていません'}
+                    </Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={isBusy}
+                      onPress={() => confirmDeleteAlarm(definition)}
+                    >
+                      <Text style={styles.deleteText}>削除</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {Platform.OS === 'web' ? (
+          <View style={styles.deviceNotice}>
+            <Text style={styles.deviceNoticeText}>
+              通知と歩数計測はiPhoneまたはAndroid実機で利用できます。
+            </Text>
+          </View>
+        ) : null}
+
+        <View style={styles.infoCard}>
+          <Text style={styles.infoTitle}>動作について</Text>
+          <Text style={styles.infoText}>
+            歩数のリアルタイム計測はアプリ表示中のみです。バックグラウンドでは予約した通知音を使います。消音・Focus・通知設定など、OSの状態によって音が制限される場合があります。
           </Text>
         </View>
       </ScrollView>
@@ -879,375 +1214,482 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#F4F6F8',
+    backgroundColor: '#F6F7FB',
   },
   loadingScreen: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 16,
-    backgroundColor: '#F4F6F8',
+    gap: 14,
+    backgroundColor: '#F6F7FB',
   },
   loadingText: {
-    color: '#526078',
+    color: '#667085',
     fontSize: 14,
   },
   scrollContent: {
     width: '100%',
-    maxWidth: 560,
+    maxWidth: 620,
     alignSelf: 'center',
     paddingHorizontal: 20,
-    paddingTop: 18,
-    paddingBottom: 48,
+    paddingTop: 16,
+    paddingBottom: 52,
   },
   brandRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
     marginBottom: 24,
   },
   logoMark: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 36,
+    height: 36,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FF6B55',
-    shadowColor: '#FF6B55',
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 5 },
+    backgroundColor: '#4F67E8',
   },
   logoGlyph: {
-    color: '#FFFFFF',
-    fontSize: 22,
-    fontWeight: '900',
-  },
-  brandName: {
-    color: '#10213B',
-    fontSize: 21,
-    fontWeight: '800',
-    letterSpacing: -0.4,
-  },
-  prototypeLabel: {
-    marginTop: 2,
-    color: '#7A879C',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1.3,
-  },
-  heroCard: {
-    minHeight: 230,
-    padding: 24,
-    justifyContent: 'flex-end',
-    borderRadius: 30,
-    backgroundColor: '#10213B',
-    shadowColor: '#10213B',
-    shadowOpacity: 0.18,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 5,
-  },
-  heroDanger: {
-    backgroundColor: '#B83237',
-  },
-  heroSuccess: {
-    backgroundColor: '#087A62',
-  },
-  heroWarning: {
-    backgroundColor: '#A86518',
-  },
-  heroEyebrow: {
-    marginBottom: 12,
-    color: '#FFB6AA',
-    fontSize: 11,
-    fontWeight: '900',
-    letterSpacing: 1.7,
-  },
-  heroTitle: {
-    color: '#FFFFFF',
-    fontSize: 30,
-    fontWeight: '900',
-    lineHeight: 38,
-    letterSpacing: -0.9,
-  },
-  heroDescription: {
-    maxWidth: 430,
-    marginTop: 12,
-    color: '#D7DEE9',
-    fontSize: 15,
-    lineHeight: 23,
-  },
-  countdownPill: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.13)',
-  },
-  liveDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#69E5B9',
-  },
-  countdownText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  notice: {
-    marginTop: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  notice_neutral: {
-    borderColor: '#C9D3E1',
-    backgroundColor: '#EEF2F7',
-  },
-  notice_success: {
-    borderColor: '#9AD7C6',
-    backgroundColor: '#E7F7F1',
-  },
-  notice_warning: {
-    borderColor: '#E8C68F',
-    backgroundColor: '#FFF5E6',
-  },
-  notice_danger: {
-    borderColor: '#F2ADA9',
-    backgroundColor: '#FFF0EF',
-  },
-  noticeText: {
-    color: '#273850',
-    fontSize: 13,
-    lineHeight: 20,
-    fontWeight: '600',
-  },
-  section: {
-    marginTop: 26,
-  },
-  sectionLabel: {
-    marginBottom: 12,
-    color: '#526078',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  timeCard: {
-    minHeight: 82,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    paddingHorizontal: 18,
-    paddingVertical: 14,
-    borderWidth: 1,
-    borderColor: '#D6DDE7',
-    borderRadius: 20,
-    backgroundColor: '#FFFFFF',
-  },
-  timeCardLabel: {
-    color: '#7A879C',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  timeCardValue: {
-    marginTop: 4,
-    color: '#10213B',
-    fontSize: 24,
-    fontWeight: '900',
-  },
-  demoButton: {
-    alignItems: 'center',
-    marginTop: 10,
-    paddingVertical: 13,
-    borderWidth: 1,
-    borderColor: '#F2B1A6',
-    borderRadius: 16,
-    backgroundColor: '#FFF3F0',
-  },
-  demoButtonSelected: {
-    borderColor: '#A13A2C',
-    backgroundColor: '#A13A2C',
-  },
-  demoButtonText: {
-    color: '#A13A2C',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  demoButtonTextSelected: {
-    color: '#FFFFFF',
-  },
-  delayRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  delayButton: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 14,
-    borderWidth: 1,
-    borderColor: '#D6DDE7',
-    borderRadius: 16,
-    backgroundColor: '#FFFFFF',
-  },
-  delayButtonSelected: {
-    borderColor: '#10213B',
-    backgroundColor: '#10213B',
-  },
-  delayButtonText: {
-    color: '#526078',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  delayButtonTextSelected: {
-    color: '#FFFFFF',
-  },
-  primaryButton: {
-    minHeight: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 14,
-    borderRadius: 18,
-    backgroundColor: '#FF6B55',
-  },
-  primaryButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '900',
-  },
-  buttonDimmed: {
-    opacity: 0.55,
-  },
-  webHint: {
-    marginTop: 10,
-    color: '#7A879C',
-    fontSize: 12,
-    lineHeight: 18,
-    textAlign: 'center',
-  },
-  metricRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  metricCard: {
-    flex: 1,
-    padding: 18,
-    borderRadius: 20,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#E2E7EE',
-  },
-  metricValue: {
-    color: '#10213B',
-    fontSize: 26,
-    fontWeight: '900',
-  },
-  metricLabel: {
-    marginTop: 5,
-    color: '#7A879C',
-    fontSize: 11,
-    lineHeight: 16,
-    fontWeight: '700',
-  },
-  sensorStatus: {
-    marginTop: 9,
-    color: '#7A879C',
-    fontSize: 11,
-    textAlign: 'right',
-  },
-  ruleCard: {
-    marginTop: 18,
-    paddingHorizontal: 18,
-    borderRadius: 22,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#E2E7EE',
-  },
-  ruleRow: {
-    minHeight: 68,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 13,
-  },
-  ruleIcon: {
-    width: 28,
-    color: '#087A62',
-    fontSize: 20,
-    fontWeight: '900',
-    textAlign: 'center',
-  },
-  ruleIconMuted: {
-    width: 28,
-    color: '#A86518',
-    fontSize: 13,
-    fontWeight: '900',
-    textAlign: 'center',
-  },
-  ruleIconAlert: {
-    width: 28,
-    color: '#B83237',
-    fontSize: 19,
-    fontWeight: '900',
-    textAlign: 'center',
-  },
-  ruleText: {
-    flex: 1,
-    color: '#273850',
-    fontSize: 13,
-    lineHeight: 20,
-    fontWeight: '600',
-  },
-  ruleDivider: {
-    height: 1,
-    backgroundColor: '#EDF0F4',
-  },
-  stopButton: {
-    minHeight: 64,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 20,
-    backgroundColor: '#10213B',
-  },
-  stopButtonText: {
     color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '900',
   },
-  resetButton: {
-    minHeight: 48,
+  brandName: {
+    color: '#182230',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 16,
+  },
+  titleCopy: {
+    flex: 1,
+  },
+  screenTitle: {
+    color: '#182230',
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: -1.1,
+  },
+  screenSubtitle: {
+    marginTop: 7,
+    color: '#667085',
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  addButton: {
+    width: 48,
+    height: 48,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 10,
     borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#D6DDE7',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#4F67E8',
   },
-  resetButtonText: {
-    color: '#526078',
-    fontSize: 14,
+  addButtonText: {
+    color: '#FFFFFF',
+    fontSize: 27,
+    fontWeight: '500',
+    lineHeight: 29,
+  },
+  buttonDimmed: {
+    opacity: 0.5,
+  },
+  notice: {
+    marginTop: 18,
+    paddingHorizontal: 15,
+    paddingVertical: 13,
+    borderWidth: 1,
+    borderRadius: 14,
+  },
+  notice_neutral: {
+    borderColor: '#D0D5DD',
+    backgroundColor: '#F2F4F7',
+  },
+  notice_success: {
+    borderColor: '#9BD5C1',
+    backgroundColor: '#ECFDF3',
+  },
+  notice_warning: {
+    borderColor: '#F2C97D',
+    backgroundColor: '#FFFAEB',
+  },
+  notice_danger: {
+    borderColor: '#F4AAA6',
+    backgroundColor: '#FEF3F2',
+  },
+  noticeText: {
+    color: '#344054',
+    fontSize: 13,
+    lineHeight: 20,
+    fontWeight: '600',
+  },
+  nextAlarmCard: {
+    marginTop: 22,
+    padding: 22,
+    borderRadius: 24,
+    backgroundColor: '#182230',
+    shadowColor: '#182230',
+    shadowOpacity: 0.12,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 4,
+  },
+  nextAlarmHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: 18,
+  },
+  nextAlarmLabel: {
+    color: '#AEB9FA',
+    fontSize: 12,
     fontWeight: '800',
   },
-  safetyCard: {
-    marginTop: 30,
-    padding: 18,
-    borderRadius: 20,
-    backgroundColor: '#E9EDF2',
+  nextAlarmTime: {
+    marginTop: 5,
+    color: '#FFFFFF',
+    fontSize: 44,
+    fontWeight: '900',
+    letterSpacing: -1.7,
   },
-  safetyTitle: {
-    color: '#273850',
+  nextAlarmMeta: {
+    alignItems: 'flex-end',
+    paddingBottom: 5,
+  },
+  nextAlarmDate: {
+    color: '#E4E7EC',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  nextAlarmCountdown: {
+    marginTop: 5,
+    color: '#98A2B3',
+    fontSize: 12,
+  },
+  progressTrack: {
+    height: 7,
+    marginTop: 20,
+    overflow: 'hidden',
+    borderRadius: 999,
+    backgroundColor: '#344054',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 999,
+    backgroundColor: '#7F93FF',
+  },
+  progressCopy: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginTop: 10,
+  },
+  progressText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  progressStatus: {
+    flex: 1,
+    color: '#98A2B3',
+    fontSize: 11,
+    textAlign: 'right',
+  },
+  ringingCard: {
+    marginTop: 22,
+    padding: 24,
+    borderRadius: 24,
+    backgroundColor: '#B42318',
+  },
+  ringingLabel: {
+    color: '#FECDCA',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1.5,
+  },
+  ringingTime: {
+    marginTop: 8,
+    color: '#FFFFFF',
+    fontSize: 48,
+    fontWeight: '900',
+    letterSpacing: -1.5,
+  },
+  ringingTitle: {
+    marginTop: 2,
+    color: '#FECDCA',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  stopButton: {
+    minHeight: 58,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 22,
+    borderRadius: 17,
+    backgroundColor: '#FFFFFF',
+  },
+  stopButtonText: {
+    color: '#B42318',
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  composerCard: {
+    marginTop: 22,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#D0D5DD',
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+  },
+  composerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  composerTitle: {
+    color: '#182230',
+    fontSize: 19,
+    fontWeight: '900',
+  },
+  cancelText: {
+    color: '#667085',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  timePickerRow: {
+    minHeight: 76,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 16,
+    paddingBottom: 18,
+    marginBottom: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EAECF0',
+  },
+  fieldLabel: {
+    marginBottom: 10,
+    color: '#667085',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  pickerTimePreview: {
+    color: '#182230',
+    fontSize: 26,
+    fontWeight: '900',
+  },
+  optionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  optionButton: {
+    minWidth: 82,
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#D0D5DD',
+    borderRadius: 13,
+    backgroundColor: '#FFFFFF',
+  },
+  optionButtonSelected: {
+    borderColor: '#4F67E8',
+    backgroundColor: '#EEF0FF',
+  },
+  optionButtonText: {
+    color: '#475467',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  optionButtonTextSelected: {
+    color: '#3F51C7',
+  },
+  weekdayRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 5,
+    marginTop: 14,
+  },
+  weekdayButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#D0D5DD',
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+  },
+  weekdayButtonSelected: {
+    borderColor: '#4F67E8',
+    backgroundColor: '#4F67E8',
+  },
+  weekdayButtonText: {
+    color: '#475467',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  weekdayButtonTextSelected: {
+    color: '#FFFFFF',
+  },
+  behaviorNote: {
+    marginTop: 18,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: '#F2F4F7',
+  },
+  behaviorNoteTitle: {
+    color: '#344054',
     fontSize: 12,
     fontWeight: '900',
   },
-  safetyText: {
-    marginTop: 8,
-    color: '#647187',
+  behaviorNoteText: {
+    marginTop: 5,
+    color: '#667085',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  primaryButton: {
+    minHeight: 54,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 18,
+    borderRadius: 16,
+    backgroundColor: '#4F67E8',
+  },
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  listHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 30,
+    marginBottom: 12,
+  },
+  sectionTitle: {
+    color: '#344054',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  alarmCount: {
+    color: '#98A2B3',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  alarmList: {
+    gap: 10,
+  },
+  alarmCard: {
+    padding: 18,
+    borderWidth: 1,
+    borderColor: '#EAECF0',
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+  },
+  alarmCardDisabled: {
+    backgroundColor: '#F9FAFB',
+  },
+  alarmCardMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 16,
+  },
+  alarmCardCopy: {
+    flex: 1,
+  },
+  alarmTime: {
+    color: '#182230',
+    fontSize: 31,
+    fontWeight: '900',
+    letterSpacing: -0.9,
+  },
+  textDisabled: {
+    color: '#98A2B3',
+  },
+  repeatText: {
+    marginTop: 5,
+    color: '#667085',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  alarmCardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F2F4F7',
+  },
+  scheduleSummary: {
+    color: '#98A2B3',
+    fontSize: 11,
+  },
+  deleteText: {
+    color: '#B42318',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  emptyCard: {
+    alignItems: 'center',
+    paddingHorizontal: 26,
+    paddingVertical: 32,
+    borderWidth: 1,
+    borderColor: '#EAECF0',
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+  },
+  emptyTitle: {
+    color: '#344054',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  emptyText: {
+    maxWidth: 340,
+    marginTop: 7,
+    color: '#98A2B3',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  deviceNotice: {
+    marginTop: 16,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: '#FFFAEB',
+  },
+  deviceNoticeText: {
+    color: '#8A5A00',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  infoCard: {
+    marginTop: 24,
+    padding: 17,
+    borderRadius: 18,
+    backgroundColor: '#EAECF0',
+  },
+  infoTitle: {
+    color: '#344054',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  infoText: {
+    marginTop: 7,
+    color: '#667085',
     fontSize: 12,
     lineHeight: 19,
   },

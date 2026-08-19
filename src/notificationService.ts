@@ -100,6 +100,7 @@ function dateTrigger(dateMs: number, channelId: string) {
 }
 
 function checkInContent(
+  alarmId: string,
   cycleId: string,
   mainAlarmId: string,
 ): Notifications.NotificationContentInput {
@@ -110,6 +111,7 @@ function checkInContent(
     categoryIdentifier: AWAKE_CHECKIN_CATEGORY,
     data: {
       kind: CHECK_IN_KIND,
+      alarmId,
       cycleId,
       mainAlarmId,
     } satisfies AlarmNotificationData,
@@ -117,6 +119,7 @@ function checkInContent(
 }
 
 export async function scheduleMainAlarmNotification(input: {
+  alarmId: string;
   cycleId: string;
   dueAtMs: number;
 }): Promise<string> {
@@ -129,6 +132,7 @@ export async function scheduleMainAlarmNotification(input: {
       priority: Notifications.AndroidNotificationPriority.MAX,
       data: {
         kind: MAIN_ALARM_KIND,
+        alarmId: input.alarmId,
         cycleId: input.cycleId,
       } satisfies AlarmNotificationData,
     },
@@ -137,12 +141,13 @@ export async function scheduleMainAlarmNotification(input: {
 }
 
 export async function scheduleCheckInNotification(input: {
+  alarmId: string;
   cycleId: string;
   mainAlarmId: string;
   checkInAtMs: number;
 }): Promise<string> {
   return Notifications.scheduleNotificationAsync({
-    content: checkInContent(input.cycleId, input.mainAlarmId),
+    content: checkInContent(input.alarmId, input.cycleId, input.mainAlarmId),
     trigger: dateTrigger(input.checkInAtMs, CHECK_IN_CHANNEL_ID),
   });
 }
@@ -164,6 +169,25 @@ export async function cancelScheduledNotification(
   return !scheduledAfter.some((request) => request.identifier === notificationId);
 }
 
+export async function cancelNotificationIfPresent(
+  notificationId: string | undefined,
+): Promise<void> {
+  if (!notificationId || Platform.OS === 'web') {
+    return;
+  }
+
+  const scheduledBefore = await Notifications.getAllScheduledNotificationsAsync();
+  if (!scheduledBefore.some((request) => request.identifier === notificationId)) {
+    return;
+  }
+
+  await Notifications.cancelScheduledNotificationAsync(notificationId);
+  const scheduledAfter = await Notifications.getAllScheduledNotificationsAsync();
+  if (scheduledAfter.some((request) => request.identifier === notificationId)) {
+    throw new Error('アラーム通知の解除を確認できませんでした。');
+  }
+}
+
 export async function dismissDeliveredNotification(
   notificationId: string | undefined,
 ): Promise<void> {
@@ -179,16 +203,18 @@ export function readAlarmNotificationData(
 ): AlarmNotificationData | null {
   const data = response.notification.request.content.data;
   const kind = data?.kind;
+  const alarmId = data?.alarmId;
   const cycleId = data?.cycleId;
   const mainAlarmId = data?.mainAlarmId;
 
   if (
     (kind !== MAIN_ALARM_KIND && kind !== CHECK_IN_KIND) ||
+    (alarmId !== undefined && typeof alarmId !== 'string') ||
     typeof cycleId !== 'string' ||
     (mainAlarmId !== undefined && typeof mainAlarmId !== 'string')
   ) {
     return null;
   }
 
-  return { kind, cycleId, mainAlarmId };
+  return { kind, alarmId, cycleId, mainAlarmId };
 }
