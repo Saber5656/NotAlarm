@@ -187,7 +187,13 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 上部はブランド、画面タイトル、追加ボタンだけにし、prototype / presentation 表示を置かない。
 - 次回アラームは時刻、日付、残り時間、100歩進捗を表示する。
 - 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。
-- 追加フォームは時刻、4種類の repeat、custom weekday、100歩の説明を持つ。
+- メイン画面は viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線を固定する。
+- Dynamic Type の `fontScale > 1.3` では情報欠落を避けるアクセシビリティ例外として外側スクロールを許可し、通常文字サイズでは一覧以外を固定する。
+- 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。時刻、4種類の repeat、custom weekday、100歩の説明を持ち、小さい画面ではフォーム本体だけを内部スクロールする。
+- Androidの時刻選択は常時mountしたpickerを使わず、ユーザー操作時だけ `DateTimePickerAndroid.open()` を呼ぶ。Modalのclose / unmount / 鳴動遷移ではnative pickerも明示的にdismissする。鳴動中は追加導線とModalを無効化し、停止UIを常に最前面に保つ。
+- 追加エラーはスクロール領域外の固定footerに表示し、dangerはassertive、その他の状態通知はpoliteとしてassistive technologyへ通知する。
+- iOS 26 以降は `expo-glass-effect` の native Liquid Glass を使う。旧iOSとWebは `expo-blur`、AndroidはSDK 54で実blurがexperimentalなため安定した半透明 surfaceへfallbackする。Reduce Transparency 有効時はsemantic stateを保った不透明度の高い surface に切り替える。
+- Glass surface 上でも本文・操作のコントラストを維持し、装飾背景は入力・alarm state・危険通知の意味を担わせない。
 - Web は UI smoke test とし、通知操作を disabled にする。
 
 ## 12. Platform 制約

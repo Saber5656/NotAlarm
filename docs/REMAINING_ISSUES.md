@@ -381,7 +381,7 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 ### 背景
 
-安全判定と通知順序は純粋な policy / orchestrator に分離済みだが、`App.tsx` には通知listener、Pedometer lifecycle、画面状態、表示component、stylesが集中している。即時の安全欠陥ではないが、将来のUI変更とライフサイクル変更の影響範囲が広い。
+安全判定と通知順序は純粋な policy / orchestrator に分離済みで、追加モーダルとGlass surfaceも `src/ui/` へ分離した。一方、`App.tsx` には通知listener、Pedometer lifecycle、画面状態、ホーム画面renderingとstylesが残っている。即時の安全欠陥ではないが、将来のUI変更とライフサイクル変更の影響範囲がまだ広い。
 
 ### スコープ
 
