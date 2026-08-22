@@ -16,7 +16,8 @@
           "enableBackgroundPlayback": true
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "@react-native-community/datetimepicker"
     ],
     "ios": {
       "supportsTablet": true,
