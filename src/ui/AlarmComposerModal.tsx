@@ -22,7 +22,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { RepeatKind, Weekday } from '../alarmSchedule';
 import { parseAlarmTimeInput } from '../alarmTime';
+import { shouldScrollAlarmComposer } from '../composerLayout';
 import { GlassSurface } from './GlassSurface';
+import {
+  LiquidComposerTabs,
+  type ComposerSection,
+} from './LiquidComposerTabs';
 import { LiquidRepeatSelector } from './LiquidRepeatSelector';
 import { UI_COLORS } from './tokens';
 
@@ -85,9 +90,17 @@ export function AlarmComposerModal({
   visible,
 }: AlarmComposerModalProps) {
   const insets = useSafeAreaInsets();
-  const { fontScale } = useWindowDimensions();
+  const { fontScale, height: viewportHeight, width: viewportWidth } =
+    useWindowDimensions();
   const usesLargeText = fontScale > 1.3;
+  const usesScrollableFallback = shouldScrollAlarmComposer(
+    viewportHeight,
+    viewportWidth,
+    fontScale,
+  );
   const minuteInputRef = useRef<TextInput>(null);
+  const [activeSection, setActiveSection] =
+    useState<ComposerSection>('time');
   const [isTimeEditing, setIsTimeEditing] = useState(false);
   const [draftHour, setDraftHour] = useState(
     selectedTime.getHours().toString().padStart(2, '0'),
@@ -107,6 +120,7 @@ export function AlarmComposerModal({
 
   useEffect(() => {
     if (!visible) {
+      setActiveSection('time');
       setIsTimeEditing(false);
       setTimeInputError(null);
       Keyboard.dismiss();
@@ -122,12 +136,12 @@ export function AlarmComposerModal({
       void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
     };
 
-    if (!visible || isTimeEditing) {
+    if (!visible || isTimeEditing || activeSection !== 'time') {
       dismissTimePicker();
     }
 
     return dismissTimePicker;
-  }, [isTimeEditing, visible]);
+  }, [activeSection, isTimeEditing, visible]);
 
   const closeIfIdle = () => {
     if (!isBusy) {
@@ -148,7 +162,19 @@ export function AlarmComposerModal({
     setDraftHour(selectedTime.getHours().toString().padStart(2, '0'));
     setDraftMinute(selectedTime.getMinutes().toString().padStart(2, '0'));
     setTimeInputError(null);
+    setActiveSection('time');
     setIsTimeEditing(true);
+  };
+
+  const selectSection = (section: ComposerSection) => {
+    if (isBusy || (isTimeEditing && section !== 'time')) {
+      return;
+    }
+
+    if (Platform.OS === 'android' && section !== 'time') {
+      void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
+    }
+    setActiveSection(section);
   };
 
   const applyPickedTime = (pickedTime: Date) => {
@@ -210,6 +236,10 @@ export function AlarmComposerModal({
   };
 
   const submitEnabled = canSubmit && !isTimeEditing;
+  const weekdaySelectionError =
+    repeatKind === 'custom' && customWeekdays.length === 0
+      ? '「繰り返し」で曜日を1つ以上選択してください。'
+      : null;
 
   return (
     <Modal
@@ -249,7 +279,10 @@ export function AlarmComposerModal({
           <View
             accessibilityLabel="アラームを追加"
             accessibilityViewIsModal
-            style={styles.sheet}
+            style={[
+              styles.sheet,
+              !usesScrollableFallback && styles.sheetFixed,
+            ]}
           >
             <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleCopy}>
@@ -284,16 +317,28 @@ export function AlarmComposerModal({
               </GlassSurface>
             </View>
 
+            <LiquidComposerTabs
+              disabled={isBusy}
+              onChange={selectSection}
+              repeatDisabled={isTimeEditing}
+              style={styles.sectionTabs}
+              value={activeSection}
+            />
+
             <ScrollView
-              bounces={false}
-              contentContainerStyle={styles.formContent}
+              bounces={usesScrollableFallback}
+              contentContainerStyle={[
+                styles.formContent,
+                !usesScrollableFallback && styles.formContentFixed,
+              ]}
               keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator
+              scrollEnabled={usesScrollableFallback}
+              showsVerticalScrollIndicator={usesScrollableFallback}
               style={styles.formScroll}
               testID="alarm-composer-scroll"
             >
-              <View style={styles.timePanel}>
-                <Text style={styles.fieldLabel}>時刻</Text>
+              {activeSection === 'time' ? (
+                <View style={styles.timePanel}>
                 {isTimeEditing ? (
                   <View style={styles.timeEditor}>
                     <View style={styles.timeInputRow}>
@@ -487,66 +532,77 @@ export function AlarmComposerModal({
                     </GlassSurface>
                   </>
                 )}
-              </View>
+                </View>
+              ) : (
+                <View style={styles.repeatPanel}>
+                  <Text style={styles.sectionLead}>鳴らす日を選択</Text>
+                  <LiquidRepeatSelector
+                    disabled={isBusy}
+                    onChange={(kind) => {
+                      if (!isBusy) {
+                        onRepeatKindChange(kind);
+                      }
+                    }}
+                    value={repeatKind}
+                  />
 
-              <Text style={styles.fieldLabel}>繰り返し</Text>
-              <LiquidRepeatSelector
-                onChange={onRepeatKindChange}
-                value={repeatKind}
-              />
-
-              {repeatKind === 'custom' ? (
-                <View style={styles.weekdayBlock}>
-                  <Text style={styles.weekdayHint}>鳴らす曜日</Text>
-                  <View style={styles.weekdayRow}>
-                    {WEEKDAY_OPTIONS.map((option) => {
-                      const selected = customWeekdays.includes(option.value);
-                      return (
-                        <Pressable
-                          accessibilityLabel={`${option.label}曜日`}
-                          accessibilityRole="button"
-                          accessibilityState={{ selected }}
-                          hitSlop={2}
-                          key={option.value}
-                          onPress={() => onToggleWeekday(option.value)}
-                          style={({ pressed }) => [
-                            styles.weekdayButton,
-                            selected && styles.weekdayButtonSelected,
-                            pressed && styles.buttonPressed,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.weekdayButtonText,
-                              selected && styles.weekdayButtonTextSelected,
-                            ]}
-                          >
-                            {option.label}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                  {customWeekdays.length === 0 ? (
-                    <Text style={styles.weekdayError}>
-                      曜日を1つ以上選択してください
-                    </Text>
+                  {repeatKind === 'custom' ? (
+                    <View style={styles.weekdayBlock}>
+                      <Text style={styles.weekdayHint}>鳴らす曜日</Text>
+                      <View style={styles.weekdayRow}>
+                        {WEEKDAY_OPTIONS.map((option) => {
+                          const selected = customWeekdays.includes(option.value);
+                          return (
+                            <Pressable
+                              accessibilityLabel={`${option.label}曜日`}
+                              accessibilityRole="button"
+                              accessibilityState={{
+                                disabled: isBusy,
+                                selected,
+                              }}
+                              disabled={isBusy}
+                              hitSlop={2}
+                              key={option.value}
+                              onPress={() => {
+                                if (!isBusy) {
+                                  onToggleWeekday(option.value);
+                                }
+                              }}
+                              style={({ pressed }) => [
+                                styles.weekdayButton,
+                                selected && styles.weekdayButtonSelected,
+                                isBusy && styles.weekdayButtonDisabled,
+                                pressed && styles.buttonPressed,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.weekdayButtonText,
+                                  selected && styles.weekdayButtonTextSelected,
+                                ]}
+                              >
+                                {option.label}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </View>
                   ) : null}
-                </View>
-              ) : null}
 
-              <View style={styles.behaviorNote}>
-                <View style={styles.stepBadge}>
-                  <Text style={styles.stepBadgeText}>100</Text>
+                  <View style={styles.behaviorNote}>
+                    <View style={styles.stepBadge}>
+                      <Text style={styles.stepBadgeText}>100</Text>
+                    </View>
+                    <View style={styles.behaviorCopy}>
+                      <Text style={styles.behaviorTitle}>100歩で起床を確認</Text>
+                      <Text style={styles.behaviorText}>
+                        対象のアラームだけを停止し、ほかの時刻には影響しません。
+                      </Text>
+                    </View>
+                  </View>
                 </View>
-                <View style={styles.behaviorCopy}>
-                  <Text style={styles.behaviorTitle}>100歩で起床を確認</Text>
-                  <Text style={styles.behaviorText}>
-                    対象のアラームだけを停止し、ほかの時刻には影響しません。
-                  </Text>
-                </View>
-              </View>
-
+              )}
             </ScrollView>
 
             <View style={styles.sheetFooter}>
@@ -571,6 +627,20 @@ export function AlarmComposerModal({
                     ]}
                   >
                     {formNotice.text}
+                  </Text>
+                </View>
+              ) : weekdaySelectionError ? (
+                <View
+                  accessibilityLiveRegion="polite"
+                  style={[styles.formNotice, styles.formNoticeWarning]}
+                >
+                  <Text
+                    style={[
+                      styles.formNoticeText,
+                      styles.formNoticeTextWarning,
+                    ]}
+                  >
+                    {weekdaySelectionError}
                   </Text>
                 </View>
               ) : null}
@@ -654,6 +724,9 @@ const styles = StyleSheet.create({
       },
     }),
   },
+  sheetFixed: {
+    height: '88%',
+  },
   sheetHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -706,24 +779,30 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     lineHeight: 27,
   },
+  sectionTabs: {
+    marginHorizontal: 22,
+    marginTop: 12,
+  },
   formScroll: {
-    flexShrink: 1,
+    flex: 1,
+    minHeight: 0,
   },
   formContent: {
+    flexGrow: 1,
     paddingHorizontal: 22,
-    paddingTop: 18,
+    paddingTop: 14,
     paddingBottom: 12,
+  },
+  formContentFixed: {
+    justifyContent: 'flex-start',
   },
   timePanel: {
     minHeight: 94,
-    marginBottom: 20,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(123, 140, 196, 0.2)',
-    borderRadius: 22,
-    backgroundColor: 'rgba(231, 234, 243, 0.68)',
   },
-  fieldLabel: {
+  repeatPanel: {
+    flexGrow: 1,
+  },
+  sectionLead: {
     marginBottom: 9,
     color: UI_COLORS.textMuted,
     fontSize: 11,
@@ -776,6 +855,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
   },
   dialPickerShell: {
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(123, 140, 196, 0.18)',
     borderRadius: 18,
@@ -947,6 +1027,9 @@ const styles = StyleSheet.create({
     borderColor: UI_COLORS.accent,
     backgroundColor: UI_COLORS.accent,
   },
+  weekdayButtonDisabled: {
+    opacity: 0.48,
+  },
   weekdayButtonText: {
     color: UI_COLORS.textMuted,
     fontSize: 12,
@@ -954,12 +1037,6 @@ const styles = StyleSheet.create({
   },
   weekdayButtonTextSelected: {
     color: '#FFFFFF',
-  },
-  weekdayError: {
-    marginTop: 8,
-    color: '#A34840',
-    fontSize: 10,
-    fontWeight: '700',
   },
   behaviorNote: {
     flexDirection: 'row',

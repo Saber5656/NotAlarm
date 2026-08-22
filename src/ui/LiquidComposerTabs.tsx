@@ -4,45 +4,49 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 
-import type { RepeatKind } from '../alarmSchedule';
 import { GlassSurface } from './GlassSurface';
 import { UI_COLORS } from './tokens';
 import { useReducedMotion } from './useReducedMotion';
 
-interface LiquidRepeatSelectorProps {
-  disabled?: boolean;
-  onChange: (kind: RepeatKind) => void;
-  value: RepeatKind;
+export type ComposerSection = 'time' | 'repeat';
+
+interface LiquidComposerTabsProps {
+  disabled: boolean;
+  onChange: (section: ComposerSection) => void;
+  repeatDisabled: boolean;
+  style?: StyleProp<ViewStyle>;
+  value: ComposerSection;
 }
 
-const OPTIONS: Array<{ kind: RepeatKind; label: string }> = [
-  { kind: 'today', label: '今日だけ' },
-  { kind: 'daily', label: '毎日' },
-  { kind: 'weekdays', label: '平日' },
-  { kind: 'custom', label: '曜日指定' },
+const OPTIONS: Array<{ label: string; section: ComposerSection }> = [
+  { label: '時刻', section: 'time' },
+  { label: '繰り返し', section: 'repeat' },
 ];
 
-export function LiquidRepeatSelector({
-  disabled = false,
+export function LiquidComposerTabs({
+  disabled,
   onChange,
+  repeatDisabled,
+  style,
   value,
-}: LiquidRepeatSelectorProps) {
+}: LiquidComposerTabsProps) {
   const reduceMotion = useReducedMotion();
-  const { fontScale } = useWindowDimensions();
-  const usesLargeText = fontScale > 1.3;
-  const selectedIndex = OPTIONS.findIndex((option) => option.kind === value);
+  const selectedIndex = OPTIONS.findIndex(
+    (option) => option.section === value,
+  );
   const selection = useRef(new Animated.Value(selectedIndex)).current;
   const [trackWidth, setTrackWidth] = useState(0);
   const segmentWidth = Math.max((trackWidth - 8) / OPTIONS.length, 0);
   const translateX = useMemo(
     () =>
       selection.interpolate({
-        inputRange: OPTIONS.map((_, index) => index),
-        outputRange: OPTIONS.map((_, index) => index * segmentWidth),
+        inputRange: [0, 1],
+        outputRange: [0, segmentWidth],
       }),
     [segmentWidth, selection],
   );
@@ -55,9 +59,9 @@ export function LiquidRepeatSelector({
     }
 
     Animated.spring(selection, {
-      damping: 22,
-      mass: 0.78,
-      stiffness: 245,
+      damping: 21,
+      mass: 0.76,
+      stiffness: 250,
       toValue: selectedIndex,
       useNativeDriver: true,
     }).start();
@@ -65,30 +69,27 @@ export function LiquidRepeatSelector({
 
   return (
     <View
-      accessibilityLabel="繰り返し"
+      accessibilityLabel="設定項目"
       onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
-      style={styles.track}
-      testID="repeat-selector"
+      style={[styles.track, style]}
+      testID="composer-section-tabs"
     >
       {segmentWidth > 0 ? (
         <Animated.View
           pointerEvents="none"
           style={[
             styles.selectionMotion,
-            {
-              transform: [{ translateX }],
-              width: segmentWidth,
-            },
+            { transform: [{ translateX }], width: segmentWidth },
           ]}
-          testID="repeat-selection-lens"
+          testID="composer-section-lens"
         >
           <GlassSurface
-            fallbackColor="rgba(220, 226, 255, 0.92)"
+            fallbackColor="rgba(218, 225, 255, 0.94)"
             glassEffectStyle="regular"
             intensity={90}
-            reducedTransparencyColor="#E1E5F8"
+            reducedTransparencyColor="#DCE3FC"
             style={styles.selectionLens}
-            tintColor="#C9D2FFB8"
+            tintColor="#CED8FFC0"
           >
             <View style={styles.selectionHighlight} />
           </GlassSurface>
@@ -96,23 +97,34 @@ export function LiquidRepeatSelector({
       ) : null}
 
       {OPTIONS.map((option) => {
-        const selected = value === option.kind;
+        const selected = option.section === value;
+        const optionDisabled =
+          disabled || (option.section === 'repeat' && repeatDisabled);
+
         return (
           <Pressable
+            accessibilityHint={
+              option.section === 'repeat' && repeatDisabled
+                ? '時刻を確定またはキャンセルしてから切り替えられます'
+                : undefined
+            }
+            accessibilityLabel={option.label}
             accessibilityRole="button"
-            accessibilityState={{ disabled, selected }}
-            disabled={disabled}
-            key={option.kind}
-            onPress={() => onChange(option.kind)}
+            accessibilityState={{
+              disabled: optionDisabled,
+              selected,
+            }}
+            disabled={optionDisabled}
+            key={option.section}
+            onPress={() => onChange(option.section)}
             style={({ pressed }) => [
               styles.segment,
-              disabled && styles.segmentDisabled,
+              optionDisabled && styles.segmentDisabled,
               pressed && styles.segmentPressed,
             ]}
-            testID={`repeat-${option.kind}`}
+            testID={`composer-tab-${option.section}`}
           >
             <Text
-              numberOfLines={usesLargeText ? 2 : 1}
               style={[styles.label, selected && styles.labelSelected]}
             >
               {option.label}
@@ -127,13 +139,13 @@ export function LiquidRepeatSelector({
 const styles = StyleSheet.create({
   track: {
     position: 'relative',
-    minHeight: 52,
+    minHeight: 54,
     flexDirection: 'row',
     padding: 4,
     borderWidth: 1,
-    borderColor: 'rgba(122, 136, 180, 0.2)',
-    borderRadius: 18,
-    backgroundColor: 'rgba(224, 228, 240, 0.7)',
+    borderColor: 'rgba(123, 140, 196, 0.18)',
+    borderRadius: 19,
+    backgroundColor: 'rgba(224, 228, 240, 0.62)',
   },
   selectionMotion: {
     position: 'absolute',
@@ -144,17 +156,17 @@ const styles = StyleSheet.create({
   selectionLens: {
     flex: 1,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 14,
+    borderColor: 'rgba(255, 255, 255, 0.92)',
+    borderRadius: 15,
   },
   selectionHighlight: {
     position: 'absolute',
     top: 1,
-    right: 8,
-    left: 8,
+    right: 12,
+    left: 12,
     height: 1,
     borderRadius: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
   },
   segment: {
     zIndex: 1,
@@ -162,23 +174,21 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 3,
-    borderRadius: 14,
-  },
-  segmentPressed: {
-    transform: [{ scale: 0.96 }],
+    paddingHorizontal: 12,
+    borderRadius: 15,
   },
   segmentDisabled: {
     opacity: 0.48,
   },
+  segmentPressed: {
+    transform: [{ scale: 0.97 }],
+  },
   label: {
     color: UI_COLORS.textMuted,
-    fontSize: 11,
-    fontWeight: '800',
-    textAlign: 'center',
+    fontSize: 12,
+    fontWeight: '900',
   },
   labelSelected: {
-    color: '#3548B6',
-    fontWeight: '900',
+    color: '#4054C5',
   },
 });
