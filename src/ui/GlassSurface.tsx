@@ -18,6 +18,7 @@ import {
 
 interface GlassSurfaceProps extends ViewProps {
   blurTint?: BlurTint;
+  fallbackColor?: string;
   glassEffectStyle?: GlassStyle;
   intensity?: number;
   isInteractive?: boolean;
@@ -43,6 +44,7 @@ const nativeLiquidGlassAvailable = supportsNativeLiquidGlass();
 export function GlassSurface({
   blurTint = 'systemUltraThinMaterialLight',
   children,
+  fallbackColor,
   glassEffectStyle = 'regular',
   intensity = 62,
   isInteractive = false,
@@ -117,6 +119,12 @@ export function GlassSurface({
       style={[styles.surface, style]}
       tint={blurTint}
     >
+      {fallbackColor ? (
+        <View
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFill, { backgroundColor: fallbackColor }]}
+        />
+      ) : null}
       {children}
     </BlurView>
   );

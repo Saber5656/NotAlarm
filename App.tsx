@@ -23,6 +23,10 @@ import {
 
 import { AlarmComposerModal } from './src/ui/AlarmComposerModal';
 import { GlassSurface } from './src/ui/GlassSurface';
+import {
+  NoticeBanner,
+  type AppNotice,
+} from './src/ui/NoticeBanner';
 import { UI_COLORS } from './src/ui/tokens';
 
 import {
@@ -76,19 +80,7 @@ import {
 
 installForegroundNotificationHandler();
 
-type NoticeTone = 'neutral' | 'success' | 'warning' | 'danger';
-
-interface Notice {
-  tone: NoticeTone;
-  text: string;
-}
-
-const NOTICE_SOLID_COLORS: Record<NoticeTone, string> = {
-  neutral: '#F4F6FC',
-  success: '#E2F6F0',
-  warning: '#FFF5D9',
-  danger: '#FDE8E6',
-};
+type Notice = AppNotice;
 
 const schedulingGateway = {
   scheduleMain: scheduleMainAlarmNotification,
@@ -948,14 +940,9 @@ function AlarmApp() {
           ]}
         >
         <View style={styles.brandRow}>
-          <GlassSurface
-            glassEffectStyle="clear"
-            intensity={72}
-            style={styles.logoMark}
-            tintColor="#FFFFFF80"
-          >
+          <View style={styles.logoMark}>
             <Text style={styles.logoGlyph}>↑</Text>
-          </GlassSurface>
+          </View>
           <View>
             <Text style={styles.brandName}>AlreadyUp</Text>
             <Text style={styles.brandTagline}>MOVE TO WAKE</Text>
@@ -1002,13 +989,7 @@ function AlarmApp() {
         </View>
 
         {ringingCycle ? (
-          <GlassSurface
-            blurTint="systemThinMaterialDark"
-            intensity={80}
-            reducedTransparencyColor="#982D38"
-            style={styles.ringingCard}
-            tintColor="#B8333FB8"
-          >
+          <View style={styles.ringingCard}>
             <Text style={styles.ringingLabel}>ALARM</Text>
             <Text style={styles.ringingTime}>
               {formatAlarmTime(
@@ -1029,13 +1010,9 @@ function AlarmApp() {
             >
               <Text style={styles.stopButtonText}>起きました・停止</Text>
             </Pressable>
-          </GlassSurface>
+          </View>
         ) : monitoringCycle && monitoringDefinition ? (
-          <GlassSurface
-            intensity={76}
-            style={styles.nextAlarmCard}
-            tintColor="#F7F9FFC0"
-          >
+          <View style={styles.nextAlarmCard}>
             <View style={styles.nextAlarmGlow} />
             <View style={styles.nextAlarmHeader}>
               <View>
@@ -1086,13 +1063,9 @@ function AlarmApp() {
               </Text>
               <Text style={styles.progressStatus}>{pedometerStatus}</Text>
             </View>
-          </GlassSurface>
+          </View>
         ) : (
-          <GlassSurface
-            intensity={74}
-            style={styles.idleCard}
-            tintColor="#F7F9FFB0"
-          >
+          <View style={styles.idleCard}>
             <View style={styles.idleIcon}>
               <Text style={styles.idleIconText}>☾</Text>
             </View>
@@ -1102,14 +1075,10 @@ function AlarmApp() {
                 右上の＋から、最初の起床時刻を追加できます。
               </Text>
             </View>
-          </GlassSurface>
+          </View>
         )}
 
-        <GlassSurface
-          intensity={68}
-          style={styles.listPanel}
-          tintColor="#FFFFFF8F"
-        >
+        <View style={styles.listPanel}>
           <View style={styles.listHeader}>
             <View>
               <Text style={styles.sectionTitle}>アラーム一覧</Text>
@@ -1216,7 +1185,7 @@ function AlarmApp() {
           </View>
         ) : null}
           </ScrollView>
-        </GlassSurface>
+        </View>
 
         {!useCompactHeightLayout ? (
           <View style={styles.footerNote}>
@@ -1229,31 +1198,10 @@ function AlarmApp() {
         </View>
       </ScrollView>
 
-      {notice && !isComposerOpen ? (
-        <View style={styles.noticeHost}>
-          <GlassSurface
-            accessibilityLiveRegion={
-              notice.tone === 'danger' ? 'assertive' : 'polite'
-            }
-            accessibilityRole={notice.tone === 'danger' ? 'alert' : undefined}
-            intensity={88}
-            reducedTransparencyColor={NOTICE_SOLID_COLORS[notice.tone]}
-            style={[styles.notice, styles[`notice_${notice.tone}`]]}
-            tintColor="#FFFFFFD6"
-          >
-            <Text style={styles.noticeText}>{notice.text}</Text>
-            <Pressable
-              accessibilityLabel="お知らせを閉じる"
-              accessibilityRole="button"
-              hitSlop={10}
-              onPress={() => setNotice(null)}
-              style={styles.noticeClose}
-            >
-              <Text style={styles.noticeCloseText}>×</Text>
-            </Pressable>
-          </GlassSurface>
-        </View>
-      ) : null}
+      <NoticeBanner
+        notice={isComposerOpen ? null : notice}
+        onDismiss={() => setNotice(null)}
+      />
 
       <AlarmComposerModal
         canSubmit={canSubmitAlarm}
@@ -1366,7 +1314,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.86)',
     borderRadius: 13,
-    backgroundColor: 'rgba(255, 255, 255, 0.4)',
+    backgroundColor: 'rgba(248, 249, 253, 0.9)',
   },
   logoGlyph: {
     color: '#465BD4',
@@ -1447,82 +1395,15 @@ const styles = StyleSheet.create({
   buttonPressed: {
     transform: [{ scale: 0.96 }],
   },
-  noticeHost: {
-    position: 'absolute',
-    top: 8,
-    right: 12,
-    left: 12,
-    zIndex: 20,
-    alignItems: 'center',
-    pointerEvents: 'box-none',
-  },
-  notice: {
-    width: '100%',
-    maxWidth: 560,
-    minHeight: 48,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingLeft: 15,
-    paddingRight: 10,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderRadius: 17,
-    ...Platform.select({
-      web: { boxShadow: '0 8px 18px rgba(52, 68, 110, 0.15)' },
-      default: {
-        shadowColor: '#34446E',
-        shadowOpacity: 0.15,
-        shadowRadius: 18,
-        shadowOffset: { width: 0, height: 8 },
-        elevation: 8,
-      },
-    }),
-  },
-  notice_neutral: {
-    borderColor: 'rgba(121, 135, 176, 0.28)',
-    backgroundColor: 'rgba(244, 247, 255, 0.8)',
-  },
-  notice_success: {
-    borderColor: 'rgba(65, 166, 144, 0.34)',
-    backgroundColor: 'rgba(226, 249, 243, 0.84)',
-  },
-  notice_warning: {
-    borderColor: 'rgba(210, 153, 58, 0.34)',
-    backgroundColor: 'rgba(255, 247, 222, 0.86)',
-  },
-  notice_danger: {
-    borderColor: 'rgba(204, 91, 83, 0.34)',
-    backgroundColor: 'rgba(255, 235, 233, 0.88)',
-  },
-  noticeText: {
-    flex: 1,
-    color: '#35405C',
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: '700',
-  },
-  noticeClose: {
-    width: 30,
-    height: 30,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 15,
-    backgroundColor: 'rgba(255, 255, 255, 0.5)',
-  },
-  noticeCloseText: {
-    color: '#66718C',
-    fontSize: 19,
-    lineHeight: 21,
-  },
   nextAlarmCard: {
     minHeight: 136,
+    overflow: 'hidden',
     marginTop: 12,
     padding: 17,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.88)',
     borderRadius: 25,
-    backgroundColor: 'rgba(255, 255, 255, 0.48)',
+    backgroundColor: 'rgba(247, 248, 252, 0.93)',
     ...Platform.select({
       web: { boxShadow: '0 10px 22px rgba(82, 99, 183, 0.14)' },
       default: {
@@ -1608,12 +1489,13 @@ const styles = StyleSheet.create({
   },
   ringingCard: {
     minHeight: 150,
+    overflow: 'hidden',
     marginTop: 12,
     padding: 19,
     borderWidth: 1,
     borderColor: 'rgba(255, 225, 226, 0.7)',
     borderRadius: 25,
-    backgroundColor: 'rgba(177, 40, 51, 0.82)',
+    backgroundColor: '#A82F3A',
   },
   ringingLabel: {
     color: '#FECDCA',
@@ -1659,7 +1541,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.86)',
     borderRadius: 24,
-    backgroundColor: 'rgba(255, 255, 255, 0.46)',
+    backgroundColor: 'rgba(247, 248, 252, 0.93)',
   },
   idleIcon: {
     width: 50,
@@ -1690,11 +1572,12 @@ const styles = StyleSheet.create({
   listPanel: {
     flex: 1,
     minHeight: 0,
+    overflow: 'hidden',
     marginTop: 12,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.88)',
     borderRadius: 25,
-    backgroundColor: 'rgba(255, 255, 255, 0.46)',
+    backgroundColor: 'rgba(247, 248, 252, 0.94)',
     ...Platform.select({
       web: { boxShadow: '0 8px 18px rgba(89, 105, 170, 0.1)' },
       default: {
@@ -1758,11 +1641,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.56)',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
   },
   alarmCardDisabled: {
     borderColor: 'rgba(171, 179, 202, 0.18)',
-    backgroundColor: 'rgba(235, 238, 246, 0.5)',
+    backgroundColor: 'rgba(235, 238, 246, 0.86)',
   },
   alarmCardMain: {
     flexDirection: 'row',
