@@ -11,17 +11,8 @@ function localTime(hour: number, minute = 0, second = 0): Date {
   return new Date(2026, 0, 15, hour, minute, second, 0);
 }
 
-function colorDistance(left: string, right: string): number {
-  const channels = (color: string) => [
-    Number.parseInt(color.slice(1, 3), 16),
-    Number.parseInt(color.slice(3, 5), 16),
-    Number.parseInt(color.slice(5, 7), 16),
-  ];
-  return channels(left).reduce(
-    (distance, channel, index) =>
-      distance + Math.abs(channel - channels(right)[index]),
-    0,
-  );
+function timeFromMinute(minute: number): Date {
+  return localTime(Math.floor(minute / 60), minute % 60);
 }
 
 test('uses the device-local clock to select familiar day phases', () => {
@@ -33,45 +24,42 @@ test('uses the device-local clock to select familiar day phases', () => {
   assert.equal(getCircadianTheme(localTime(19)).phase, 'dusk');
 });
 
-test('moves the sun continuously from sunrise to sunset', () => {
+test('selects photorealistic background assets for familiar times', () => {
+  assert.equal(getCircadianTheme(localTime(2)).photoWeights.night, 1);
+  assert.equal(getCircadianTheme(localTime(7)).photoWeights.dawn, 1);
+  assert.equal(getCircadianTheme(localTime(12)).photoWeights.day, 1);
+  assert.equal(getCircadianTheme(localTime(19)).photoWeights.dusk, 1);
+});
+
+test('uses sunrise and sunset baselines to favor the matching photographs', () => {
   const sunrise = getCircadianTheme(
-    localTime(Math.floor(LOCAL_SUNRISE_MINUTE / 60)),
-  ).sun;
-  const noon = getCircadianTheme(localTime(12)).sun;
+    timeFromMinute(LOCAL_SUNRISE_MINUTE),
+  ).photoWeights;
   const sunset = getCircadianTheme(
-    localTime(Math.floor(LOCAL_SUNSET_MINUTE / 60)),
-  ).sun;
+    timeFromMinute(LOCAL_SUNSET_MINUTE),
+  ).photoWeights;
 
-  assert.equal(sunrise.opacity, 1);
-  assert.equal(noon.opacity, 1);
-  assert.equal(sunset.opacity, 1);
-  assert.ok(sunrise.x < noon.x && noon.x < sunset.x);
-  assert.ok(noon.y < sunrise.y && noon.y < sunset.y);
+  assert.ok(sunrise.dawn > sunrise.night);
+  assert.ok(sunset.dusk > sunset.day);
 });
 
-test('cross-fades the moon and sun during civil-style twilight', () => {
-  const beforeSunrise = getCircadianTheme(localTime(5, 45));
-  const afterSunset = getCircadianTheme(localTime(18, 15));
-
-  assert.equal(beforeSunrise.sun.opacity, 0.5);
-  assert.equal(beforeSunrise.moon.opacity, 0.5);
-  assert.equal(afterSunset.sun.opacity, 0.5);
-  assert.equal(afterSunset.moon.opacity, 0.5);
+test('cross-fades adjacent photo backgrounds without changing total opacity', () => {
+  [localTime(5, 30), localTime(9), localTime(17), localTime(20, 45)].forEach(
+    (date) => {
+      const weights = Object.values(getCircadianTheme(date).photoWeights);
+      assert.ok(weights.filter((weight) => weight > 0).length <= 2);
+      assert.ok(
+        Math.abs(weights.reduce((sum, weight) => sum + weight, 0) - 1) < 1e-9,
+      );
+    },
+  );
 });
 
-test('keeps sky colors continuous across midnight', () => {
-  const beforeMidnight = getCircadianTheme(localTime(23, 59, 59));
-  const midnight = getCircadianTheme(localTime(0));
-
-  beforeMidnight.skyColors.forEach((color, index) => {
-    assert.ok(colorDistance(color, midnight.skyColors[index]) <= 2);
-  });
-  assert.ok(beforeMidnight.moon.x < midnight.moon.x);
-});
-
-test('shows stars at night and removes them from the daytime sky', () => {
-  assert.ok(getCircadianTheme(localTime(2)).starsOpacity > 0.7);
-  assert.equal(getCircadianTheme(localTime(12)).starsOpacity, 0);
+test('keeps the night photograph continuous across midnight', () => {
+  assert.deepEqual(
+    getCircadianTheme(localTime(23, 59, 59)).photoWeights,
+    getCircadianTheme(localTime(0)).photoWeights,
+  );
 });
 
 test('rejects invalid dates rather than silently choosing a theme', () => {
