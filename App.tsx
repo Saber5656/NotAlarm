@@ -1,7 +1,14 @@
 import * as Notifications from 'expo-notifications';
 import { Pedometer } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -194,6 +201,41 @@ async function cancelDefinitionNotifications(
     await dismissDeliveredNotification(cycle.checkInNotificationId);
     await dismissDeliveredNotification(cycle.mainAlarmId);
   }
+}
+
+interface ScreenFrameProps {
+  accessibilityMinHeight: number;
+  children: ReactNode;
+  useAccessibilityScroll: boolean;
+}
+
+function ScreenFrame({
+  accessibilityMinHeight,
+  children,
+  useAccessibilityScroll,
+}: ScreenFrameProps) {
+  if (useAccessibilityScroll) {
+    return (
+      <ScrollView
+        bounces
+        contentContainerStyle={styles.screenScrollerContent}
+        showsVerticalScrollIndicator
+        style={styles.screenScroller}
+      >
+        <View
+          style={[styles.screen, { minHeight: accessibilityMinHeight }]}
+        >
+          {children}
+        </View>
+      </ScrollView>
+    );
+  }
+
+  return (
+    <View style={styles.screenViewport}>
+      <View style={styles.screen}>{children}</View>
+    </View>
+  );
 }
 
 function AlarmApp() {
@@ -729,11 +771,11 @@ function AlarmApp() {
             );
           });
           setCurrentAlarms(next);
-          setNotice({ tone: 'neutral', text: 'アラームをオフにしました。' });
           return;
         }
 
         await prepareNotifications();
+        const fillWarnings: string[] = [];
         const next = await mutateAlarmDefinitions(async (current) => {
           const latest = current.find(
             (alarm) => alarm.id === definition.id,
@@ -769,12 +811,18 @@ function AlarmApp() {
             now,
             schedulingGateway,
           );
+          fillWarnings.push(...filled.warnings);
           return current.map((alarm) =>
             alarm.id === definition.id ? filled.definition : alarm,
           );
         });
         setCurrentAlarms(next);
-        setNotice({ tone: 'success', text: 'アラームをオンにしました。' });
+        if (fillWarnings.length > 0) {
+          setNotice({
+            tone: 'warning',
+            text: 'アラームはオンにしましたが、一部の起床確認通知を予約できませんでした。',
+          });
+        }
       } catch (error) {
         setNotice({
           tone: 'danger',
@@ -899,7 +947,7 @@ function AlarmApp() {
       ? { text: notice.text, tone: notice.tone }
       : undefined;
   const useAccessibilityScreenScroll = fontScale > 1.3;
-  const useCompactHeightLayout = viewportHeight < 620;
+  const useCompactHeightLayout = viewportHeight < 860;
   const accessibilityScreenMinHeight = Math.max(
     viewportHeight,
     Math.round(720 * Math.min(fontScale, 2)),
@@ -931,21 +979,10 @@ function AlarmApp() {
       <StatusBar style="light" />
       <CircadianBackground theme={circadianTheme} />
 
-      <ScrollView
-        bounces={useAccessibilityScreenScroll}
-        contentContainerStyle={styles.screenScrollerContent}
-        scrollEnabled={useAccessibilityScreenScroll}
-        showsVerticalScrollIndicator={useAccessibilityScreenScroll}
-        style={styles.screenScroller}
+      <ScreenFrame
+        accessibilityMinHeight={accessibilityScreenMinHeight}
+        useAccessibilityScroll={useAccessibilityScreenScroll}
       >
-        <View
-          style={[
-            styles.screen,
-            useAccessibilityScreenScroll && {
-              minHeight: accessibilityScreenMinHeight,
-            },
-          ]}
-        >
         <View style={styles.brandRow}>
           <View style={styles.logoMark}>
             <Text style={styles.logoGlyph}>↑</Text>
@@ -961,13 +998,13 @@ function AlarmApp() {
             </Text>
           </View>
           <GlassSurface
-            fallbackColor="rgba(42, 93, 214, 0.9)"
+            fallbackColor="rgba(72, 112, 214, 0.42)"
             glassEffectStyle="clear"
-            intensity={88}
+            intensity={76}
             isInteractive
-            reducedTransparencyColor="#2F5EDB"
+            reducedTransparencyColor="#3E6ED4"
             style={styles.addButtonShell}
-            tintColor="#2F65E6C8"
+            tintColor="#7198EAA8"
           >
             <Pressable
               accessibilityLabel="アラームを追加"
@@ -1018,13 +1055,18 @@ function AlarmApp() {
             </Pressable>
           </View>
         ) : monitoringCycle && monitoringDefinition ? (
-          <View
+          <GlassSurface
+            fallbackColor="rgba(8, 30, 65, 0.36)"
+            glassEffectStyle="regular"
+            intensity={76}
+            reducedTransparencyColor="#173A68"
             style={[
               styles.nextAlarmCard,
               useAccessibilityScreenScroll &&
                 styles.alarmSummaryCardAccessible,
             ]}
             testID="next-alarm-summary"
+            tintColor="#244F8666"
           >
             <View style={styles.nextAlarmGlow} />
             <View style={styles.nextAlarmHeader}>
@@ -1076,15 +1118,20 @@ function AlarmApp() {
               </Text>
               <Text style={styles.progressStatus}>{pedometerStatus}</Text>
             </View>
-          </View>
+          </GlassSurface>
         ) : (
-          <View
+          <GlassSurface
+            fallbackColor="rgba(8, 30, 65, 0.36)"
+            glassEffectStyle="regular"
+            intensity={76}
+            reducedTransparencyColor="#173A68"
             style={[
               styles.idleCard,
               useAccessibilityScreenScroll &&
                 styles.alarmSummaryCardAccessible,
             ]}
             testID="next-alarm-summary"
+            tintColor="#244F8666"
           >
             <View style={styles.idleIcon}>
               <Text style={styles.idleIconText}>☾</Text>
@@ -1095,7 +1142,7 @@ function AlarmApp() {
                 右上の＋から、最初の起床時刻を追加できます。
               </Text>
             </View>
-          </View>
+          </GlassSurface>
         )}
 
         <View style={styles.listPanel}>
@@ -1215,8 +1262,7 @@ function AlarmApp() {
             </Text>
           </View>
         ) : null}
-        </View>
-      </ScrollView>
+      </ScreenFrame>
 
       <NoticeBanner
         notice={isComposerOpen ? null : notice}
@@ -1279,7 +1325,12 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 8,
+    paddingBottom: 5,
+  },
+  screenViewport: {
+    flex: 1,
+    minHeight: 0,
+    width: '100%',
   },
   screenScroller: {
     flex: 1,
@@ -1341,17 +1392,17 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.48)',
+    borderColor: 'rgba(255, 255, 255, 0.72)',
     borderRadius: 18,
-    backgroundColor: 'rgba(47, 94, 219, 0.9)',
+    backgroundColor: 'rgba(75, 116, 218, 0.28)',
     ...Platform.select({
-      web: { boxShadow: '0 10px 20px rgba(3, 18, 47, 0.26)' },
+      web: { boxShadow: '0 10px 22px rgba(3, 18, 47, 0.24)' },
       default: {
         shadowColor: '#03122F',
-        shadowOpacity: 0.26,
-        shadowRadius: 18,
+        shadowOpacity: 0.24,
+        shadowRadius: 20,
         shadowOffset: { width: 0, height: 10 },
-        elevation: 6,
+        elevation: 5,
       },
     }),
   },
@@ -1382,17 +1433,17 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.3)',
+    borderColor: 'rgba(255, 255, 255, 0.52)',
     borderRadius: 25,
-    backgroundColor: 'rgba(5, 28, 61, 0.84)',
+    backgroundColor: 'rgba(8, 30, 65, 0.1)',
     ...Platform.select({
-      web: { boxShadow: '0 14px 26px rgba(0, 8, 26, 0.28)' },
+      web: { boxShadow: '0 14px 30px rgba(0, 10, 31, 0.2)' },
       default: {
-        shadowColor: '#00081A',
-        shadowOpacity: 0.28,
-        shadowRadius: 24,
+        shadowColor: '#000A1F',
+        shadowOpacity: 0.2,
+        shadowRadius: 26,
         shadowOffset: { width: 0, height: 14 },
-        elevation: 7,
+        elevation: 5,
       },
     }),
   },
@@ -1404,8 +1455,8 @@ const styles = StyleSheet.create({
     height: 170,
     borderRadius: 85,
     borderWidth: 1,
-    borderColor: 'rgba(255, 223, 165, 0.22)',
-    backgroundColor: 'rgba(255, 187, 104, 0.12)',
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: 'rgba(152, 186, 246, 0.12)',
     pointerEvents: 'none',
   },
   nextAlarmHeader: {
@@ -1415,7 +1466,7 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   nextAlarmLabel: {
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: 'rgba(255, 255, 255, 0.74)',
     fontSize: 10,
     fontWeight: '900',
     letterSpacing: 0.6,
@@ -1437,7 +1488,7 @@ const styles = StyleSheet.create({
   },
   nextAlarmCountdown: {
     marginTop: 4,
-    color: 'rgba(255, 255, 255, 0.68)',
+    color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 11,
   },
   progressTrack: {
@@ -1445,7 +1496,7 @@ const styles = StyleSheet.create({
     marginTop: 13,
     overflow: 'hidden',
     borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
   },
   progressFill: {
     height: '100%',
@@ -1466,7 +1517,7 @@ const styles = StyleSheet.create({
   },
   progressStatus: {
     flex: 1,
-    color: 'rgba(255, 255, 255, 0.64)',
+    color: 'rgba(255, 255, 255, 0.66)',
     fontSize: 9,
     textAlign: 'right',
   },
@@ -1522,9 +1573,9 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.3)',
+    borderColor: 'rgba(255, 255, 255, 0.52)',
     borderRadius: 24,
-    backgroundColor: 'rgba(5, 28, 61, 0.84)',
+    backgroundColor: 'rgba(8, 30, 65, 0.1)',
   },
   alarmSummaryCardAccessible: {
     height: 'auto',
@@ -1537,11 +1588,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(255, 255, 255, 0.28)',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
   },
   idleIconText: {
-    color: '#F7E8BC',
+    color: '#DCE9FF',
     fontSize: 25,
   },
   idleCopy: {
@@ -1554,7 +1605,7 @@ const styles = StyleSheet.create({
   },
   idleText: {
     marginTop: 4,
-    color: 'rgba(255, 255, 255, 0.68)',
+    color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 11,
     lineHeight: 16,
   },
@@ -1562,19 +1613,20 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
     overflow: 'hidden',
-    marginTop: 12,
+    marginTop: 10,
+    marginBottom: 1,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.78)',
+    borderColor: 'rgba(255, 255, 255, 0.82)',
     borderRadius: 25,
-    backgroundColor: 'rgba(247, 249, 252, 0.96)',
+    backgroundColor: 'rgba(247, 249, 252, 0.95)',
     ...Platform.select({
-      web: { boxShadow: '0 16px 30px rgba(0, 13, 35, 0.2)' },
+      web: { boxShadow: '0 14px 28px rgba(0, 13, 35, 0.17)' },
       default: {
         shadowColor: '#000D23',
-        shadowOpacity: 0.2,
-        shadowRadius: 26,
-        shadowOffset: { width: 0, height: 16 },
-        elevation: 7,
+        shadowOpacity: 0.17,
+        shadowRadius: 24,
+        shadowOffset: { width: 0, height: 14 },
+        elevation: 5,
       },
     }),
   },
@@ -1620,7 +1672,7 @@ const styles = StyleSheet.create({
   alarmScrollContent: {
     flexGrow: 1,
     padding: 11,
-    paddingBottom: 16,
+    paddingBottom: 13,
   },
   alarmList: {
     gap: 9,
