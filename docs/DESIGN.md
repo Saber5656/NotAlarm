@@ -198,6 +198,8 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - Apple HIGに従い、Glassはcontent cardの背景に使わず、追加、通知、時刻編集、選択lens、確定などcontent上に浮くfunctional control layerへ限定する。大面積の次回表示・一覧・alarm cardはstandard materialとする。
 - 追加フォームの「時刻／繰り返し」とrepeat controlは、それぞれ1つのglass lensを選択肢間でspring移動させ、単なる背景色の切替にしない。native GlassView自体のopacityはanimateせず、wrapperのgeometryを移動する。Reduce Motion時は選択位置を即時更新する。
 - Glass surface 上でも本文・操作のコントラストを維持し、tintは主操作・選択・statusの意味がある箇所だけに使う。glass-on-glassを避ける。
+- ホーム背景は端末のローカル時刻とtimezoneだけから決定し、上空の濃紺を保った4色gradient、星、太陽、月、地平線を連続変化させる。基準の日の出は06:00、日の入りは18:00、前後30分をtwilightとし、太陽と月をcross-fadeする。描画はdecorativeとしてaccessibility treeから除外し、status barとheaderは全時間帯で白文字のcontrastを維持する。
+- 背景の空色計算は純粋関数に分離し、UIは算出済みpaletteとcelestial positionだけを描画する。位置情報、国籍、networkは現行モデルへ入力しない。実地点・季節の日の出時刻を使う拡張は、任意の位置情報権限、手動地域設定、privacy copyを別途承認してから追加する。
 - Web は UI smoke test とし、通知操作を disabled にする。
 
 ## 12. Platform 制約
@@ -238,12 +240,15 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | UI-06 | 通常端末で追加フォームの「時刻／繰り返し」を切替 | sheetとfooterが動かず、内容領域はスクロールしない |
 | UI-07 | iOS wheelの選択帯 | 216pt wheelを縦に欠けさせず、横方向は角丸surface内に収まる |
 | UI-08 | 高さ700pt未満、幅360pt未満、または`fontScale > 1.3` | フォーム本体だけがスクロールし、全操作へ到達できる |
+| UI-09 | 02:00 / 06:00 / 12:00 / 18:00 / 21:00のlocal time | phase、星、太陽、月、sky paletteが期待する状態になる |
+| UI-10 | 23:59:59から00:00:00へ遷移 | sky paletteと月の軌道が不連続に飛ばない |
 
 ## 14. 参照資料
 
 - [Expo Notifications — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
 - [Expo DateTimePicker — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/date-time-picker/)
+- [Expo LinearGradient — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/linear-gradient/)
 - [React Native 0.81 PanResponder](https://reactnative.dev/docs/0.81/panresponder)
 - [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)
 - [Apple: UILocalNotification pending limit](https://developer.apple.com/documentation/uikit/uilocalnotification)

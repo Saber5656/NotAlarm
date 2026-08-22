@@ -18,6 +18,13 @@
 - 状態通知は閉じるボタンまたは上スワイプでdismiss
 - 操作層だけに限定したLiquid Glassと、追加フォーム／繰り返しの選択に追従してspring移動するglass lens
 - iOS 26のnative Liquid Glass、旧iOS / WebのBlur、Androidの安定したfallback、Reduce Transparency / Reduce Motion対応
+- 端末のローカル時刻に合わせ、星・月・太陽・空・地平線が夜明けから夜まで連続変化する背景
+
+## 時間帯に合わせた背景
+
+背景は端末の現在時刻とtimezoneを使い、位置情報権限や外部APIなしで変化します。現在は日の出を06:00、日の入りを18:00とする基準モデルで、前後30分は太陽と月をcross-fadeし、空の色は複数のkeyframe間を補間します。
+
+国籍は日の出・日の入りを決める情報ではないため使用しません。実際の地域・季節に合わせる場合は、位置情報を任意で許可した利用者だけ緯度・経度から日の出・日の入りを算出する追加機能として扱います。
 
 ## 動作ルール
 
@@ -110,6 +117,7 @@ Web export は UI と bundle の smoke test です。通知、Pedometer、Apple 
 - [Expo GlassEffect — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/glass-effect/)
 - [Expo BlurView — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/blur-view/)
 - [Expo DateTimePicker — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/date-time-picker/)
+- [Expo LinearGradient — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/linear-gradient/)
 - [React Native 0.81 PanResponder](https://reactnative.dev/docs/0.81/panresponder)
 - [Apple Human Interface Guidelines: Materials](https://developer.apple.com/design/human-interface-guidelines/materials)
 - [Apple WWDC25: Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/)
