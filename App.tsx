@@ -87,6 +87,8 @@ const schedulingGateway = {
   scheduleCheckIn: scheduleCheckInNotification,
 };
 
+const ALARM_SUMMARY_CARD_HEIGHT = 140;
+
 function makeAlarmId(): string {
   return `alarm-${Date.now().toString(36)}-${Math.random()
     .toString(36)
@@ -1012,7 +1014,14 @@ function AlarmApp() {
             </Pressable>
           </View>
         ) : monitoringCycle && monitoringDefinition ? (
-          <View style={styles.nextAlarmCard}>
+          <View
+            style={[
+              styles.nextAlarmCard,
+              useAccessibilityScreenScroll &&
+                styles.alarmSummaryCardAccessible,
+            ]}
+            testID="next-alarm-summary"
+          >
             <View style={styles.nextAlarmGlow} />
             <View style={styles.nextAlarmHeader}>
               <View>
@@ -1065,7 +1074,14 @@ function AlarmApp() {
             </View>
           </View>
         ) : (
-          <View style={styles.idleCard}>
+          <View
+            style={[
+              styles.idleCard,
+              useAccessibilityScreenScroll &&
+                styles.alarmSummaryCardAccessible,
+            ]}
+            testID="next-alarm-summary"
+          >
             <View style={styles.idleIcon}>
               <Text style={styles.idleIconText}>☾</Text>
             </View>
@@ -1396,7 +1412,7 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.96 }],
   },
   nextAlarmCard: {
-    minHeight: 136,
+    height: ALARM_SUMMARY_CARD_HEIGHT,
     overflow: 'hidden',
     marginTop: 12,
     padding: 17,
@@ -1532,7 +1548,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   idleCard: {
-    minHeight: 104,
+    height: ALARM_SUMMARY_CARD_HEIGHT,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 13,
@@ -1542,6 +1558,10 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.86)',
     borderRadius: 24,
     backgroundColor: 'rgba(247, 248, 252, 0.93)',
+  },
+  alarmSummaryCardAccessible: {
+    height: 'auto',
+    minHeight: ALARM_SUMMARY_CARD_HEIGHT,
   },
   idleIcon: {
     width: 50,

@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   AccessibilityInfo,
   Animated,
+  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
@@ -10,6 +11,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import {
+  NOTICE_OFFSCREEN_Y,
+  clampNoticeSwipeOffset,
+  shouldCaptureNoticeSwipe,
+  shouldDismissNoticeSwipe,
+} from '../noticeGesture';
 import { GlassSurface } from './GlassSurface';
 import { useReducedMotion } from './useReducedMotion';
 
@@ -53,10 +60,20 @@ const SYMBOLS: Record<NoticeTone, string> = {
   danger: '!',
 };
 
+const NOTICE_SPRING_CONFIG = {
+  damping: 20,
+  mass: 0.82,
+  stiffness: 230,
+  useNativeDriver: true,
+} as const;
+
 export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
   const insets = useSafeAreaInsets();
   const reduceMotion = useReducedMotion();
-  const translateY = useRef(new Animated.Value(-84)).current;
+  const translateY = useRef(
+    new Animated.Value(NOTICE_OFFSCREEN_Y),
+  ).current;
+  const gestureStartY = useRef(0);
 
   useEffect(() => {
     if (!notice || Platform.OS !== 'ios') {
@@ -79,21 +96,14 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
       return;
     }
 
-    translateY.setValue(-84);
+    translateY.setValue(NOTICE_OFFSCREEN_Y);
     Animated.spring(translateY, {
-      damping: 20,
-      mass: 0.82,
-      stiffness: 230,
+      ...NOTICE_SPRING_CONFIG,
       toValue: 0,
-      useNativeDriver: true,
     }).start();
   }, [notice?.text, notice?.tone, reduceMotion, translateY]);
 
-  if (!notice) {
-    return null;
-  }
-
-  const dismiss = () => {
+  const dismiss = useCallback(() => {
     translateY.stopAnimation();
     if (reduceMotion) {
       onDismiss();
@@ -102,14 +112,64 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
 
     Animated.timing(translateY, {
       duration: 180,
-      toValue: -84,
+      toValue: NOTICE_OFFSCREEN_Y,
       useNativeDriver: true,
     }).start(({ finished }) => {
       if (finished) {
         onDismiss();
       }
     });
-  };
+  }, [onDismiss, reduceMotion, translateY]);
+
+  const restorePosition = useCallback(() => {
+    translateY.stopAnimation();
+    if (reduceMotion) {
+      translateY.setValue(0);
+      return;
+    }
+
+    Animated.spring(translateY, {
+      ...NOTICE_SPRING_CONFIG,
+      toValue: 0,
+    }).start();
+  }, [reduceMotion, translateY]);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gestureState) =>
+          notice !== null &&
+          shouldCaptureNoticeSwipe(gestureState.dx, gestureState.dy),
+        onPanResponderGrant: () => {
+          translateY.stopAnimation((currentValue) => {
+            gestureStartY.current = currentValue;
+          });
+        },
+        onPanResponderMove: (_, gestureState) => {
+          translateY.setValue(
+            clampNoticeSwipeOffset(
+              gestureStartY.current + gestureState.dy,
+            ),
+          );
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          if (
+            shouldDismissNoticeSwipe(gestureState.dy, gestureState.vy)
+          ) {
+            dismiss();
+            return;
+          }
+          restorePosition();
+        },
+        onPanResponderTerminate: restorePosition,
+        onPanResponderTerminationRequest: () => true,
+      }),
+    [dismiss, notice, restorePosition, translateY],
+  );
+
+  if (!notice) {
+    return null;
+  }
 
   return (
     <View
@@ -117,7 +177,9 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
       style={[styles.host, { top: insets.top + 6 }]}
     >
       <Animated.View
+        {...panResponder.panHandlers}
         style={[styles.motion, { transform: [{ translateY }] }]}
+        testID="notice-banner-motion"
       >
         <GlassSurface
           accessibilityLiveRegion={
@@ -131,11 +193,17 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
           style={[styles.banner, styles[`banner_${notice.tone}`]]}
           tintColor={TINT_COLORS[notice.tone]}
         >
+          <View
+            accessible={false}
+            pointerEvents="none"
+            style={styles.swipeCue}
+          />
           <View style={[styles.symbol, styles[`symbol_${notice.tone}`]]}>
             <Text style={styles.symbolText}>{SYMBOLS[notice.tone]}</Text>
           </View>
           <Text style={styles.text}>{notice.text}</Text>
           <Pressable
+            accessibilityHint="上にスワイプしても閉じられます"
             accessibilityLabel="お知らせを閉じる"
             accessibilityRole="button"
             hitSlop={10}
@@ -172,7 +240,8 @@ const styles = StyleSheet.create({
     gap: 11,
     paddingLeft: 10,
     paddingRight: 8,
-    paddingVertical: 8,
+    paddingTop: 10,
+    paddingBottom: 8,
     borderWidth: 1,
     borderRadius: 20,
     ...Platform.select({
@@ -185,6 +254,16 @@ const styles = StyleSheet.create({
         elevation: 14,
       },
     }),
+  },
+  swipeCue: {
+    position: 'absolute',
+    top: 4,
+    left: '50%',
+    width: 26,
+    height: 3,
+    marginLeft: -13,
+    borderRadius: 999,
+    backgroundColor: 'rgba(75, 88, 125, 0.34)',
   },
   banner_neutral: {
     borderColor: 'rgba(121, 135, 176, 0.34)',
