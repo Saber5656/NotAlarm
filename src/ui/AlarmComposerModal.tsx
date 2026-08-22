@@ -1,11 +1,9 @@
-import DateTimePicker, {
-  DateTimePickerAndroid,
-} from '@react-native-community/datetimepicker';
 import { BlurView } from 'expo-blur';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -13,12 +11,15 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { RepeatKind, Weekday } from '../alarmSchedule';
+import { parseAlarmTimeInput } from '../alarmTime';
 import { GlassSurface } from './GlassSurface';
+import { LiquidRepeatSelector } from './LiquidRepeatSelector';
 import { UI_COLORS } from './tokens';
 
 interface AlarmComposerModalProps {
@@ -39,13 +40,6 @@ interface AlarmComposerModalProps {
   visible: boolean;
 }
 
-const REPEAT_OPTIONS: Array<{ kind: RepeatKind; label: string }> = [
-  { kind: 'today', label: '今日だけ' },
-  { kind: 'daily', label: '毎日' },
-  { kind: 'weekdays', label: '平日' },
-  { kind: 'custom', label: '曜日指定' },
-];
-
 const WEEKDAY_OPTIONS: Array<{ value: Weekday; label: string }> = [
   { value: 1, label: '月' },
   { value: 2, label: '火' },
@@ -63,6 +57,15 @@ function formatAlarmTime(date: Date): string {
     .padStart(2, '0')}`;
 }
 
+function sanitizeClockInput(value: string): string {
+  return value
+    .replace(/[０-９]/g, (digit) =>
+      String.fromCharCode(digit.charCodeAt(0) - 0xfee0),
+    )
+    .replace(/\D/g, '')
+    .slice(0, 2);
+}
+
 export function AlarmComposerModal({
   canSubmit,
   customWeekdays,
@@ -78,6 +81,15 @@ export function AlarmComposerModal({
   visible,
 }: AlarmComposerModalProps) {
   const insets = useSafeAreaInsets();
+  const minuteInputRef = useRef<TextInput>(null);
+  const [isTimeEditing, setIsTimeEditing] = useState(false);
+  const [draftHour, setDraftHour] = useState(
+    selectedTime.getHours().toString().padStart(2, '0'),
+  );
+  const [draftMinute, setDraftMinute] = useState(
+    selectedTime.getMinutes().toString().padStart(2, '0'),
+  );
+  const [timeInputError, setTimeInputError] = useState<string | null>(null);
 
   useEffect(() => {
     if (formNotice && visible && Platform.OS === 'ios') {
@@ -88,43 +100,59 @@ export function AlarmComposerModal({
   }, [formNotice?.text, formNotice?.tone, visible]);
 
   useEffect(() => {
-    if (Platform.OS !== 'android') {
-      return undefined;
-    }
-
-    const dismissTimePicker = () => {
-      void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
-    };
-
     if (!visible) {
-      dismissTimePicker();
+      setIsTimeEditing(false);
+      setTimeInputError(null);
+      Keyboard.dismiss();
     }
-
-    return dismissTimePicker;
   }, [visible]);
 
   const closeIfIdle = () => {
     if (!isBusy) {
-      if (Platform.OS === 'android') {
-        void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
-      }
+      setIsTimeEditing(false);
+      setTimeInputError(null);
+      Keyboard.dismiss();
       onClose();
     }
   };
 
-  const openAndroidTimePicker = () => {
-    DateTimePickerAndroid.open({
-      display: 'default',
-      is24Hour: true,
-      mode: 'time',
-      onChange: (event, date) => {
-        if (event.type === 'set' && date) {
-          onTimeChange(date);
-        }
-      },
-      value: selectedTime,
-    });
+  const beginTimeEditing = () => {
+    setDraftHour(selectedTime.getHours().toString().padStart(2, '0'));
+    setDraftMinute(selectedTime.getMinutes().toString().padStart(2, '0'));
+    setTimeInputError(null);
+    setIsTimeEditing(true);
   };
+
+  const cancelTimeEditing = () => {
+    setIsTimeEditing(false);
+    setTimeInputError(null);
+    Keyboard.dismiss();
+  };
+
+  const confirmTimeEditing = () => {
+    try {
+      const { hour, minute } = parseAlarmTimeInput(draftHour, draftMinute);
+      const nextTime = new Date(selectedTime);
+      nextTime.setHours(hour, minute, 0, 0);
+      onTimeChange(nextTime);
+      setDraftHour(hour.toString().padStart(2, '0'));
+      setDraftMinute(minute.toString().padStart(2, '0'));
+      setTimeInputError(null);
+      setIsTimeEditing(false);
+      Keyboard.dismiss();
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : '時は0〜23、分は0〜59で入力してください。';
+      setTimeInputError(message);
+      if (Platform.OS === 'ios') {
+        AccessibilityInfo.announceForAccessibility(message);
+      }
+    }
+  };
+
+  const submitEnabled = canSubmit && !isTimeEditing;
 
   return (
     <Modal
@@ -149,20 +177,22 @@ export function AlarmComposerModal({
         />
 
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={
+            Platform.OS === 'ios'
+              ? 'padding'
+              : Platform.OS === 'android'
+                ? 'height'
+                : undefined
+          }
           style={[
             styles.keyboardLayer,
             { paddingBottom: Math.max(insets.bottom, 10) },
           ]}
         >
-          <GlassSurface
+          <View
             accessibilityLabel="アラームを追加"
             accessibilityViewIsModal
-            blurTint="systemThickMaterialLight"
-            intensity={88}
-            reducedTransparencyColor="#F2F4FA"
             style={styles.sheet}
-            tintColor="#F7F8FFB8"
           >
             <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleCopy}>
@@ -172,19 +202,29 @@ export function AlarmComposerModal({
                   時刻と繰り返しを選んでください
                 </Text>
               </View>
-              <Pressable
-                accessibilityLabel="閉じる"
-                accessibilityRole="button"
-                disabled={isBusy}
-                hitSlop={12}
-                onPress={closeIfIdle}
-                style={({ pressed }) => [
-                  styles.closeButton,
-                  pressed && styles.buttonPressed,
-                ]}
+              <GlassSurface
+                fallbackColor="rgba(255, 255, 255, 0.82)"
+                glassEffectStyle="regular"
+                intensity={86}
+                isInteractive
+                reducedTransparencyColor="#F4F5FA"
+                style={styles.closeButtonShell}
+                tintColor="#FFFFFFA8"
               >
-                <Text style={styles.closeGlyph}>×</Text>
-              </Pressable>
+                <Pressable
+                  accessibilityLabel="閉じる"
+                  accessibilityRole="button"
+                  disabled={isBusy}
+                  hitSlop={12}
+                  onPress={closeIfIdle}
+                  style={({ pressed }) => [
+                    styles.closeButton,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Text style={styles.closeGlyph}>×</Text>
+                </Pressable>
+              </GlassSurface>
             </View>
 
             <ScrollView
@@ -196,69 +236,128 @@ export function AlarmComposerModal({
               testID="alarm-composer-scroll"
             >
               <View style={styles.timePanel}>
-                <View style={styles.timeCopy}>
-                  <Text style={styles.fieldLabel}>時刻</Text>
-                  <Text style={styles.timePreview}>
-                    {formatAlarmTime(selectedTime)}
-                  </Text>
-                </View>
-                {Platform.OS === 'web' ? (
-                  <View style={styles.deviceOnlyPicker}>
-                    <Text style={styles.deviceOnlyPickerText}>実機で選択</Text>
+                <Text style={styles.fieldLabel}>時刻</Text>
+                {isTimeEditing ? (
+                  <View style={styles.timeEditor}>
+                    <View style={styles.timeInputRow}>
+                      <TextInput
+                        accessibilityLabel="時"
+                        autoFocus
+                        inputMode="numeric"
+                        keyboardType="number-pad"
+                        maxLength={2}
+                        onChangeText={(value) => {
+                          const next = sanitizeClockInput(value);
+                          setDraftHour(next);
+                          setTimeInputError(null);
+                          if (next.length === 2) {
+                            minuteInputRef.current?.focus();
+                          }
+                        }}
+                        onSubmitEditing={() => minuteInputRef.current?.focus()}
+                        returnKeyType="next"
+                        selectTextOnFocus
+                        style={styles.timeInput}
+                        testID="alarm-hour-input"
+                        value={draftHour}
+                      />
+                      <Text style={styles.timeColon}>:</Text>
+                      <TextInput
+                        accessibilityLabel="分"
+                        inputMode="numeric"
+                        keyboardType="number-pad"
+                        maxLength={2}
+                        onChangeText={(value) => {
+                          setDraftMinute(sanitizeClockInput(value));
+                          setTimeInputError(null);
+                        }}
+                        onSubmitEditing={confirmTimeEditing}
+                        ref={minuteInputRef}
+                        returnKeyType="done"
+                        selectTextOnFocus
+                        style={styles.timeInput}
+                        testID="alarm-minute-input"
+                        value={draftMinute}
+                      />
+                    </View>
+                    {timeInputError ? (
+                      <Text
+                        accessibilityLiveRegion="assertive"
+                        accessibilityRole="alert"
+                        style={styles.timeInputError}
+                      >
+                        {timeInputError}
+                      </Text>
+                    ) : null}
+                    <View style={styles.timeEditorActions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={cancelTimeEditing}
+                        style={({ pressed }) => [
+                          styles.timeCancelButton,
+                          pressed && styles.buttonPressed,
+                        ]}
+                      >
+                        <Text style={styles.timeCancelText}>キャンセル</Text>
+                      </Pressable>
+                      <GlassSurface
+                        fallbackColor="rgba(206, 216, 255, 0.94)"
+                        intensity={88}
+                        isInteractive
+                        reducedTransparencyColor="#DCE2FA"
+                        style={styles.timeConfirmShell}
+                        tintColor="#C9D3FFB8"
+                      >
+                        <Pressable
+                          accessibilityRole="button"
+                          onPress={confirmTimeEditing}
+                          style={({ pressed }) => [
+                            styles.timeConfirmButton,
+                            pressed && styles.buttonPressed,
+                          ]}
+                        >
+                          <Text style={styles.timeConfirmText}>この時刻に決定</Text>
+                        </Pressable>
+                      </GlassSurface>
+                    </View>
                   </View>
-                ) : Platform.OS === 'android' ? (
-                  <Pressable
-                    accessibilityLabel="アラーム時刻を選択"
-                    accessibilityRole="button"
-                    disabled={isBusy}
-                    hitSlop={4}
-                    onPress={openAndroidTimePicker}
-                    style={({ pressed }) => [
-                      styles.deviceOnlyPicker,
-                      (pressed || isBusy) && styles.buttonPressed,
-                    ]}
-                  >
-                    <Text style={styles.deviceOnlyPickerText}>時刻を変更</Text>
-                  </Pressable>
                 ) : (
-                  <DateTimePicker
-                    accessibilityLabel="アラーム時刻を選択"
-                    display="compact"
-                    mode="time"
-                    onChange={(_, date) => date && onTimeChange(date)}
-                    value={selectedTime}
-                  />
+                  <GlassSurface
+                    fallbackColor="rgba(255, 255, 255, 0.76)"
+                    intensity={84}
+                    isInteractive
+                    reducedTransparencyColor="#F4F5F9"
+                    style={styles.timePreviewShell}
+                    tintColor="#EEF1FF9C"
+                  >
+                    <Pressable
+                      accessibilityHint="キーボードから時と分を入力できます"
+                      accessibilityLabel={`${formatAlarmTime(selectedTime)}、時刻を変更`}
+                      accessibilityRole="button"
+                      onPress={beginTimeEditing}
+                      style={({ pressed }) => [
+                        styles.timePreviewButton,
+                        pressed && styles.buttonPressed,
+                      ]}
+                      testID="alarm-time-edit-trigger"
+                    >
+                      <Text style={styles.timePreview}>
+                        {formatAlarmTime(selectedTime)}
+                      </Text>
+                      <View style={styles.timeEditCopy}>
+                        <Text style={styles.timeEditLabel}>キーボード入力</Text>
+                        <Text style={styles.timeEditHint}>タップして変更</Text>
+                      </View>
+                    </Pressable>
+                  </GlassSurface>
                 )}
               </View>
 
               <Text style={styles.fieldLabel}>繰り返し</Text>
-              <View style={styles.optionGrid}>
-                {REPEAT_OPTIONS.map((option) => {
-                  const selected = repeatKind === option.kind;
-                  return (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityState={{ selected }}
-                      key={option.kind}
-                      onPress={() => onRepeatKindChange(option.kind)}
-                      style={({ pressed }) => [
-                        styles.optionButton,
-                        selected && styles.optionButtonSelected,
-                        pressed && styles.buttonPressed,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.optionButtonText,
-                          selected && styles.optionButtonTextSelected,
-                        ]}
-                      >
-                        {option.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              <LiquidRepeatSelector
+                onChange={onRepeatKindChange}
+                value={repeatKind}
+              />
 
               {repeatKind === 'custom' ? (
                 <View style={styles.weekdayBlock}>
@@ -342,23 +441,42 @@ export function AlarmComposerModal({
               {Platform.OS === 'web' ? (
                 <Text style={styles.deviceHint}>登録はExpo Go実機で行えます</Text>
               ) : null}
-              <Pressable
-                accessibilityRole="button"
-                disabled={!canSubmit}
-                onPress={onSubmit}
-                style={({ pressed }) => [
-                  styles.primaryButton,
-                  (!canSubmit || pressed) && styles.primaryButtonInactive,
-                ]}
+              <GlassSurface
+                fallbackColor={
+                  submitEnabled
+                    ? 'rgba(76, 96, 211, 0.94)'
+                    : 'rgba(155, 165, 199, 0.94)'
+                }
+                intensity={92}
+                isInteractive
+                reducedTransparencyColor={
+                  submitEnabled ? '#4D61D2' : '#9BA5C7'
+                }
+                style={styles.primaryButtonShell}
+                tintColor={submitEnabled ? '#5367DEC8' : '#9BA5C7C8'}
               >
-                {isBusy ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.primaryButtonText}>この内容で追加</Text>
-                )}
-              </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={!submitEnabled}
+                  onPress={onSubmit}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  {isBusy ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>
+                      {isTimeEditing
+                        ? '時刻を確定してください'
+                        : 'この内容で追加'}
+                    </Text>
+                  )}
+                </Pressable>
+              </GlassSurface>
             </View>
-          </GlassSurface>
+          </View>
         </KeyboardAvoidingView>
       </View>
     </Modal>
@@ -384,10 +502,11 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 560,
     maxHeight: '90%',
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.9)',
     borderRadius: 30,
-    backgroundColor: 'rgba(247, 249, 255, 0.72)',
+    backgroundColor: 'rgba(244, 246, 251, 0.97)',
     ...Platform.select({
       web: { boxShadow: '0 18px 34px rgba(38, 53, 101, 0.24)' },
       default: {
@@ -431,15 +550,18 @@ const styles = StyleSheet.create({
     color: UI_COLORS.textMuted,
     fontSize: 12,
   },
+  closeButtonShell: {
+    width: 44,
+    height: 44,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.88)',
+    borderRadius: 22,
+  },
   closeButton: {
-    width: 38,
-    height: 38,
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 19,
-    backgroundColor: 'rgba(255, 255, 255, 0.58)',
+    borderRadius: 22,
   },
   closeGlyph: {
     marginTop: -2,
@@ -458,20 +580,12 @@ const styles = StyleSheet.create({
   },
   timePanel: {
     minHeight: 94,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 16,
     marginBottom: 20,
-    paddingHorizontal: 18,
-    paddingVertical: 14,
+    padding: 14,
     borderWidth: 1,
     borderColor: 'rgba(123, 140, 196, 0.2)',
     borderRadius: 22,
-    backgroundColor: 'rgba(255, 255, 255, 0.5)',
-  },
-  timeCopy: {
-    flexShrink: 1,
+    backgroundColor: 'rgba(231, 234, 243, 0.68)',
   },
   fieldLabel: {
     marginBottom: 9,
@@ -486,49 +600,103 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: -1.2,
   },
-  deviceOnlyPicker: {
-    minHeight: 48,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  timePreviewShell: {
+    minHeight: 72,
     borderWidth: 1,
-    borderColor: 'rgba(123, 140, 196, 0.2)',
-    borderRadius: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.48)',
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 18,
   },
-  deviceOnlyPickerText: {
+  timePreviewButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 14,
+    paddingHorizontal: 16,
+    borderRadius: 18,
+  },
+  timeEditCopy: {
+    alignItems: 'flex-end',
+  },
+  timeEditLabel: {
+    color: UI_COLORS.accentLabel,
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  timeEditHint: {
+    marginTop: 3,
     color: UI_COLORS.textMuted,
     fontSize: 10,
-    fontWeight: '800',
   },
-  optionGrid: {
+  timeEditor: {
+    gap: 10,
+  },
+  timeInputRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+  },
+  timeInput: {
+    width: 82,
+    minHeight: 64,
+    paddingHorizontal: 8,
+    borderWidth: 1.5,
+    borderColor: '#7585DD',
+    borderRadius: 17,
+    backgroundColor: '#FFFFFF',
+    color: '#17213D',
+    fontSize: 32,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  timeColon: {
+    marginTop: -4,
+    color: '#3A4664',
+    fontSize: 31,
+    fontWeight: '900',
+  },
+  timeInputError: {
+    color: '#983F37',
+    fontSize: 11,
+    fontWeight: '800',
+    lineHeight: 16,
+    textAlign: 'center',
+  },
+  timeEditorActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
     gap: 8,
   },
-  optionButton: {
-    minWidth: '47%',
-    flexGrow: 1,
+  timeCancelButton: {
+    minHeight: 44,
     alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(123, 140, 196, 0.24)',
-    borderRadius: 15,
-    backgroundColor: 'rgba(255, 255, 255, 0.46)',
+    borderRadius: 14,
   },
-  optionButtonSelected: {
-    borderColor: '#7183EE',
-    backgroundColor: 'rgba(222, 227, 255, 0.9)',
-  },
-  optionButtonText: {
+  timeCancelText: {
     color: UI_COLORS.textMuted,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
   },
-  optionButtonTextSelected: {
-    color: '#3E50BE',
+  timeConfirmShell: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderRadius: 14,
+  },
+  timeConfirmButton: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    borderRadius: 14,
+  },
+  timeConfirmText: {
+    color: '#3548B6',
+    fontSize: 12,
+    fontWeight: '900',
   },
   weekdayBlock: {
     marginTop: 17,
@@ -546,13 +714,13 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   weekdayButton: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: 'rgba(123, 140, 196, 0.26)',
-    borderRadius: 20,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.5)',
   },
   weekdayButtonSelected: {
@@ -645,12 +813,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textAlign: 'center',
   },
-  primaryButton: {
+  primaryButtonShell: {
     minHeight: 56,
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.84)',
     borderRadius: 18,
-    backgroundColor: '#5367DE',
     ...Platform.select({
       web: { boxShadow: '0 8px 16px rgba(74, 95, 215, 0.24)' },
       default: {
@@ -662,8 +829,11 @@ const styles = StyleSheet.create({
       },
     }),
   },
-  primaryButtonInactive: {
-    backgroundColor: '#9BA5C7',
+  primaryButton: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 18,
   },
   primaryButtonText: {
     color: '#FFFFFF',
