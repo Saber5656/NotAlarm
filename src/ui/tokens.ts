@@ -1,8 +1,8 @@
 export const UI_COLORS = {
-  accent: '#4257CD',
-  accentLabel: '#485BC6',
-  positive: '#276D66',
-  textPrimary: '#17213D',
-  textSecondary: '#536078',
-  textMuted: '#59647E',
+  accent: '#2F5EDB',
+  accentLabel: '#315CC6',
+  positive: '#18776B',
+  textPrimary: '#0B1A33',
+  textSecondary: '#44536C',
+  textMuted: '#5B667A',
 } as const;

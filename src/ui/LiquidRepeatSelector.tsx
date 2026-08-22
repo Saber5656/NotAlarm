@@ -83,12 +83,12 @@ export function LiquidRepeatSelector({
           testID="repeat-selection-lens"
         >
           <GlassSurface
-            fallbackColor="rgba(220, 226, 255, 0.92)"
+            fallbackColor="rgba(255, 255, 255, 0.96)"
             glassEffectStyle="regular"
             intensity={90}
-            reducedTransparencyColor="#E1E5F8"
+            reducedTransparencyColor="#FFFFFF"
             style={styles.selectionLens}
-            tintColor="#C9D2FFB8"
+            tintColor="#FFFFFFD8"
           >
             <View style={styles.selectionHighlight} />
           </GlassSurface>
@@ -131,9 +131,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     padding: 4,
     borderWidth: 1,
-    borderColor: 'rgba(122, 136, 180, 0.2)',
+    borderColor: 'rgba(49, 70, 108, 0.1)',
     borderRadius: 18,
-    backgroundColor: 'rgba(224, 228, 240, 0.7)',
+    backgroundColor: '#E9ECF2',
   },
   selectionMotion: {
     position: 'absolute',
@@ -178,7 +178,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   labelSelected: {
-    color: '#3548B6',
+    color: '#2F5EDB',
     fontWeight: '900',
   },
 });

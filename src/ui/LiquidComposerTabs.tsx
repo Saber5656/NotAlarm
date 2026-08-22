@@ -84,12 +84,12 @@ export function LiquidComposerTabs({
           testID="composer-section-lens"
         >
           <GlassSurface
-            fallbackColor="rgba(218, 225, 255, 0.94)"
+            fallbackColor="rgba(255, 255, 255, 0.96)"
             glassEffectStyle="regular"
             intensity={90}
-            reducedTransparencyColor="#DCE3FC"
+            reducedTransparencyColor="#FFFFFF"
             style={styles.selectionLens}
-            tintColor="#CED8FFC0"
+            tintColor="#FFFFFFD8"
           >
             <View style={styles.selectionHighlight} />
           </GlassSurface>
@@ -143,9 +143,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     padding: 4,
     borderWidth: 1,
-    borderColor: 'rgba(123, 140, 196, 0.18)',
+    borderColor: 'rgba(49, 70, 108, 0.1)',
     borderRadius: 19,
-    backgroundColor: 'rgba(224, 228, 240, 0.62)',
+    backgroundColor: '#E9ECF2',
   },
   selectionMotion: {
     position: 'absolute',
@@ -156,7 +156,7 @@ const styles = StyleSheet.create({
   selectionLens: {
     flex: 1,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
+    borderColor: 'rgba(255, 255, 255, 0.98)',
     borderRadius: 15,
   },
   selectionHighlight: {
@@ -189,6 +189,6 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   labelSelected: {
-    color: '#4054C5',
+    color: '#2F5EDB',
   },
 });

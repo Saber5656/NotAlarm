@@ -21,7 +21,9 @@ import {
   SafeAreaView,
 } from 'react-native-safe-area-context';
 
+import { getCircadianTheme } from './src/circadianTheme';
 import { AlarmComposerModal } from './src/ui/AlarmComposerModal';
+import { CircadianBackground } from './src/ui/CircadianBackground';
 import { GlassSurface } from './src/ui/GlassSurface';
 import {
   NoticeBanner,
@@ -214,6 +216,11 @@ function AlarmApp() {
   const stepSuppressionInFlightRef = useRef(false);
   const dueTransitionInFlightRef = useRef(false);
   const stepOffsetRef = useRef(0);
+  const localMinuteKey = Math.floor(nowMs / 60_000);
+  const circadianTheme = useMemo(
+    () => getCircadianTheme(new Date(nowMs)),
+    [localMinuteKey],
+  );
 
   const setCurrentAlarms = useCallback((next: StoredAlarmDefinition[]) => {
     alarmsRef.current = next;
@@ -911,7 +918,9 @@ function AlarmApp() {
   if (!isLoaded) {
     return (
       <SafeAreaView style={styles.loadingScreen}>
-        <ActivityIndicator color="#4F67E8" size="large" />
+        <StatusBar style="light" />
+        <CircadianBackground theme={circadianTheme} />
+        <ActivityIndicator color="#FFFFFF" size="large" />
         <Text style={styles.loadingText}>アラームを確認しています…</Text>
       </SafeAreaView>
     );
@@ -919,12 +928,8 @@ function AlarmApp() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <View style={styles.backgroundScene}>
-        <View style={styles.orbTop} />
-        <View style={styles.orbSide} />
-        <View style={styles.orbBottom} />
-      </View>
+      <StatusBar style="light" />
+      <CircadianBackground theme={circadianTheme} />
 
       <ScrollView
         bounces={useAccessibilityScreenScroll}
@@ -945,10 +950,7 @@ function AlarmApp() {
           <View style={styles.logoMark}>
             <Text style={styles.logoGlyph}>↑</Text>
           </View>
-          <View>
-            <Text style={styles.brandName}>AlreadyUp</Text>
-            <Text style={styles.brandTagline}>MOVE TO WAKE</Text>
-          </View>
+          <Text style={styles.brandName}>AlreadyUp</Text>
         </View>
 
         <View style={styles.titleRow}>
@@ -959,11 +961,13 @@ function AlarmApp() {
             </Text>
           </View>
           <GlassSurface
+            fallbackColor="rgba(42, 93, 214, 0.9)"
             glassEffectStyle="clear"
-            intensity={78}
+            intensity={88}
             isInteractive
+            reducedTransparencyColor="#2F5EDB"
             style={styles.addButtonShell}
-            tintColor="#E8ECFF88"
+            tintColor="#2F65E6C8"
           >
             <Pressable
               accessibilityLabel="アラームを追加"
@@ -1163,8 +1167,8 @@ function AlarmApp() {
                       onValueChange={(enabled) =>
                         void toggleAlarm(definition, enabled)
                       }
-                      trackColor={{ false: '#CDD3DC', true: '#AEB9FA' }}
-                      thumbColor={definition.enabled ? '#4F67E8' : '#F5F6F8'}
+                      trackColor={{ false: '#D5D9E2', true: '#A8BDF5' }}
+                      thumbColor={definition.enabled ? '#2F5EDB' : '#F7F8FA'}
                       value={definition.enabled}
                     />
                   </View>
@@ -1254,50 +1258,18 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     overflow: 'hidden',
-    backgroundColor: '#F3F5FF',
+    backgroundColor: '#07162D',
   },
   loadingScreen: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 14,
-    backgroundColor: '#F3F5FF',
+    backgroundColor: '#07162D',
   },
   loadingText: {
-    color: UI_COLORS.textSecondary,
+    color: 'rgba(255, 255, 255, 0.82)',
     fontSize: 14,
-  },
-  backgroundScene: {
-    ...StyleSheet.absoluteFillObject,
-    overflow: 'hidden',
-    pointerEvents: 'none',
-  },
-  orbTop: {
-    position: 'absolute',
-    top: -150,
-    right: -120,
-    width: 360,
-    height: 360,
-    borderRadius: 180,
-    backgroundColor: 'rgba(131, 151, 255, 0.55)',
-  },
-  orbSide: {
-    position: 'absolute',
-    top: '38%',
-    left: -155,
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    backgroundColor: 'rgba(242, 175, 202, 0.38)',
-  },
-  orbBottom: {
-    position: 'absolute',
-    right: -110,
-    bottom: -130,
-    width: 330,
-    height: 330,
-    borderRadius: 165,
-    backgroundColor: 'rgba(104, 214, 199, 0.4)',
   },
   screen: {
     flex: 1,
@@ -1319,37 +1291,30 @@ const styles = StyleSheet.create({
   brandRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 9,
-    marginBottom: 9,
+    gap: 8,
+    marginBottom: 8,
   },
   logoMark: {
-    width: 38,
-    height: 38,
+    width: 34,
+    height: 34,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.86)',
-    borderRadius: 13,
-    backgroundColor: 'rgba(248, 249, 253, 0.9)',
+    borderColor: 'rgba(255, 255, 255, 0.34)',
+    borderRadius: 12,
+    backgroundColor: 'rgba(8, 31, 68, 0.42)',
   },
   logoGlyph: {
-    color: '#465BD4',
-    fontSize: 23,
+    color: '#FFFFFF',
+    fontSize: 21,
     fontWeight: '900',
-    lineHeight: 25,
+    lineHeight: 23,
   },
   brandName: {
-    color: '#17213D',
-    fontSize: 16,
+    color: '#FFFFFF',
+    fontSize: 17,
     fontWeight: '900',
-    letterSpacing: -0.25,
-  },
-  brandTagline: {
-    marginTop: 1,
-    color: UI_COLORS.textMuted,
-    fontSize: 8,
-    fontWeight: '900',
-    letterSpacing: 1.35,
+    letterSpacing: -0.35,
   },
   titleRow: {
     flexDirection: 'row',
@@ -1361,14 +1326,14 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   screenTitle: {
-    color: '#17213D',
+    color: '#FFFFFF',
     fontSize: 31,
     fontWeight: '900',
     letterSpacing: -1.05,
   },
   screenSubtitle: {
     marginTop: 3,
-    color: UI_COLORS.textSecondary,
+    color: 'rgba(255, 255, 255, 0.76)',
     fontSize: 12,
     lineHeight: 17,
   },
@@ -1376,17 +1341,17 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.92)',
+    borderColor: 'rgba(255, 255, 255, 0.48)',
     borderRadius: 18,
-    backgroundColor: 'rgba(235, 239, 255, 0.54)',
+    backgroundColor: 'rgba(47, 94, 219, 0.9)',
     ...Platform.select({
-      web: { boxShadow: '0 8px 16px rgba(88, 105, 199, 0.18)' },
+      web: { boxShadow: '0 10px 20px rgba(3, 18, 47, 0.26)' },
       default: {
-        shadowColor: '#5869C7',
-        shadowOpacity: 0.18,
-        shadowRadius: 16,
-        shadowOffset: { width: 0, height: 8 },
-        elevation: 4,
+        shadowColor: '#03122F',
+        shadowOpacity: 0.26,
+        shadowRadius: 18,
+        shadowOffset: { width: 0, height: 10 },
+        elevation: 6,
       },
     }),
   },
@@ -1397,13 +1362,13 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   addButtonText: {
-    color: '#4257CD',
+    color: '#FFFFFF',
     fontSize: 29,
     fontWeight: '500',
     lineHeight: 31,
   },
   addButtonTextDisabled: {
-    color: '#A9B1C9',
+    color: 'rgba(255, 255, 255, 0.52)',
   },
   buttonDimmed: {
     opacity: 0.5,
@@ -1417,17 +1382,17 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.88)',
+    borderColor: 'rgba(255, 255, 255, 0.3)',
     borderRadius: 25,
-    backgroundColor: 'rgba(247, 248, 252, 0.93)',
+    backgroundColor: 'rgba(5, 28, 61, 0.84)',
     ...Platform.select({
-      web: { boxShadow: '0 10px 22px rgba(82, 99, 183, 0.14)' },
+      web: { boxShadow: '0 14px 26px rgba(0, 8, 26, 0.28)' },
       default: {
-        shadowColor: '#5263B7',
-        shadowOpacity: 0.14,
-        shadowRadius: 22,
-        shadowOffset: { width: 0, height: 10 },
-        elevation: 4,
+        shadowColor: '#00081A',
+        shadowOpacity: 0.28,
+        shadowRadius: 24,
+        shadowOffset: { width: 0, height: 14 },
+        elevation: 7,
       },
     }),
   },
@@ -1438,7 +1403,9 @@ const styles = StyleSheet.create({
     width: 170,
     height: 170,
     borderRadius: 85,
-    backgroundColor: 'rgba(111, 132, 244, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 223, 165, 0.22)',
+    backgroundColor: 'rgba(255, 187, 104, 0.12)',
     pointerEvents: 'none',
   },
   nextAlarmHeader: {
@@ -1448,14 +1415,14 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   nextAlarmLabel: {
-    color: UI_COLORS.accentLabel,
+    color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 10,
     fontWeight: '900',
     letterSpacing: 0.6,
   },
   nextAlarmTime: {
     marginTop: 2,
-    color: '#17213D',
+    color: '#FFFFFF',
     fontSize: 41,
     fontWeight: '900',
     letterSpacing: -1.6,
@@ -1464,13 +1431,13 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   nextAlarmDate: {
-    color: '#3C4865',
+    color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '900',
   },
   nextAlarmCountdown: {
     marginTop: 4,
-    color: UI_COLORS.textMuted,
+    color: 'rgba(255, 255, 255, 0.68)',
     fontSize: 11,
   },
   progressTrack: {
@@ -1478,12 +1445,12 @@ const styles = StyleSheet.create({
     marginTop: 13,
     overflow: 'hidden',
     borderRadius: 999,
-    backgroundColor: 'rgba(103, 116, 155, 0.16)',
+    backgroundColor: 'rgba(255, 255, 255, 0.16)',
   },
   progressFill: {
     height: '100%',
     borderRadius: 999,
-    backgroundColor: '#5CB5A9',
+    backgroundColor: '#73CFC0',
   },
   progressCopy: {
     flexDirection: 'row',
@@ -1493,13 +1460,13 @@ const styles = StyleSheet.create({
     marginTop: 7,
   },
   progressText: {
-    color: UI_COLORS.positive,
+    color: '#92E1D5',
     fontSize: 10,
     fontWeight: '900',
   },
   progressStatus: {
     flex: 1,
-    color: UI_COLORS.textMuted,
+    color: 'rgba(255, 255, 255, 0.64)',
     fontSize: 9,
     textAlign: 'right',
   },
@@ -1509,9 +1476,9 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 19,
     borderWidth: 1,
-    borderColor: 'rgba(255, 225, 226, 0.7)',
+    borderColor: 'rgba(255, 255, 255, 0.28)',
     borderRadius: 25,
-    backgroundColor: '#A82F3A',
+    backgroundColor: 'rgba(128, 28, 42, 0.92)',
   },
   ringingLabel: {
     color: '#FECDCA',
@@ -1555,9 +1522,9 @@ const styles = StyleSheet.create({
     marginTop: 12,
     padding: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.86)',
+    borderColor: 'rgba(255, 255, 255, 0.3)',
     borderRadius: 24,
-    backgroundColor: 'rgba(247, 248, 252, 0.93)',
+    backgroundColor: 'rgba(5, 28, 61, 0.84)',
   },
   alarmSummaryCardAccessible: {
     height: 'auto',
@@ -1569,23 +1536,25 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 17,
-    backgroundColor: 'rgba(102, 119, 222, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
   },
   idleIconText: {
-    color: '#586BD3',
+    color: '#F7E8BC',
     fontSize: 25,
   },
   idleCopy: {
     flex: 1,
   },
   idleTitle: {
-    color: '#2D3855',
+    color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '900',
   },
   idleText: {
     marginTop: 4,
-    color: UI_COLORS.textMuted,
+    color: 'rgba(255, 255, 255, 0.68)',
     fontSize: 11,
     lineHeight: 16,
   },
@@ -1595,17 +1564,17 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     marginTop: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.88)',
+    borderColor: 'rgba(255, 255, 255, 0.78)',
     borderRadius: 25,
-    backgroundColor: 'rgba(247, 248, 252, 0.94)',
+    backgroundColor: 'rgba(247, 249, 252, 0.96)',
     ...Platform.select({
-      web: { boxShadow: '0 8px 18px rgba(89, 105, 170, 0.1)' },
+      web: { boxShadow: '0 16px 30px rgba(0, 13, 35, 0.2)' },
       default: {
-        shadowColor: '#5969AA',
-        shadowOpacity: 0.1,
-        shadowRadius: 18,
-        shadowOffset: { width: 0, height: 8 },
-        elevation: 3,
+        shadowColor: '#000D23',
+        shadowOpacity: 0.2,
+        shadowRadius: 26,
+        shadowOffset: { width: 0, height: 16 },
+        elevation: 7,
       },
     }),
   },
@@ -1617,10 +1586,10 @@ const styles = StyleSheet.create({
     paddingTop: 13,
     paddingBottom: 10,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(117, 132, 180, 0.13)',
+    borderBottomColor: 'rgba(67, 82, 112, 0.12)',
   },
   sectionTitle: {
-    color: '#2D3855',
+    color: '#10203B',
     fontSize: 13,
     fontWeight: '900',
   },
@@ -1635,9 +1604,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderWidth: 1,
-    borderColor: 'rgba(123, 140, 196, 0.18)',
+    borderColor: 'rgba(44, 63, 96, 0.12)',
     borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.48)',
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
   },
   alarmCount: {
     color: UI_COLORS.textSecondary,
@@ -1659,13 +1628,23 @@ const styles = StyleSheet.create({
   alarmCard: {
     padding: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.82)',
+    borderColor: 'rgba(31, 49, 79, 0.06)',
     borderRadius: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    backgroundColor: '#FFFFFF',
+    ...Platform.select({
+      web: { boxShadow: '0 8px 18px rgba(21, 42, 77, 0.08)' },
+      default: {
+        shadowColor: '#152A4D',
+        shadowOpacity: 0.08,
+        shadowRadius: 14,
+        shadowOffset: { width: 0, height: 7 },
+        elevation: 2,
+      },
+    }),
   },
   alarmCardDisabled: {
-    borderColor: 'rgba(171, 179, 202, 0.18)',
-    backgroundColor: 'rgba(235, 238, 246, 0.86)',
+    borderColor: 'rgba(139, 149, 168, 0.12)',
+    backgroundColor: '#ECEFF4',
   },
   alarmCardMain: {
     flexDirection: 'row',
@@ -1677,7 +1656,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   alarmTime: {
-    color: '#17213D',
+    color: '#0B1A33',
     fontSize: 29,
     fontWeight: '900',
     letterSpacing: -1,
@@ -1699,7 +1678,7 @@ const styles = StyleSheet.create({
     marginTop: 9,
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(117, 132, 180, 0.11)',
+    borderTopColor: 'rgba(49, 65, 94, 0.1)',
   },
   scheduleSummary: {
     color: UI_COLORS.textMuted,
@@ -1718,12 +1697,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingVertical: 24,
     borderWidth: 1,
-    borderColor: 'rgba(130, 145, 193, 0.16)',
+    borderColor: 'rgba(53, 71, 102, 0.1)',
     borderRadius: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: 'rgba(255, 255, 255, 0.62)',
   },
   emptyTitle: {
-    color: '#39445F',
+    color: '#172641',
     fontSize: 14,
     fontWeight: '900',
   },
@@ -1761,10 +1740,10 @@ const styles = StyleSheet.create({
     width: 5,
     height: 5,
     borderRadius: 3,
-    backgroundColor: '#5CB5A9',
+    backgroundColor: '#91D8CC',
   },
   footerText: {
-    color: UI_COLORS.textMuted,
+    color: 'rgba(255, 255, 255, 0.72)',
     fontSize: 9,
     fontWeight: '600',
   },

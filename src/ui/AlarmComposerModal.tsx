@@ -286,7 +286,6 @@ export function AlarmComposerModal({
           >
             <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleCopy}>
-                <Text style={styles.eyebrow}>NEW ALARM</Text>
                 <Text style={styles.sheetTitle}>アラームを追加</Text>
                 <Text style={styles.sheetSubtitle}>
                   時刻と繰り返しを選んでください
@@ -403,12 +402,12 @@ export function AlarmComposerModal({
                         <Text style={styles.timeCancelText}>キャンセル</Text>
                       </Pressable>
                       <GlassSurface
-                        fallbackColor="rgba(206, 216, 255, 0.94)"
+                        fallbackColor="rgba(225, 233, 255, 0.96)"
                         intensity={88}
                         isInteractive
-                        reducedTransparencyColor="#DCE2FA"
+                        reducedTransparencyColor="#E1E9FF"
                         style={styles.timeConfirmShell}
-                        tintColor="#C9D3FFB8"
+                        tintColor="#D5E0FFD8"
                       >
                         <Pressable
                           accessibilityRole="button"
@@ -493,12 +492,12 @@ export function AlarmComposerModal({
                     )}
 
                     <GlassSurface
-                      fallbackColor="rgba(255, 255, 255, 0.76)"
+                      fallbackColor="rgba(255, 255, 255, 0.96)"
                       intensity={76}
                       isInteractive
-                      reducedTransparencyColor="#F4F5F9"
+                      reducedTransparencyColor="#FFFFFF"
                       style={styles.timePreviewShell}
-                      tintColor="#EEF1FF80"
+                      tintColor="#FFFFFFD8"
                     >
                       <Pressable
                         accessibilityHint="時と分をキーボードから直接入力できます"
@@ -650,16 +649,16 @@ export function AlarmComposerModal({
               <GlassSurface
                 fallbackColor={
                   submitEnabled
-                    ? 'rgba(76, 96, 211, 0.94)'
+                    ? 'rgba(47, 94, 219, 0.96)'
                     : 'rgba(155, 165, 199, 0.94)'
                 }
                 intensity={92}
                 isInteractive
                 reducedTransparencyColor={
-                  submitEnabled ? '#4D61D2' : '#9BA5C7'
+                  submitEnabled ? '#2F5EDB' : '#9BA5C7'
                 }
                 style={styles.primaryButtonShell}
-                tintColor={submitEnabled ? '#5367DEC8' : '#9BA5C7C8'}
+                tintColor={submitEnabled ? '#3264E4D8' : '#9BA5C7C8'}
               >
                 <Pressable
                   accessibilityRole="button"
@@ -692,7 +691,7 @@ export function AlarmComposerModal({
 const styles = StyleSheet.create({
   modalRoot: {
     flex: 1,
-    backgroundColor: 'rgba(18, 24, 45, 0.22)',
+    backgroundColor: 'rgba(3, 12, 28, 0.38)',
   },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
@@ -710,16 +709,16 @@ const styles = StyleSheet.create({
     maxHeight: '90%',
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: 'rgba(255, 255, 255, 0.94)',
     borderRadius: 30,
-    backgroundColor: 'rgba(244, 246, 251, 0.97)',
+    backgroundColor: 'rgba(248, 249, 252, 0.985)',
     ...Platform.select({
-      web: { boxShadow: '0 18px 34px rgba(38, 53, 101, 0.24)' },
+      web: { boxShadow: '0 22px 44px rgba(3, 15, 39, 0.32)' },
       default: {
-        shadowColor: '#263565',
-        shadowOpacity: 0.24,
-        shadowRadius: 34,
-        shadowOffset: { width: 0, height: 18 },
+        shadowColor: '#030F27',
+        shadowOpacity: 0.32,
+        shadowRadius: 40,
+        shadowOffset: { width: 0, height: 22 },
         elevation: 18,
       },
     }),
@@ -736,20 +735,13 @@ const styles = StyleSheet.create({
     paddingTop: 22,
     paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(117, 132, 180, 0.16)',
+    borderBottomColor: 'rgba(50, 67, 98, 0.1)',
   },
   sheetTitleCopy: {
     flex: 1,
   },
-  eyebrow: {
-    color: UI_COLORS.accentLabel,
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 1.5,
-  },
   sheetTitle: {
-    marginTop: 5,
-    color: '#17213D',
+    color: '#0B1A33',
     fontSize: 23,
     fontWeight: '900',
     letterSpacing: -0.6,
@@ -810,7 +802,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   timePreview: {
-    color: '#17213D',
+    color: '#0B1A33',
     fontSize: 27,
     fontWeight: '900',
     letterSpacing: -0.8,
@@ -819,7 +811,7 @@ const styles = StyleSheet.create({
     minHeight: 64,
     marginTop: 10,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: 'rgba(43, 62, 96, 0.08)',
     borderRadius: 18,
   },
   timePreviewButton: {
@@ -857,9 +849,9 @@ const styles = StyleSheet.create({
   dialPickerShell: {
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(123, 140, 196, 0.18)',
+    borderColor: 'rgba(49, 70, 108, 0.1)',
     borderRadius: 18,
-    backgroundColor: 'rgba(250, 251, 254, 0.88)',
+    backgroundColor: '#FFFFFF',
   },
   dialPickerHeader: {
     flexDirection: 'row',
@@ -876,7 +868,7 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   dialPickerLabel: {
-    color: '#344160',
+    color: '#243552',
     fontSize: 11,
     fontWeight: '900',
   },
@@ -942,10 +934,10 @@ const styles = StyleSheet.create({
     minHeight: 64,
     paddingHorizontal: 8,
     borderWidth: 1.5,
-    borderColor: '#7585DD',
+    borderColor: '#2F5EDB',
     borderRadius: 17,
     backgroundColor: '#FFFFFF',
-    color: '#17213D',
+    color: '#0B1A33',
     fontSize: 32,
     fontWeight: '900',
     textAlign: 'center',
@@ -994,7 +986,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   timeConfirmText: {
-    color: '#3548B6',
+    color: '#234FBF',
     fontSize: 12,
     fontWeight: '900',
   },
@@ -1045,9 +1037,9 @@ const styles = StyleSheet.create({
     marginTop: 20,
     padding: 14,
     borderWidth: 1,
-    borderColor: 'rgba(88, 177, 168, 0.18)',
+    borderColor: 'rgba(45, 133, 121, 0.15)',
     borderRadius: 17,
-    backgroundColor: 'rgba(220, 246, 242, 0.68)',
+    backgroundColor: 'rgba(228, 245, 242, 0.78)',
   },
   stepBadge: {
     width: 44,
@@ -1102,7 +1094,7 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 20,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(117, 132, 180, 0.16)',
+    borderTopColor: 'rgba(50, 67, 98, 0.1)',
   },
   deviceHint: {
     marginBottom: 8,
@@ -1116,12 +1108,12 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.84)',
     borderRadius: 18,
     ...Platform.select({
-      web: { boxShadow: '0 8px 16px rgba(74, 95, 215, 0.24)' },
+      web: { boxShadow: '0 10px 20px rgba(38, 78, 182, 0.28)' },
       default: {
-        shadowColor: '#4A5FD7',
-        shadowOpacity: 0.24,
-        shadowRadius: 16,
-        shadowOffset: { width: 0, height: 8 },
+        shadowColor: '#264EB6',
+        shadowOpacity: 0.28,
+        shadowRadius: 18,
+        shadowOffset: { width: 0, height: 10 },
         elevation: 5,
       },
     }),
