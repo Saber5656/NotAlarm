@@ -186,12 +186,13 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 
 - 上部はブランド、画面タイトル、追加ボタンだけにし、prototype / presentation 表示を置かない。
 - 次回アラームは時刻、日付、残り時間、100歩進捗を表示する。
+- 通常文字サイズでは有効時 / idleのsummary cardを同じ140pt固定高とし、一覧の開始位置を動かさない。Dynamic Typeのアクセシビリティscroll時だけ、文字を切らないため同じ140pt最小高から内容に応じて拡張する。
 - 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。
 - メイン画面は viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線を固定する。
 - Dynamic Type の `fontScale > 1.3` では情報欠落を避けるアクセシビリティ例外として外側スクロールを許可し、通常文字サイズでは一覧以外を固定する。
 - 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。時刻、4種類の repeat、custom weekday、100歩の説明を持ち、小さい画面ではフォーム本体だけを内部スクロールする。
-- 時刻表示は全platform共通の明示的な編集controlとし、タップ後に時・分のnumeric keyboard inputへ展開する。入力は`0..23` / `0..59`を確定時に検証し、不正値では親のalarm stateを更新しない。編集中は追加CTAを無効化する。
-- 状態通知はstatus barの下、brand rowより上のabsolute overlay layerへspring表示し、メインlayoutを押し下げない。Reduce Motion時は移動animationを無効化する。
+- 時刻設定の標準操作はnative pickerとする。iOSはmodal内の先頭に`display="spinner"`の216pt wheelを切らずに常時表示し、Androidは公式推奨のimperative APIで`display="clock"` dialogを開く。選択時刻と`数字で入力`はpicker後段のsecondary controlとし、表示時刻をタップした場合だけ時・分のnumeric keyboard inputへ切り替える。入力は`0..23` / `0..59`を確定時に検証し、不正値では親のalarm stateを更新しない。編集中はpickerを閉じて追加CTAを無効化する。`fontScale > 1.3`では横並びcopyを縦積みにする。
+- 状態通知はstatus barの下、brand rowより上のabsolute overlay layerへspring表示し、メインlayoutを押し下げない。上端のdrag handleでgestureを示し、閉じるbuttonに加えて、上方向へ32px以上または十分な上向き速度でswipeするとdismissし、未達gestureは元の位置へ戻す。Reduce Motion時は自動springを無効化する。
 - 追加エラーはスクロール領域外の固定footerに表示し、dangerはassertive、その他の状態通知はpoliteとしてassistive technologyへ通知する。
 - iOS 26 以降は `expo-glass-effect` の native Liquid Glass を使う。旧iOSとWebは `expo-blur`、AndroidはSDK 54で実blurがexperimentalなため安定した半透明 surfaceへfallbackする。Reduce Transparency 有効時はsemantic stateを保った不透明度の高い surface に切り替える。
 - Apple HIGに従い、Glassはcontent cardの背景に使わず、追加、通知、時刻編集、選択lens、確定などcontent上に浮くfunctional control layerへ限定する。大面積の次回表示・一覧・alarm cardはstandard materialとする。
@@ -213,6 +214,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | app terminated 時の action | JS handler 不実行の可能性。main が残る安全側 failure |
 | 3周期を越える未起動 | 追加周期が補充されない |
 | production app identity 未確定 | `app.alreadyup.prototype` を維持し、人間承認なしに app identity を変更しない |
+| Web native time picker非対応 | dialはExpo Go実機で使用する旨を表示し、UI / bundle smokeだけ行う |
 
 ## 13. Verification matrix
 
@@ -228,11 +230,18 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | MUL-01 | 2設定の片方を suppress | 他方の IDs は不変 |
 | MUL-02 | toggle off | 対象 definition の通知だけ解除 |
 | MUL-03 | delete | 対象 definition だけ削除 |
+| UI-01 | アラームをoff / on | summary card高と一覧開始位置が変わらない |
+| UI-02 | noticeを短く上swipe | bannerは元位置へ戻る |
+| UI-03 | noticeを32px以上または高速で上swipe | bannerをdismiss |
+| UI-04 | iOS wheel / Android clock | 選択時刻が親formへ反映 |
+| UI-05 | 表示時刻をタップ | keyboard direct inputへ切り替え |
 
 ## 14. 参照資料
 
 - [Expo Notifications — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
+- [Expo DateTimePicker — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/date-time-picker/)
+- [React Native 0.81 PanResponder](https://reactnative.dev/docs/0.81/panresponder)
 - [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)
 - [Apple: UILocalNotification pending limit](https://developer.apple.com/documentation/uikit/uilocalnotification)
 - [Apple Watch notifications](https://support.apple.com/guide/watch/notifications-apd9b833c9f3/watchos)

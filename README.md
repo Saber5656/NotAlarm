@@ -14,7 +14,8 @@
 - foreground でのループ音と、background での local notification 音
 - 既存の単一アラーム保存形式から複数アラーム形式への移行
 - レイアウトを動かさない追加モーダルと、一覧だけをスクロールする固定ホーム画面
-- 時刻表示をタップして、時・分をキーボードから直接入力
+- native wheel / clock dialを標準にし、時刻表示タップ時は時・分をキーボードから直接入力
+- 状態通知は閉じるボタンまたは上スワイプでdismiss
 - 操作層だけに限定したLiquid Glassと、繰り返し選択に追従してspring移動するglass lens
 - iOS 26のnative Liquid Glass、旧iOS / WebのBlur、Androidの安定したfallback、Reduce Transparency / Reduce Motion対応
 
@@ -61,10 +62,11 @@ npm start
 ## 使い方
 
 1. 右上の `＋` を押す。
-2. 時刻表示をタップし、時・分をキーボード入力して `この時刻に決定` を押す。
-3. 「今日だけ」「毎日」「平日」「曜日指定」から繰り返しを選ぶ。
-4. `この内容で追加` を押す。
-5. 一覧のスイッチでオン／オフを切り替える。不要な設定は `削除` から解除する。
+2. iPhoneではwheel、Androidではclock dialで時刻を選ぶ。
+3. 数字で直接指定したい場合だけ、表示時刻をタップして時・分を入力し、`この時刻に決定` を押す。
+4. 「今日だけ」「毎日」「平日」「曜日指定」から繰り返しを選ぶ。
+5. `この内容で追加` を押す。
+6. 一覧のスイッチでオン／オフを切り替える。不要な設定は `削除` から解除する。
 
 「今日だけ」は現在より後の時刻だけ登録できます。時刻を過ぎた設定をもう一度使う場合は削除し、新しい時刻を登録してください。
 
@@ -107,6 +109,8 @@ Web export は UI と bundle の smoke test です。通知、Pedometer、Apple 
 - [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
 - [Expo GlassEffect — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/glass-effect/)
 - [Expo BlurView — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/blur-view/)
+- [Expo DateTimePicker — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/date-time-picker/)
+- [React Native 0.81 PanResponder](https://reactnative.dev/docs/0.81/panresponder)
 - [Apple Human Interface Guidelines: Materials](https://developer.apple.com/design/human-interface-guidelines/materials)
 - [Apple WWDC25: Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/)
 - [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)
