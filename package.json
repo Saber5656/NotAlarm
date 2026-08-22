@@ -11,6 +11,7 @@
     "expo-blur": "~15.0.8",
     "expo-file-system": "~19.0.24",
     "expo-glass-effect": "~0.1.10",
+    "expo-linear-gradient": "~15.0.8",
     "expo-notifications": "~0.32.17",
     "expo-sensors": "~15.0.8",
     "expo-status-bar": "~3.0.9",
