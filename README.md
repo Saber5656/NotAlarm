@@ -13,10 +13,10 @@
 - iPhone / Apple Watch の確認通知から「起きています」を押した周期だけの停止
 - foreground でのループ音と、background での local notification 音
 - 既存の単一アラーム保存形式から複数アラーム形式への移行
-- レイアウトを動かさない追加モーダルと、一覧だけをスクロールする固定ホーム画面
+- 「時刻」「繰り返し」を分けてレイアウトを動かさない追加モーダルと、一覧だけをスクロールする固定ホーム画面
 - native wheel / clock dialを標準にし、時刻表示タップ時は時・分をキーボードから直接入力
 - 状態通知は閉じるボタンまたは上スワイプでdismiss
-- 操作層だけに限定したLiquid Glassと、繰り返し選択に追従してspring移動するglass lens
+- 操作層だけに限定したLiquid Glassと、追加フォーム／繰り返しの選択に追従してspring移動するglass lens
 - iOS 26のnative Liquid Glass、旧iOS / WebのBlur、Androidの安定したfallback、Reduce Transparency / Reduce Motion対応
 
 ## 動作ルール
@@ -62,9 +62,9 @@ npm start
 ## 使い方
 
 1. 右上の `＋` を押す。
-2. iPhoneではwheel、Androidではclock dialで時刻を選ぶ。
+2. 「時刻」で、iPhoneではwheel、Androidではclock dialから時刻を選ぶ。
 3. 数字で直接指定したい場合だけ、表示時刻をタップして時・分を入力し、`この時刻に決定` を押す。
-4. 「今日だけ」「毎日」「平日」「曜日指定」から繰り返しを選ぶ。
+4. 「繰り返し」へ切り替え、「今日だけ」「毎日」「平日」「曜日指定」から鳴らす日を選ぶ。
 5. `この内容で追加` を押す。
 6. 一覧のスイッチでオン／オフを切り替える。不要な設定は `削除` から解除する。
 

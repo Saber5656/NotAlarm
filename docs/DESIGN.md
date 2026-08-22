@@ -190,13 +190,13 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。
 - メイン画面は viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線を固定する。
 - Dynamic Type の `fontScale > 1.3` では情報欠落を避けるアクセシビリティ例外として外側スクロールを許可し、通常文字サイズでは一覧以外を固定する。
-- 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。時刻、4種類の repeat、custom weekday、100歩の説明を持ち、小さい画面ではフォーム本体だけを内部スクロールする。
-- 時刻設定の標準操作はnative pickerとする。iOSはmodal内の先頭に`display="spinner"`の216pt wheelを切らずに常時表示し、Androidは公式推奨のimperative APIで`display="clock"` dialogを開く。選択時刻と`数字で入力`はpicker後段のsecondary controlとし、表示時刻をタップした場合だけ時・分のnumeric keyboard inputへ切り替える。入力は`0..23` / `0..59`を確定時に検証し、不正値では親のalarm stateを更新しない。編集中はpickerを閉じて追加CTAを無効化する。`fontScale > 1.3`では横並びcopyを縦積みにする。
+- 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。タイトル直下の「時刻」「繰り返し」で内容を分け、選択中のglass lensをspring移動させる。通常端末（高さ700pt以上、幅360pt以上、`fontScale <= 1.3`）はsheet高を固定して内部スクロールを無効化し、繰り返しと100歩の説明も1画面内で操作できる。小さい画面・狭い画面・大きい文字では情報欠落を避けるためフォーム本体だけを内部スクロールし、repeat labelは2行まで許可する。
+- 時刻設定の標準操作はnative pickerとする。iOSは「時刻」内の先頭に`display="spinner"`の216pt wheelを常時表示し、選択帯を含めて角丸surface内にclipする。Androidは公式推奨のimperative APIで`display="clock"` dialogを開く。選択時刻と`数字で入力`はpicker後段のsecondary controlとし、表示時刻をタップした場合だけ時・分のnumeric keyboard inputへ切り替える。入力は`0..23` / `0..59`を確定時に検証し、不正値では親のalarm stateを更新しない。編集中はpickerを閉じて追加CTAと「繰り返し」切替を無効化する。`fontScale > 1.3`では横並びcopyを縦積みにする。
 - 状態通知はstatus barの下、brand rowより上のabsolute overlay layerへspring表示し、メインlayoutを押し下げない。上端のdrag handleでgestureを示し、閉じるbuttonに加えて、上方向へ32px以上または十分な上向き速度でswipeするとdismissし、未達gestureは元の位置へ戻す。Reduce Motion時は自動springを無効化する。
-- 追加エラーはスクロール領域外の固定footerに表示し、dangerはassertive、その他の状態通知はpoliteとしてassistive technologyへ通知する。
+- 追加エラーはスクロール領域外の固定footerに表示し、custom曜日未選択のようなdisabled理由は表示中のtabにかかわらず常時示す。dangerはassertive、その他の状態通知はpoliteとしてassistive technologyへ通知する。追加処理中はtab、picker、repeat、曜日、確定操作をすべて無効化する。
 - iOS 26 以降は `expo-glass-effect` の native Liquid Glass を使う。旧iOSとWebは `expo-blur`、AndroidはSDK 54で実blurがexperimentalなため安定した半透明 surfaceへfallbackする。Reduce Transparency 有効時はsemantic stateを保った不透明度の高い surface に切り替える。
 - Apple HIGに従い、Glassはcontent cardの背景に使わず、追加、通知、時刻編集、選択lens、確定などcontent上に浮くfunctional control layerへ限定する。大面積の次回表示・一覧・alarm cardはstandard materialとする。
-- repeat controlは1つのglass lensを選択肢間でspring移動させ、単なる背景色の切替にしない。native GlassView自体のopacityはanimateせず、wrapperのgeometryを移動する。Reduce Motion時は選択位置を即時更新する。
+- 追加フォームの「時刻／繰り返し」とrepeat controlは、それぞれ1つのglass lensを選択肢間でspring移動させ、単なる背景色の切替にしない。native GlassView自体のopacityはanimateせず、wrapperのgeometryを移動する。Reduce Motion時は選択位置を即時更新する。
 - Glass surface 上でも本文・操作のコントラストを維持し、tintは主操作・選択・statusの意味がある箇所だけに使う。glass-on-glassを避ける。
 - Web は UI smoke test とし、通知操作を disabled にする。
 
@@ -235,6 +235,9 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | UI-03 | noticeを32px以上または高速で上swipe | bannerをdismiss |
 | UI-04 | iOS wheel / Android clock | 選択時刻が親formへ反映 |
 | UI-05 | 表示時刻をタップ | keyboard direct inputへ切り替え |
+| UI-06 | 通常端末で追加フォームの「時刻／繰り返し」を切替 | sheetとfooterが動かず、内容領域はスクロールしない |
+| UI-07 | iOS wheelの選択帯 | 216pt wheelを縦に欠けさせず、横方向は角丸surface内に収まる |
+| UI-08 | 高さ700pt未満、幅360pt未満、または`fontScale > 1.3` | フォーム本体だけがスクロールし、全操作へ到達できる |
 
 ## 14. 参照資料
 
