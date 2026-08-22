@@ -1,3 +1,6 @@
+import DateTimePicker, {
+  DateTimePickerAndroid,
+} from '@react-native-community/datetimepicker';
 import { BlurView } from 'expo-blur';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -12,6 +15,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -81,6 +85,8 @@ export function AlarmComposerModal({
   visible,
 }: AlarmComposerModalProps) {
   const insets = useSafeAreaInsets();
+  const { fontScale } = useWindowDimensions();
+  const usesLargeText = fontScale > 1.3;
   const minuteInputRef = useRef<TextInput>(null);
   const [isTimeEditing, setIsTimeEditing] = useState(false);
   const [draftHour, setDraftHour] = useState(
@@ -107,8 +113,27 @@ export function AlarmComposerModal({
     }
   }, [visible]);
 
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return undefined;
+    }
+
+    const dismissTimePicker = () => {
+      void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
+    };
+
+    if (!visible || isTimeEditing) {
+      dismissTimePicker();
+    }
+
+    return dismissTimePicker;
+  }, [isTimeEditing, visible]);
+
   const closeIfIdle = () => {
     if (!isBusy) {
+      if (Platform.OS === 'android') {
+        void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
+      }
       setIsTimeEditing(false);
       setTimeInputError(null);
       Keyboard.dismiss();
@@ -117,10 +142,42 @@ export function AlarmComposerModal({
   };
 
   const beginTimeEditing = () => {
+    if (Platform.OS === 'android') {
+      void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
+    }
     setDraftHour(selectedTime.getHours().toString().padStart(2, '0'));
     setDraftMinute(selectedTime.getMinutes().toString().padStart(2, '0'));
     setTimeInputError(null);
     setIsTimeEditing(true);
+  };
+
+  const applyPickedTime = (pickedTime: Date) => {
+    const nextTime = new Date(selectedTime);
+    nextTime.setHours(
+      pickedTime.getHours(),
+      pickedTime.getMinutes(),
+      0,
+      0,
+    );
+    onTimeChange(nextTime);
+  };
+
+  const openAndroidTimePicker = () => {
+    if (isBusy || isTimeEditing) {
+      return;
+    }
+
+    DateTimePickerAndroid.open({
+      display: 'clock',
+      is24Hour: true,
+      mode: 'time',
+      onChange: (event, date) => {
+        if (event.type === 'set' && date) {
+          applyPickedTime(date);
+        }
+      },
+      value: selectedTime,
+    });
   };
 
   const cancelTimeEditing = () => {
@@ -322,34 +379,113 @@ export function AlarmComposerModal({
                     </View>
                   </View>
                 ) : (
-                  <GlassSurface
-                    fallbackColor="rgba(255, 255, 255, 0.76)"
-                    intensity={84}
-                    isInteractive
-                    reducedTransparencyColor="#F4F5F9"
-                    style={styles.timePreviewShell}
-                    tintColor="#EEF1FF9C"
-                  >
-                    <Pressable
-                      accessibilityHint="キーボードから時と分を入力できます"
-                      accessibilityLabel={`${formatAlarmTime(selectedTime)}、時刻を変更`}
-                      accessibilityRole="button"
-                      onPress={beginTimeEditing}
-                      style={({ pressed }) => [
-                        styles.timePreviewButton,
-                        pressed && styles.buttonPressed,
-                      ]}
-                      testID="alarm-time-edit-trigger"
-                    >
-                      <Text style={styles.timePreview}>
-                        {formatAlarmTime(selectedTime)}
-                      </Text>
-                      <View style={styles.timeEditCopy}>
-                        <Text style={styles.timeEditLabel}>キーボード入力</Text>
-                        <Text style={styles.timeEditHint}>タップして変更</Text>
+                  <>
+                    {Platform.OS === 'ios' ? (
+                      <View style={styles.dialPickerShell}>
+                        <View
+                          style={[
+                            styles.dialPickerHeader,
+                            usesLargeText && styles.stackedControlCopy,
+                          ]}
+                        >
+                          <Text style={styles.dialPickerLabel}>
+                            時刻ダイヤル
+                          </Text>
+                          <Text style={styles.dialPickerHint}>
+                            上下に回して選択
+                          </Text>
+                        </View>
+                        <DateTimePicker
+                          accessibilityLabel="アラーム時刻をダイヤルで選択"
+                          disabled={isBusy}
+                          display="spinner"
+                          minuteInterval={1}
+                          mode="time"
+                          onChange={(_, date) =>
+                            date && applyPickedTime(date)
+                          }
+                          style={styles.iosTimePicker}
+                          testID="alarm-time-dial"
+                          textColor="#17213D"
+                          themeVariant="light"
+                          value={selectedTime}
+                        />
                       </View>
-                    </Pressable>
-                  </GlassSurface>
+                    ) : Platform.OS === 'android' ? (
+                      <Pressable
+                        accessibilityHint="Androidの時計ダイヤルを開きます"
+                        accessibilityLabel="ダイヤルで時刻を選択"
+                        accessibilityRole="button"
+                        disabled={isBusy}
+                        onPress={openAndroidTimePicker}
+                        style={({ pressed }) => [
+                          styles.androidDialButton,
+                          (pressed || isBusy) && styles.buttonPressed,
+                        ]}
+                        testID="alarm-time-dial-trigger"
+                      >
+                        <View style={styles.dialIcon}>
+                          <Text style={styles.dialIconText}>◷</Text>
+                        </View>
+                        <View style={styles.androidDialCopy}>
+                          <Text style={styles.dialPickerLabel}>
+                            時計ダイヤルで選択
+                          </Text>
+                          <Text style={styles.dialPickerHint}>
+                            タップして開く
+                          </Text>
+                        </View>
+                      </Pressable>
+                    ) : (
+                      <View style={styles.dialUnavailable}>
+                        <Text style={styles.dialPickerLabel}>
+                          ダイヤルで設定
+                        </Text>
+                        <Text style={styles.dialPickerHint}>
+                          Expo Go実機で使用できます
+                        </Text>
+                      </View>
+                    )}
+
+                    <GlassSurface
+                      fallbackColor="rgba(255, 255, 255, 0.76)"
+                      intensity={76}
+                      isInteractive
+                      reducedTransparencyColor="#F4F5F9"
+                      style={styles.timePreviewShell}
+                      tintColor="#EEF1FF80"
+                    >
+                      <Pressable
+                        accessibilityHint="時と分をキーボードから直接入力できます"
+                        accessibilityLabel={`${formatAlarmTime(selectedTime)}、キーボードで時刻を入力`}
+                        accessibilityRole="button"
+                        disabled={isBusy}
+                        onPress={beginTimeEditing}
+                        style={({ pressed }) => [
+                          styles.timePreviewButton,
+                          usesLargeText && styles.stackedControlCopy,
+                          pressed && styles.buttonPressed,
+                        ]}
+                        testID="alarm-time-edit-trigger"
+                      >
+                        <View>
+                          <Text style={styles.selectedTimeLabel}>選択中</Text>
+                          <Text style={styles.timePreview}>
+                            {formatAlarmTime(selectedTime)}
+                          </Text>
+                        </View>
+                        <View
+                          style={[
+                            styles.timeEditCopy,
+                            usesLargeText && styles.timeEditCopyLargeText,
+                          ]}
+                        >
+                          <Text style={styles.timeEditLabel}>数字で入力</Text>
+                          <Text style={styles.timeEditHint}>時刻をタップ</Text>
+                        </View>
+                      </Pressable>
+                    </GlassSurface>
+                  </>
                 )}
               </View>
 
@@ -596,12 +732,13 @@ const styles = StyleSheet.create({
   },
   timePreview: {
     color: '#17213D',
-    fontSize: 35,
+    fontSize: 27,
     fontWeight: '900',
-    letterSpacing: -1.2,
+    letterSpacing: -0.8,
   },
   timePreviewShell: {
-    minHeight: 72,
+    minHeight: 64,
+    marginTop: 10,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.9)',
     borderRadius: 18,
@@ -612,11 +749,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 14,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
     borderRadius: 18,
+  },
+  selectedTimeLabel: {
+    marginBottom: 1,
+    color: UI_COLORS.textMuted,
+    fontSize: 9,
+    fontWeight: '800',
   },
   timeEditCopy: {
     alignItems: 'flex-end',
+  },
+  timeEditCopyLargeText: {
+    alignItems: 'flex-start',
   },
   timeEditLabel: {
     color: UI_COLORS.accentLabel,
@@ -627,6 +774,79 @@ const styles = StyleSheet.create({
     marginTop: 3,
     color: UI_COLORS.textMuted,
     fontSize: 10,
+  },
+  dialPickerShell: {
+    borderWidth: 1,
+    borderColor: 'rgba(123, 140, 196, 0.18)',
+    borderRadius: 18,
+    backgroundColor: 'rgba(250, 251, 254, 0.88)',
+  },
+  dialPickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 13,
+    paddingTop: 10,
+  },
+  stackedControlCopy: {
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    justifyContent: 'flex-start',
+    gap: 3,
+  },
+  dialPickerLabel: {
+    color: '#344160',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  dialPickerHint: {
+    color: UI_COLORS.textMuted,
+    fontSize: 10,
+  },
+  iosTimePicker: {
+    width: '100%',
+    height: 216,
+  },
+  androidDialButton: {
+    minHeight: 68,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(123, 140, 196, 0.2)',
+    borderRadius: 18,
+    backgroundColor: 'rgba(250, 251, 254, 0.88)',
+  },
+  dialIcon: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+    backgroundColor: 'rgba(104, 121, 224, 0.14)',
+  },
+  dialIconText: {
+    color: '#5064D8',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  androidDialCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  dialUnavailable: {
+    minHeight: 58,
+    justifyContent: 'center',
+    gap: 3,
+    marginTop: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(123, 140, 196, 0.16)',
+    borderRadius: 16,
+    backgroundColor: 'rgba(250, 251, 254, 0.72)',
   },
   timeEditor: {
     gap: 10,
