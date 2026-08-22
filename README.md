@@ -14,7 +14,9 @@
 - foreground でのループ音と、background での local notification 音
 - 既存の単一アラーム保存形式から複数アラーム形式への移行
 - レイアウトを動かさない追加モーダルと、一覧だけをスクロールする固定ホーム画面
-- iOS 26 の native Liquid Glass、旧iOS / WebのBlur、Androidの安定した半透明surface、Reduce Transparency向け高コントラストfallback
+- 時刻表示をタップして、時・分をキーボードから直接入力
+- 操作層だけに限定したLiquid Glassと、繰り返し選択に追従してspring移動するglass lens
+- iOS 26のnative Liquid Glass、旧iOS / WebのBlur、Androidの安定したfallback、Reduce Transparency / Reduce Motion対応
 
 ## 動作ルール
 
@@ -59,7 +61,7 @@ npm start
 ## 使い方
 
 1. 右上の `＋` を押す。
-2. 時刻を選ぶ。
+2. 時刻表示をタップし、時・分をキーボード入力して `この時刻に決定` を押す。
 3. 「今日だけ」「毎日」「平日」「曜日指定」から繰り返しを選ぶ。
 4. `この内容で追加` を押す。
 5. 一覧のスイッチでオン／オフを切り替える。不要な設定は `削除` から解除する。
@@ -105,5 +107,7 @@ Web export は UI と bundle の smoke test です。通知、Pedometer、Apple 
 - [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
 - [Expo GlassEffect — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/glass-effect/)
 - [Expo BlurView — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/blur-view/)
+- [Apple Human Interface Guidelines: Materials](https://developer.apple.com/design/human-interface-guidelines/materials)
+- [Apple WWDC25: Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/)
 - [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)
 - [Apple: Notifications on Apple Watch](https://support.apple.com/guide/watch/notifications-apd9b833c9f3/watchos)

@@ -394,7 +394,7 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 - [ ] 通知response、Pedometer、UI renderingの責務が別moduleになっている
 - [ ] `alarmPolicy` / `alarmOrchestrator` にReact Native依存が入らない
-- [ ] 現在の 54 テスト相当以上が通過する
+- [ ] 現在の 57 テスト相当以上が通過する
 - [ ] armed / step candidate / suppressed / ringingの画面回帰を確認できる
 
 ---

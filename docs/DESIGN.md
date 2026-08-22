@@ -190,10 +190,13 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - メイン画面は viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線を固定する。
 - Dynamic Type の `fontScale > 1.3` では情報欠落を避けるアクセシビリティ例外として外側スクロールを許可し、通常文字サイズでは一覧以外を固定する。
 - 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。時刻、4種類の repeat、custom weekday、100歩の説明を持ち、小さい画面ではフォーム本体だけを内部スクロールする。
-- Androidの時刻選択は常時mountしたpickerを使わず、ユーザー操作時だけ `DateTimePickerAndroid.open()` を呼ぶ。Modalのclose / unmount / 鳴動遷移ではnative pickerも明示的にdismissする。鳴動中は追加導線とModalを無効化し、停止UIを常に最前面に保つ。
+- 時刻表示は全platform共通の明示的な編集controlとし、タップ後に時・分のnumeric keyboard inputへ展開する。入力は`0..23` / `0..59`を確定時に検証し、不正値では親のalarm stateを更新しない。編集中は追加CTAを無効化する。
+- 状態通知はstatus barの下、brand rowより上のabsolute overlay layerへspring表示し、メインlayoutを押し下げない。Reduce Motion時は移動animationを無効化する。
 - 追加エラーはスクロール領域外の固定footerに表示し、dangerはassertive、その他の状態通知はpoliteとしてassistive technologyへ通知する。
 - iOS 26 以降は `expo-glass-effect` の native Liquid Glass を使う。旧iOSとWebは `expo-blur`、AndroidはSDK 54で実blurがexperimentalなため安定した半透明 surfaceへfallbackする。Reduce Transparency 有効時はsemantic stateを保った不透明度の高い surface に切り替える。
-- Glass surface 上でも本文・操作のコントラストを維持し、装飾背景は入力・alarm state・危険通知の意味を担わせない。
+- Apple HIGに従い、Glassはcontent cardの背景に使わず、追加、通知、時刻編集、選択lens、確定などcontent上に浮くfunctional control layerへ限定する。大面積の次回表示・一覧・alarm cardはstandard materialとする。
+- repeat controlは1つのglass lensを選択肢間でspring移動させ、単なる背景色の切替にしない。native GlassView自体のopacityはanimateせず、wrapperのgeometryを移動する。Reduce Motion時は選択位置を即時更新する。
+- Glass surface 上でも本文・操作のコントラストを維持し、tintは主操作・選択・statusの意味がある箇所だけに使う。glass-on-glassを避ける。
 - Web は UI smoke test とし、通知操作を disabled にする。
 
 ## 12. Platform 制約
