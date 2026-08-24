@@ -1,4 +1,4 @@
-export const STEP_THRESHOLD = 20;
+export const STEP_THRESHOLD = 100;
 export const CHECK_IN_LEAD_MS = 60_000;
 export const MIN_ARM_LEAD_MS = 10_000;
 
@@ -68,8 +68,8 @@ export type SuppressionDecision =
 export type SuppressionOutcome = "SUPPRESSED" | "ALARM_REMAINS_ARMED";
 
 /**
- * Converts pedometer output into wake evidence. Reaching 20 steps is treated
- * as sufficient wake evidence for the presentation MVP.
+ * Converts pedometer output into wake evidence. Reaching 100 steps is treated
+ * as sufficient wake evidence for the active alarm cycle.
  */
 export function classifyStepEvidence(
   steps: number,

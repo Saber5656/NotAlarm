@@ -17,13 +17,14 @@ import {
 import type { StoredAlarm } from '../src/alarmStorage';
 
 const activeAlarm: StoredAlarm = {
+  alarmId: 'alarm-current',
   cycleId: 'cycle-current',
   mainAlarmId: 'main-current',
   checkInNotificationId: 'check-in-current',
   armedAtMs: 1_000,
   dueAtMs: 100_000,
   phase: 'armed',
-  stepCount: 20,
+  stepCount: 99,
   stepCandidateRecorded: true,
 };
 
@@ -74,6 +75,7 @@ test('main notification is scheduled before the check-in notification', async ()
   };
 
   const result = await scheduleAlarmNotificationsFailSafe(gateway, {
+    alarmId: 'alarm-1',
     cycleId: 'cycle-1',
     dueAtMs: 100_000,
     checkInAtMs: 40_000,
@@ -104,6 +106,7 @@ test('a check-in scheduling failure preserves the scheduled main alarm', async (
   };
 
   const result = await scheduleAlarmNotificationsFailSafe(gateway, {
+    alarmId: 'alarm-1',
     cycleId: 'cycle-1',
     dueAtMs: 100_000,
     checkInAtMs: 40_000,
@@ -129,6 +132,7 @@ test('a main scheduling failure never attempts to schedule a check-in', async ()
 
   await assert.rejects(
     scheduleAlarmNotificationsFailSafe(gateway, {
+      alarmId: 'alarm-1',
       cycleId: 'cycle-1',
       dueAtMs: 100_000,
       checkInAtMs: 40_000,
@@ -175,11 +179,11 @@ test('100 fresh steps cancel then save suppressed state', async () => {
   assert.equal(saved[0]?.confirmedAtMs, 50_000);
 });
 
-test('19 steps never attempt cancellation', async () => {
+test('99 steps never attempt cancellation', async () => {
   const { calls, dependencies, saved } = createResponseDependencies();
 
   const result = await processStepThresholdFailSafe(dependencies, {
-    steps: 19,
+    steps: 99,
     observedAtMs: 50_000,
   });
 
@@ -191,7 +195,7 @@ test('19 steps never attempt cancellation', async () => {
   assert.deepEqual(saved, []);
 });
 
-test('20 steps at the due time never cancel', async () => {
+test('100 steps at the due time never cancel', async () => {
   const { calls, dependencies } = createResponseDependencies();
 
   const result = await processStepThresholdFailSafe(dependencies, {

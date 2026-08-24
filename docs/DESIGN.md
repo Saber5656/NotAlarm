@@ -1,85 +1,66 @@
-# AlreadyUp MVP 設計
+# AlreadyUp 設計
 
-## 1. 目的
+## 1. 目的と安全原則
 
-AlreadyUp は、設定時刻に実際の音を鳴らし、アラーム前に 20 歩の起床行動または本人の明示操作を確認できたときだけ、対応するメインアラームを抑止するアプリである。
+AlreadyUp は、設定時刻に実際の音を鳴らし、期限前に100歩の起床行動または本人の明示操作を確認できた場合だけ、対応する1周期のアラームを抑止する。
 
-最優先の安全要件は次の 1 文に集約される。
+> 起きていると確定できない場合は、アラームを残す。
 
-> 起きていると確定できない場合はアラームを鳴らす。
+最重大事故は「本当は寝ているのに、推定や処理失敗によってアラームを止めること」である。誤って鳴ることは許容しても、正の証拠と OS 上の取消確認なしに止めることは許容しない。
 
-避けるべき最重大事故は「本当は寝ているのに、推定や処理失敗によってアラームを止めてしまうこと」である。そのため、誤って鳴ること（false positive）は許容しても、誤って止めること（unsafe suppression）は許容しない。
-
-## 2. MVP の境界
+## 2. 現行スコープ
 
 ### 含む
 
-- 1 件のメインアラームをローカル通知として先にスケジュールする
-- 起床時刻を時刻ピッカーで設定し、発表用には 30 秒後の短縮経路を用意する
-- 通常は最大 60 秒前、30 秒デモでは 15 秒前に起床確認通知を表示する
-- 確認通知の「起きています」アクションで、対応するメインアラームだけを停止する
-- iPhone の Pedometer で foreground 中の 20 歩を起床確定として検知し、対応するメインアラームだけを停止する
-- 期限到達時、foreground ではループ音、background では local notification の通知音を鳴らす
-- iPhone の actionable notification を Apple Watch に転送して操作できるようにする
-- 有効なアラーム周期を端末内に保存し、古い応答と区別する
+- 最大10件のアラーム設定
+- 今日だけ、毎日、平日、曜日指定
+- 設定ごとのオン／オフと削除
+- 各設定の先3周期を個別 local notification として予約
+- foreground Pedometer の100歩
+- 期限直前の actionable notification
+- 対象周期だけを cancel する fail-safe policy
+- foreground ループ音
+- v1 単一アラーム保存形式から v2 複数形式への移行
 
 ### 含まない
 
-- HealthKit の睡眠ステージによる自動抑止
-- watchOS 専用アプリ、WatchConnectivity、Watch 側の独自センサー処理
-- バックグラウンドでの継続的な歩数監視
-- 通常通知を越える鳴動保証
-- 複数アラーム、繰り返し、スヌーズ
-- armed 中の手動解除（誤操作による鳴動漏れを避けるため）
-- 細かなエラー復旧と全ライフサイクルの網羅
+- 睡眠そのものの推定
+- background での継続的な歩数監視
+- AlarmKit / Critical Alerts による鳴動保証
+- スヌーズ
+- アラーム名、音、振動の編集
+- 先3周期をバックグラウンドで永続的に補充する native scheduler
+- watchOS 専用アプリ
 
-HealthKit や Apple Watch の自動睡眠判定は、Watch を着けていない可能性があること、リアルタイムの起床確定として扱いにくいことから MVP の根拠にはしない。
+## 3. データモデル
 
-## 3. 用語と証拠レベル
-
-| 用語 | 意味 | アラーム停止の根拠になるか |
-|---|---|---|
-| `UNKNOWN` | 起床を確定できる情報がない | ならない |
-| `STEP_THRESHOLD_REACHED` | アラーム設定後、期限前に iPhone が 20 歩を検知 | なる |
-| `CONFIRMED_AWAKE` | 有効な確認通知で、期限前に「起きています」を明示操作 | なる |
-| `STALE` | 古い周期、別のアラーム、期限外の確認 | ならない |
-| `ERROR` | 権限、センサー、保存、応答、キャンセル等の失敗 | ならない |
-
-20 歩は睡眠そのものの推定ではなく、この MVP が採用する明確な起床行動である。19 歩以下、期限後の到達、センサー欠落・例外は停止根拠にしない。20 歩到達時も OS 上の対象通知が消えたことを確認できるまで `suppressed` にしない。
-
-`CONFIRMED_AWAKE` はアラーム直前に提示した通知への能動操作であり、20 歩と並ぶ正の証拠である。確認後に再睡眠する残余リスクはあるが、本人の能動操作として採用する。
-
-## 4. 全体構成
-
-```mermaid
-flowchart LR
-    UI["Expo / React Native UI"]
-    Policy["Fail-safe policy"]
-    Store["AsyncStorage"]
-    Ped["iPhone Pedometer"]
-    IOS["iOS local notifications"]
-    Watch["Apple Watch notification forwarding"]
-
-    UI --> Policy
-    Policy <--> Store
-    Audio["Foreground alarm audio"]
-    Ped -->|"20 steps before due"| Policy
-    Policy -->|"schedule main first"| IOS
-    Policy -->|"schedule check-in at T-15s / max T-60s"| IOS
-    Policy -->|"start loop at due while foreground"| Audio
-    IOS --> Watch
-    Watch -->|"confirm_awake action"| Policy
-    Policy -->|"cancel exact main notification"| IOS
-```
-
-Watch から独自データを送るのではなく、iOS アプリが登録した通知カテゴリとアクションを Watch 側に転送する。この構成では watchOS target を追加せずに MVP を試せる。
-
-## 5. データ契約
-
-有効な周期は最低限、次の情報を一体として扱う。
+### 3.1 Alarm definition
 
 ```ts
-type AlarmCycle = {
+interface StoredAlarmDefinition {
+  id: string;
+  hour: number;
+  minute: number;
+  repeat: AlarmRepeat;
+  enabled: boolean;
+  createdAtMs: number;
+  cycles: StoredAlarm[];
+}
+
+type AlarmRepeat =
+  | { kind: 'today'; weekdays: []; dateKey: string }
+  | { kind: 'daily'; weekdays: [0, 1, 2, 3, 4, 5, 6] }
+  | { kind: 'weekdays'; weekdays: [1, 2, 3, 4, 5] }
+  | { kind: 'custom'; weekdays: Weekday[] };
+```
+
+曜日はローカル timezone の `0=日` から `6=土` で保存する。`today` は日付を `YYYY-MM-DD` として固定し、過去時刻を翌日へ繰り越さない。
+
+### 3.2 Alarm cycle
+
+```ts
+interface StoredAlarm {
+  alarmId: string;
   cycleId: string;
   mainAlarmId: string;
   checkInNotificationId?: string;
@@ -90,163 +71,186 @@ type AlarmCycle = {
   stepCandidateAtMs?: number;
   confirmedAtMs?: number;
   stepCandidateRecorded: boolean;
-};
+}
 ```
 
-確認通知の payload は、別周期の通知を誤って適用しないため、次の相関情報を持つ。
+`alarmId` はユーザー設定、`cycleId` は特定日の特定時刻を識別する。通知 action の `cycleId`、保存済み `mainAlarmId`、check-in request ID の全てが一致しない限り cancel しない。
 
-```ts
-type AwakeCheckInData = {
-  kind: 'awake_checkin';
-  cycleId: string;
-  mainAlarmId: string;
-};
+## 4. 繰り返し計算
+
+`getUpcomingAlarmTimes` はローカル date を1日ずつ進め、repeat rule に一致する未来時刻を最大3件返す。
+
+| repeat | 次回計算 |
+|---|---|
+| 今日だけ | 保存した当日かつ現在より後だけ |
+| 毎日 | 次に到来する全曜日 |
+| 平日 | 月〜金だけ |
+| 曜日指定 | 選択した1曜日以上だけ |
+
+全て one-off `DATE` trigger とする。同じ recurring request を使わないのは、1周期だけを安全に cancel し、古い応答が将来周期へ波及することを防ぐためである。
+
+## 5. 通知予算
+
+iOS は保留 local notification を直近64件まで保持する。AlreadyUp は次の上限を固定する。
+
+```text
+10 alarm definitions
+× 3 upcoming cycles
+× 2 notifications (main + check-in)
+= 60 pending notifications maximum
 ```
 
-- category identifier: `awake_checkin`
-- action identifier: `confirm_awake`
-- action label: `起きています`
+予約枠はアプリ起動時、起床確認成功時、鳴動停止時に補充する。アプリを3周期以上開かない場合の継続補充は未実装であり、本番 release gate とする。
 
-category / action identifier は固定値とし、表示文字列で判定しない。
+## 6. 予約シーケンス
 
-## 6. スケジュール手順
+各周期は次の順序で予約する。
 
-アラーム設定時は、次の順序を崩さない。
+1. 入力時刻と repeat rule を検証する。
+2. 一意な `cycleId` を作成する。
+3. main alarm を OS に登録し、`mainAlarmId` を得る。
+4. 最大60秒前の check-in を登録する。
+5. definition と cycle を AsyncStorage v2 に保存する。
 
-1. 通知権限と通知カテゴリを準備する。
-2. `cycleId` と `dueAtMs` を確定する。
-3. メインアラームを OS にスケジュールし、`mainAlarmId` を得る。
-4. 通常は最大 `dueAtMs - 60 秒`、30 秒デモでは `dueAtMs - 15 秒` に確認通知をスケジュールし、その通知 ID を得る。
-5. メイン ID と確認通知 ID を含む有効周期を保存する。
-6. Pedometer の foreground 監視を開始する。
+main を必ず先に登録する。check-in の登録に失敗しても main を残し、警告を返す。main の登録に失敗した周期は「予約済み」と表示しない。
 
-メインを先に登録するのは、確認通知やセンサーの準備に失敗してもアラームを残すためである。プロセスが保存前に終了しても OS 上のメイン通知は残る。メイン通知のスケジュール自体が失敗した場合は「設定済み」と表示してはならない。確認通知のスケジュールが失敗した場合は、メインを残したまま警告状態にする。
+## 7. 起床証拠と抑止
 
-## 7. 判定フロー
+### 7.1 100歩
 
-### 7.1 20 歩を検知した場合
+- foreground で最も近い未来周期だけを監視する。
+- 99歩以下は main を変更しない。
+- 100歩以上でも `armedAtMs <= observedAtMs < dueAtMs` を満たさない場合は拒否する。
+- 保存済み `mainAlarmId` を cancel し、OS pending 一覧から消えたことを確認した場合だけ `suppressed` にする。
+- 別設定、別日、次の周期は変更しない。
 
-1. 現在の周期に対する歩数を更新する。
-2. 20 歩未満ではメインアラームを変更しない。
-3. 20 歩以上でも、現在周期が active かつ期限前であることを検証する。
-4. 保存済みの正本 ID を使い、メイン通知 1 件だけをキャンセルする。
-5. OS の scheduled notification 一覧で対象 ID の消失を確認できた場合だけ `suppressed` を保存する。
-6. 確認通知は best-effort で取り消し、失敗してもメイン通知の停止結果を巻き戻さない。
+### 7.2 明示確認
 
-期限後、古い周期、19 歩以下、キャンセル例外、またはキャンセル結果を確認できない場合は `suppressed` に遷移せず、アラームを残す。
+check-in notification の「起きています」は、次の全条件を満たす場合だけ有効である。
 
-### 7.2 「起きています」を操作した場合
+1. action identifier が `confirm_awake`。
+2. kind が `awake_checkin`。
+3. cycle、main request、check-in request が保存済み周期と一致。
+4. 保存 phase が `armed` または `step_candidate`。
+5. 確認時刻が check-in window 内かつ期限前。
+6. main cancel 後、OS pending 一覧で消失を確認。
 
-以下をすべて満たす場合に限り、抑止処理へ進む。
-
-1. action identifier が厳密に `confirm_awake` と一致する。
-2. payload の `kind` が `awake_checkin` である。
-3. payload の `cycleId` が現在有効な周期と一致する。
-4. payload の `mainAlarmId` が現在有効なメイン通知 ID と一致する。
-5. response の通知 ID が現在の `checkInNotificationId` と一致する。
-6. 確認時刻がその周期の `checkInAtMs` 以降かつ `dueAtMs` より前である。
-7. 現在の周期がまだ `armed` または `step_candidate` である。
-
-条件を満たしたら、payload ではなく保存済みの正本 ID を使ってメイン通知 1 件だけをキャンセルする。キャンセル前後の OS の scheduled notification 一覧で対象 ID の存在と消失を検証し、成功を確認したあとに `suppressed` と `confirmedAt` を保存する。
-
-不一致、期限切れ、重複応答、例外、キャンセル失敗では `suppressed` に遷移しない。期限と同時の競合はアラーム優先とする。
-
-### 7.3 無応答・通常タップ・dismiss
-
-何もしない。メイン通知は OS に残る。
+古い通知、default tap、重複 action、期限後 action、取消例外では main を残す。
 
 ## 8. 状態遷移
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle
-    Idle --> Arming: set alarm
-    Arming --> Armed: main notification scheduled
-    Arming --> Idle: main scheduling failed
-    Armed --> Armed: fewer than 20 steps / unknown / no response
-    Armed --> SuppressionPending: 20 steps or valid confirm_awake before due
-    SuppressionPending --> Suppressed: exact main cancellation succeeded
-    SuppressionPending --> Armed: validation or cancellation failed
+    [*] --> Armed: main scheduled and cycle saved
+    Armed --> Armed: 0..99 steps / unknown / error
+    Armed --> SuppressionPending: 100 steps or valid confirmation
+    SuppressionPending --> Suppressed: exact main cancel verified
+    SuppressionPending --> Armed: cancel missing, failed, or unverified
     Armed --> Ringing: due reached
-    SuppressionPending --> Ringing: due wins race
-    Ringing --> Dismissed: user dismisses alarm
-    Suppressed --> [*]
-    Dismissed --> [*]
+    Ringing --> Dismissed: user stops alarm
+    Suppressed --> [*]: cycle completed
+    Dismissed --> [*]: cycle completed
 ```
 
-20 歩到達は抑止処理の入口だが、OS 上の対象通知のキャンセル成功を確認した場合だけ `Suppressed` へ遷移する。
+期限と証拠が同時に競合する場合はアラームを優先する。
 
-## 9. Watch routing matrix
+## 9. 複数アラーム操作
 
-iOS の通知は通常、iPhone と Watch の両方に同時表示されるのではなく、端末状態に応じて配送先が選ばれる。
+### オフ
 
-| iPhone | Apple Watch | 期待される主な配送先 | MVP 上の扱い |
-|---|---|---|---|
-| アンロック・使用中 | 任意 | iPhone | iPhone で同じアクションを操作可能 |
-| ロック中またはスリープ | 装着・アンロック・接続中 | Apple Watch | Watch での主要デモ経路 |
-| ロック中またはスリープ | ロック中・未装着 | iPhone | Watch 確認なし。無応答なら鳴る |
-| ロック中またはスリープ | 未接続・電源断・圏外 | iPhone | Watch 確認なし。無応答なら鳴る |
-| 任意 | 通知ミラーリング無効 | iPhone | 設定案内が必要 |
-| 任意 | Focus / 通知制限あり | OS 設定に依存 | 配送・音を保証しない |
+definition が持つ check-in と main を個別に cancel し、OS pending 一覧で消失を確認する。成功後に `enabled=false`、`cycles=[]` を保存する。確認できなければ設定を変更せずエラーを表示する。
 
-この表は Apple の一般的な forwarding ルールに基づく。実際の action 表示、Focus、ロック、接続復帰、複数 Watch 等の組み合わせは実機検証を残 Issue とする。
+### オン
 
-## 10. ライフサイクルと fail-safe
+repeat rule から先3周期を再計算し、新しい cycle ID と notification ID を発行する。過去になった「今日だけ」は再利用せず、新規作成を求める。
 
-| 事象 | 安全側の結果 |
+### 削除
+
+確認ダイアログ後、対象 definition の通知だけを解除する。解除成功後に definition を削除する。
+
+### 鳴動停止・起床確認後
+
+`today` は無効化する。繰り返し設定は完了周期を残りの周期と区別し、予約枠を最大3件へ補充する。
+
+## 10. 保存と移行
+
+- v2 key: `already-up/alarm-definitions/v2`
+- legacy key: `already-up/active-alarm/v1`
+- v2 は `{ version: 2, alarms }` として保存する。
+- ID 重複、時刻範囲、repeat rule、cycle shape、最大10件を load / save の両方で検証する。
+- 全ての read-modify-write は直列 mutation queue 内で最新値を読み直し、通知応答・歩数更新・画面操作・起動時補充が互いの保存結果を古い snapshot で上書きしない。
+- v2 が存在せず valid な v1 がある場合、`today` definition 1件へ移行し、v2 保存成功後に v1 key を削除する。
+- malformed data では推測復旧せず、予約済み通知を勝手に解除しない。
+
+## 11. UI 契約
+
+- 上部はブランド、画面タイトル、追加ボタンだけにし、prototype / presentation 表示を置かない。
+- 次回アラームは時刻、日付、残り時間、100歩進捗を表示する。
+- 通常文字サイズでは有効時 / idleのsummary cardを同じ140pt固定高とし、一覧の開始位置を動かさない。Dynamic Typeのアクセシビリティscroll時だけ、文字を切らないため同じ140pt最小高から内容に応じて拡張する。
+- 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。
+- メイン画面は通常文字サイズでは外側を `View` として viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線、一覧panelの丸い下端をviewport内へ固定する。
+- Dynamic Type の `fontScale > 1.3` では情報欠落を避けるアクセシビリティ例外として外側スクロールを許可し、通常文字サイズでは一覧以外を固定する。
+- 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。タイトル直下の「時刻」「繰り返し」で内容を分け、選択中のglass lensをspring移動させる。通常端末（高さ700pt以上、幅360pt以上、`fontScale <= 1.3`）はsheet高を固定して内部スクロールを無効化し、繰り返しと100歩の説明も1画面内で操作できる。小さい画面・狭い画面・大きい文字では情報欠落を避けるためフォーム本体だけを内部スクロールし、repeat labelは2行まで許可する。
+- 時刻設定の標準操作はnative pickerとする。iOSは「時刻」内の先頭に`display="spinner"`の216pt wheelを常時表示し、選択帯を含めて角丸surface内にclipする。Androidは公式推奨のimperative APIで`display="clock"` dialogを開く。選択時刻と`数字で入力`はpicker後段のsecondary controlとし、表示時刻をタップした場合だけ時・分のnumeric keyboard inputへ切り替える。入力は`0..23` / `0..59`を確定時に検証し、不正値では親のalarm stateを更新しない。編集中はpickerを閉じて追加CTAと「繰り返し」切替を無効化する。`fontScale > 1.3`では横並びcopyを縦積みにする。
+- 状態通知はstatus barの下、brand rowより上のabsolute overlay layerへspring表示し、メインlayoutを押し下げない。上端のdrag handleでgestureを示し、閉じるbuttonに加えて、上方向へ32px以上または十分な上向き速度でswipeするとdismissし、未達gestureは元の位置へ戻す。Reduce Motion時は自動springを無効化する。
+- 追加エラーはスクロール領域外の固定footerに表示し、custom曜日未選択のようなdisabled理由は表示中のtabにかかわらず常時示す。dangerはassertive、その他の状態通知はpoliteとしてassistive technologyへ通知する。ただし頻繁なalarm toggleは完全成功時のbannerを出さない。例外による失敗はdanger、アラーム本体を保存できても一部の起床確認通知を予約できなかった場合だけwarningを表示する。追加処理中はtab、picker、repeat、曜日、確定操作をすべて無効化する。
+- iOS 26 以降は `expo-glass-effect` の native Liquid Glass を使う。旧iOSとWebは `expo-blur`、AndroidはSDK 54で実blurがexperimentalなため安定した半透明 surfaceへfallbackする。Reduce Transparency 有効時はsemantic stateを保った不透明度の高い surface に切り替える。
+- Glassは背景写真と操作面の関係を示す上部summary、追加、通知、時刻編集、選択lens、確定へ限定する。alarm list panelと各alarm cardは読みやすいstandard materialを維持し、大面積の背景全体を一律に透明化しない。
+- 追加フォームの「時刻／繰り返し」とrepeat controlは、それぞれ1つのglass lensを選択肢間でspring移動させ、単なる背景色の切替にしない。native GlassView自体のopacityはanimateせず、wrapperのgeometryを移動する。Reduce Motion時は選択位置を即時更新する。
+- Glass surface 上でも本文・操作のコントラストを維持し、tintは主操作・選択・statusの意味がある箇所だけに使う。glass-on-glassを避ける。
+- ホーム背景は端末のローカル時刻とtimezoneだけから決定し、同一の湖畔景観をphotorealisticに生成した夜明け、昼、夕暮れ、夜の4 assetを連続cross-fadeする。基準の日の出は06:00、日の入りは18:00とし、codeで星、太陽、月、山を描くillustration layerは使わない。背景はdecorativeとしてaccessibility treeから除外し、上部scrimでstatus barとheaderの白文字contrastを維持する。
+- 背景assetのopacity計算は純粋関数に分離し、任意時刻で隣接する最大2 assetだけを合計opacity 1でblendする。React Nativeの`Image`もopacityが0より大きい最大2枚だけをmountし、4枚同時decodeを避ける。位置情報、国籍、networkは現行モデルへ入力しない。実地点・季節の日の出時刻を使う拡張は、任意の位置情報権限、手動地域設定、privacy copyを別途承認してから追加する。
+- Web は UI smoke test とし、通知操作を disabled にする。
+
+## 12. Platform 制約
+
+| 制約 | 現行動作 |
 |---|---|
-| アプリ再起動 | 保存済み周期を復元し、確認できなければメインを残す |
-| action response を取得できない | メインを残す |
-| 古い action response を再取得 | cycle / ID / deadline 検証で無視する |
-| 保存読み込み失敗 | メインを推測でキャンセルしない |
-| Pedometer 権限拒否・停止 | 20 歩を確認できないためメインを残す |
-| 確認通知の登録失敗 | メインを残し、確認不能を表示する |
-| メイン通知のキャンセル失敗 | `suppressed` にせず、メインを残す |
-| OS 時刻変更・再起動 | 現 MVP では完全未対応。メインを推測で消さない |
+| Pedometer background 非対応 | 起床確定にせず main を残す |
+| 歩数監視 window 未確定 | 最も近い未来周期を foreground 中に監視。日中歩行の混入防止は release gate |
+| 通知権限拒否 | 新規アラームを追加しない |
+| check-in 登録失敗 | main を残し警告 |
+| main 登録失敗 | 周期を保存しない |
+| cancel 未確認 | `suppressed` にしない |
+| Focus / 消音 / 音量 | 鳴動保証なし。release gate で扱う |
+| app terminated 時の action | JS handler 不実行の可能性。main が残る安全側 failure |
+| 3周期を越える未起動 | 追加周期が補充されない |
+| production app identity 未確定 | `app.alreadyup.prototype` を維持し、人間承認なしに app identity を変更しない |
+| Web native time picker非対応 | dialはExpo Go実機で使用する旨を表示し、UI / bundle smokeだけ行う |
 
-`getLastNotificationResponse` 等で cold start 時の応答を回収しても、必ず有効周期との相関を検証する。アプリが terminated の状態で Watch の action が JavaScript まで届くことは未検証であり、本番化前の P0 Issue とする。
+## 13. Verification matrix
 
-## 11. 鳴動方式と限界
-
-期限到達時にアプリが foreground なら、`expo-audio` で端末内生成した WAV をループ再生する。`playsInSilentMode` を有効にするが、JavaScript が停止する background / terminated 状態ではこのループは継続保証できない。その場合は先に登録した通常の local notification の通知音を使う。
-
-したがって、次を越えた鳴動保証はない。
-
-- 通知権限の拒否または変更
-- iPhone の消音、通知音量、Focus、Scheduled Summary 等
-- Apple Watch 側の消音、Focus、装着・ロック状態
-- OS の配送遅延、端末電源断、再起動
-
-「不明なら通知を OS に残す」というアプリ内の fail-safe と、「音が必ず出る」という OS レベルの保証は別問題である。後者は AlarmKit、Critical Alerts entitlement、native integration、実機検証を含めて解決する必要がある。
-
-## 12. 受け入れテスト
-
-| ID | 条件 | 期待結果 |
+| ID | シナリオ | 期待結果 |
 |---|---|---|
-| POL-01 | 証拠なしで期限到達 | 鳴る |
-| POL-02 | 19 歩以下で期限到達 | 鳴る |
-| POL-03 | 現在周期で期限前に 20 歩へ到達し、対象通知の消失を検証 | 対象だけ抑止 |
-| POL-04 | 正しい周期・確認通知 ID の `confirm_awake` を確認可能時刻以降・期限前に操作 | 対象だけ抑止 |
-| POL-05 | 古い周期の `confirm_awake` | 現在のアラームは鳴る |
-| POL-06 | 別メイン ID の `confirm_awake` | 現在のアラームは鳴る |
-| POL-07 | 確認可能時刻より前、または別の確認通知からの応答 | 鳴る |
-| POL-08 | `dueAtMs` と同時または後の応答 | 鳴る |
-| POL-09 | キャンセル API が失敗 | 鳴る側を維持 |
-| POL-10 | 前周期で確認後、新しい周期を設定 | 新周期は自動抑止されない |
-| LIFE-01 | バックグラウンド中に Watch で有効 action | 期限前に対象だけ抑止 |
-| LIFE-02 | terminated 中に Watch で有効 action | 未検証。P0 Issue |
-| ROUTE-01 | iPhone ロック、Watch 装着・アンロック | Watch に action が表示される |
-| ROUTE-02 | iPhone アンロック | iPhone に action が表示される |
+| POL-01 | 99歩 | 対象 main を維持 |
+| POL-02 | 期限前100歩 + cancel verified | 対象周期だけ suppress |
+| POL-03 | 期限時100歩 | main 優先 |
+| POL-04 | 古い cycle action | 現周期を維持 |
+| REP-01 | 毎日 | 次の3日を計算 |
+| REP-02 | 金曜の平日設定 | 月・火・水を計算 |
+| REP-03 | 過去の今日だけ | 翌日へ繰り越さず拒否 |
+| MUL-01 | 2設定の片方を suppress | 他方の IDs は不変 |
+| MUL-02 | toggle off | 対象 definition の通知だけ解除 |
+| MUL-03 | delete | 対象 definition だけ削除 |
+| UI-01 | アラームをoff / on | summary card高と一覧開始位置が変わらない |
+| UI-02 | noticeを短く上swipe | bannerは元位置へ戻る |
+| UI-03 | noticeを32px以上または高速で上swipe | bannerをdismiss |
+| UI-04 | iOS wheel / Android clock | 選択時刻が親formへ反映 |
+| UI-05 | 表示時刻をタップ | keyboard direct inputへ切り替え |
+| UI-06 | 通常端末で追加フォームの「時刻／繰り返し」を切替 | sheetとfooterが動かず、内容領域はスクロールしない |
+| UI-07 | iOS wheelの選択帯 | 216pt wheelを縦に欠けさせず、横方向は角丸surface内に収まる |
+| UI-08 | 高さ700pt未満、幅360pt未満、または`fontScale > 1.3` | フォーム本体だけがスクロールし、全操作へ到達できる |
+| UI-09 | 02:00 / 06:00 / 12:00 / 18:00 / 21:00のlocal time | phaseとnight / dawn / day / dusk写真weightが期待する状態になる |
+| UI-10 | 23:59:59から00:00:00へ遷移 | night写真weightが不連続に飛ばない |
+| UI-11 | alarm toggle完全成功 / 部分予約失敗 / 例外失敗 | 完全成功時はbannerなし、部分予約失敗時はwarning、例外失敗時はdanger noticeを表示する |
 
-ポリシーテストが通っても OS 配送を証明したことにはならない。`LIFE-*` と `ROUTE-*` は iPhone / Apple Watch 実機で別途検証する。
-
-## 13. 公式資料
+## 14. 参照資料
 
 - [Expo Notifications — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
-- [Expo Audio — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/audio/)
-- [Expo FileSystem — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/filesystem/)
-- [Expo: Create a project（物理デバイスの Expo Go は SDK 54）](https://docs.expo.dev/get-started/create-a-project/)
-- [Taking advantage of notification forwarding](https://developer.apple.com/documentation/watchos-apps/taking-advantage-of-notification-forwarding)
-- [Adding actions to notifications on watchOS](https://developer.apple.com/documentation/watchos-apps/adding-actions-to-notifications-on-watchos)
+- [Expo DateTimePicker — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/date-time-picker/)
+- [Expo LinearGradient — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/linear-gradient/)
+- [React Native 0.81 PanResponder](https://reactnative.dev/docs/0.81/panresponder)
+- [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)
+- [Apple: UILocalNotification pending limit](https://developer.apple.com/documentation/uikit/uilocalnotification)
 - [Apple Watch notifications](https://support.apple.com/guide/watch/notifications-apd9b833c9f3/watchos)
