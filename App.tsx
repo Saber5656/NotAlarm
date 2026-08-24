@@ -38,6 +38,9 @@ import {
 import { UI_COLORS } from './src/ui/tokens';
 
 import {
+  cancelAlarmDefinitionWithCheckpoints,
+} from './src/alarmCancellation';
+import {
   getNextMonitoringCycle,
   getRingingCycle,
   fillAlarmDefinitionSchedule,
@@ -64,13 +67,19 @@ import {
   stopForegroundAlarmSound,
 } from './src/alarmSound';
 import {
+  type AlarmCancellationCompletion,
   type StoredAlarm,
   type StoredAlarmDefinition,
+  loadAlarmDefinitions,
+  loadPendingAlarmCancellations,
   loadStoredAlarmByCycleId,
   markDueCyclesRinging,
   mutateAlarmDefinitions,
+  removePendingAlarmCancellation,
   saveMonitoringCycleStepCount,
   saveStoredAlarm,
+  transactAlarmDefinitions,
+  upsertPendingAlarmCancellation,
 } from './src/alarmStorage';
 import {
   cancelNotificationIfPresent,
@@ -95,6 +104,60 @@ const schedulingGateway = {
   scheduleMain: scheduleMainAlarmNotification,
   scheduleCheckIn: scheduleCheckInNotification,
 };
+
+const cancellationGateway = {
+  cancelScheduled: cancelNotificationIfPresent,
+  dismissDelivered: dismissDeliveredNotification,
+};
+
+async function cancelAlarmDefinitionPersistently(
+  alarmId: string,
+  completion: AlarmCancellationCompletion,
+): Promise<StoredAlarmDefinition[]> {
+  const next = await transactAlarmDefinitions(async (current, checkpoint) => {
+    const latest = current.find((alarm) => alarm.id === alarmId);
+    if (!latest) {
+      throw new Error('対象のアラームが見つかりません。');
+    }
+    const targetCycleIds = latest.cycles.map((cycle) => cycle.cycleId);
+    await upsertPendingAlarmCancellation({
+      alarmId,
+      completion,
+      cycleIds: targetCycleIds,
+      requestedAtMs: Date.now(),
+    });
+    return cancelAlarmDefinitionWithCheckpoints({
+      alarms: current,
+      alarmId,
+      completion,
+      targetCycleIds,
+      gateway: cancellationGateway,
+      checkpoint,
+    });
+  });
+  await removePendingAlarmCancellation(alarmId);
+  return next;
+}
+
+async function recoverPendingAlarmCancellations(): Promise<void> {
+  const pendingEntries = await loadPendingAlarmCancellations();
+  for (const pending of pendingEntries) {
+    await transactAlarmDefinitions((current, checkpoint) => {
+      if (!current.some((alarm) => alarm.id === pending.alarmId)) {
+        return current;
+      }
+      return cancelAlarmDefinitionWithCheckpoints({
+        alarms: current,
+        alarmId: pending.alarmId,
+        completion: pending.completion,
+        targetCycleIds: pending.cycleIds,
+        gateway: cancellationGateway,
+        checkpoint,
+      });
+    });
+    await removePendingAlarmCancellation(pending.alarmId);
+  }
+}
 
 const ALARM_SUMMARY_CARD_HEIGHT = 140;
 
@@ -190,17 +253,6 @@ async function fillEnabledSchedules(
   }
 
   return { alarms: next, warnings };
-}
-
-async function cancelDefinitionNotifications(
-  definition: StoredAlarmDefinition,
-): Promise<void> {
-  for (const cycle of definition.cycles) {
-    await cancelNotificationIfPresent(cycle.checkInNotificationId);
-    await cancelNotificationIfPresent(cycle.mainAlarmId);
-    await dismissDeliveredNotification(cycle.checkInNotificationId);
-    await dismissDeliveredNotification(cycle.mainAlarmId);
-  }
 }
 
 interface ScreenFrameProps {
@@ -318,9 +370,22 @@ function AlarmApp() {
 
     void (async () => {
       try {
+        let cancellationRecoveryFailed = false;
+        try {
+          await recoverPendingAlarmCancellations();
+        } catch {
+          cancellationRecoveryFailed = true;
+          if (mounted) {
+            setNotice({
+              tone: 'danger',
+              text: '前回のアラーム停止処理を完了できませんでした。端末の通知一覧を確認してください。',
+            });
+          }
+        }
         let restored = await markDueCyclesRinging(Date.now());
 
         if (
+          !cancellationRecoveryFailed &&
           Platform.OS !== 'web' &&
           restored.some((definition) => definition.enabled)
         ) {
@@ -759,20 +824,10 @@ function AlarmApp() {
       setNotice(null);
       try {
         if (!enabled) {
-          const next = await mutateAlarmDefinitions(async (current) => {
-            const latest = current.find(
-              (alarm) => alarm.id === definition.id,
-            );
-            if (!latest) {
-              throw new Error('対象のアラームが見つかりません。');
-            }
-            await cancelDefinitionNotifications(latest);
-            return current.map((alarm) =>
-              alarm.id === definition.id
-                ? { ...alarm, enabled: false, cycles: [] }
-                : alarm,
-            );
-          });
+          const next = await cancelAlarmDefinitionPersistently(
+            definition.id,
+            'disable',
+          );
           setCurrentAlarms(next);
           return;
         }
@@ -827,11 +882,18 @@ function AlarmApp() {
           });
         }
       } catch (error) {
+        try {
+          setCurrentAlarms(await loadAlarmDefinitions());
+        } catch {
+          // Keep the last in-memory snapshot if storage cannot be read either.
+        }
         setNotice({
           tone: 'danger',
           text:
             error instanceof Error
-              ? error.message
+              ? !enabled
+                ? '通知の解除を完了できませんでした。次回起動時に停止処理を再試行します。'
+                : error.message
               : 'アラームの状態を変更できませんでした。',
         });
       } finally {
@@ -849,20 +911,21 @@ function AlarmApp() {
 
       setIsBusy(true);
       try {
-        const next = await mutateAlarmDefinitions(async (current) => {
-          const latest = current.find((alarm) => alarm.id === definition.id);
-          if (!latest) {
-            throw new Error('対象のアラームが見つかりません。');
-          }
-          await cancelDefinitionNotifications(latest);
-          return current.filter((alarm) => alarm.id !== definition.id);
-        });
+        const next = await cancelAlarmDefinitionPersistently(
+          definition.id,
+          'delete',
+        );
         setCurrentAlarms(next);
         setNotice({ tone: 'neutral', text: 'アラームを削除しました。' });
       } catch {
+        try {
+          setCurrentAlarms(await loadAlarmDefinitions());
+        } catch {
+          // Keep the last in-memory snapshot if storage cannot be read either.
+        }
         setNotice({
           tone: 'danger',
-          text: '通知の解除を確認できなかったため、アラームを削除していません。',
+          text: 'アラームの削除を完了できませんでした。次回起動時に停止処理を再試行します。',
         });
       } finally {
         setIsBusy(false);

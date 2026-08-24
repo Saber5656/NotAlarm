@@ -13,6 +13,17 @@ import {
 
 export const ACTIVE_ALARM_STORAGE_KEY = 'already-up/active-alarm/v1';
 export const ALARM_DEFINITIONS_STORAGE_KEY = 'already-up/alarm-definitions/v2';
+export const ALARM_CANCELLATION_JOURNAL_KEY =
+  'already-up/alarm-cancellation-journal/v1';
+
+export type AlarmCancellationCompletion = 'disable' | 'delete';
+
+export interface PendingAlarmCancellation {
+  alarmId: string;
+  completion: AlarmCancellationCompletion;
+  cycleIds: string[];
+  requestedAtMs: number;
+}
 
 export type AlarmPhase =
   | 'armed'
@@ -50,11 +61,26 @@ interface AlarmStoreV2 {
   alarms: StoredAlarmDefinition[];
 }
 
+interface AlarmCancellationJournalV1 {
+  version: 1;
+  entries: PendingAlarmCancellation[];
+}
+
 type AlarmDefinitionsMutator = (
   alarms: StoredAlarmDefinition[],
 ) => StoredAlarmDefinition[] | Promise<StoredAlarmDefinition[]>;
 
+type AlarmDefinitionsCheckpoint = (
+  alarms: StoredAlarmDefinition[],
+) => Promise<void>;
+
+type AlarmDefinitionsTransaction = (
+  alarms: StoredAlarmDefinition[],
+  checkpoint: AlarmDefinitionsCheckpoint,
+) => StoredAlarmDefinition[] | Promise<StoredAlarmDefinition[]>;
+
 let mutationQueue: Promise<void> = Promise.resolve();
+let cancellationJournalQueue: Promise<void> = Promise.resolve();
 
 export async function loadAlarmDefinitions(): Promise<StoredAlarmDefinition[]> {
   const raw = await AsyncStorage.getItem(ALARM_DEFINITIONS_STORAGE_KEY);
@@ -80,6 +106,67 @@ export async function saveAlarmDefinitions(
   await AsyncStorage.setItem(ALARM_DEFINITIONS_STORAGE_KEY, JSON.stringify(store));
 }
 
+export async function loadPendingAlarmCancellations(): Promise<
+  PendingAlarmCancellation[]
+> {
+  const raw = await AsyncStorage.getItem(ALARM_CANCELLATION_JOURNAL_KEY);
+  if (!raw) {
+    return [];
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!isAlarmCancellationJournalV1(parsed)) {
+    throw new Error('未完了のアラーム停止処理を読み取れません。');
+  }
+  return parsed.entries;
+}
+
+function mutatePendingAlarmCancellations(
+  mutator: (
+    current: PendingAlarmCancellation[],
+  ) => PendingAlarmCancellation[],
+): Promise<PendingAlarmCancellation[]> {
+  const operation = cancellationJournalQueue.then(async () => {
+    const current = await loadPendingAlarmCancellations();
+    const entries = mutator(current);
+    const journal: AlarmCancellationJournalV1 = { version: 1, entries };
+    if (!isAlarmCancellationJournalV1(journal)) {
+      throw new Error('アラーム停止処理を保存できません。');
+    }
+    if (entries.length === 0) {
+      await AsyncStorage.removeItem(ALARM_CANCELLATION_JOURNAL_KEY);
+    } else {
+      await AsyncStorage.setItem(
+        ALARM_CANCELLATION_JOURNAL_KEY,
+        JSON.stringify(journal),
+      );
+    }
+    return entries;
+  });
+
+  cancellationJournalQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+export function upsertPendingAlarmCancellation(
+  pending: PendingAlarmCancellation,
+): Promise<PendingAlarmCancellation[]> {
+  return mutatePendingAlarmCancellations((current) => [
+    ...current.filter((entry) => entry.alarmId !== pending.alarmId),
+    pending,
+  ]);
+}
+
+export function removePendingAlarmCancellation(
+  alarmId: string,
+): Promise<PendingAlarmCancellation[]> {
+  return mutatePendingAlarmCancellations((current) =>
+    current.filter((entry) => entry.alarmId !== alarmId),
+  );
+}
+
 export function mutateAlarmDefinitions(
   mutator: AlarmDefinitionsMutator,
 ): Promise<StoredAlarmDefinition[]> {
@@ -87,6 +174,30 @@ export function mutateAlarmDefinitions(
     const current = await loadAlarmDefinitions();
     const next = await mutator(current);
     await saveAlarmDefinitions(next);
+    return next;
+  });
+
+  mutationQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+export function transactAlarmDefinitions(
+  transaction: AlarmDefinitionsTransaction,
+): Promise<StoredAlarmDefinition[]> {
+  const operation = mutationQueue.then(async () => {
+    const current = await loadAlarmDefinitions();
+    let lastCheckpoint: StoredAlarmDefinition[] | null = null;
+    const checkpoint: AlarmDefinitionsCheckpoint = async (next) => {
+      await saveAlarmDefinitions(next);
+      lastCheckpoint = next;
+    };
+    const next = await transaction(current, checkpoint);
+    if (next !== lastCheckpoint && next !== current) {
+      await saveAlarmDefinitions(next);
+    }
     return next;
   });
 
@@ -179,7 +290,46 @@ export async function clearAlarmStorage(): Promise<void> {
   await Promise.all([
     AsyncStorage.removeItem(ALARM_DEFINITIONS_STORAGE_KEY),
     AsyncStorage.removeItem(ACTIVE_ALARM_STORAGE_KEY),
+    AsyncStorage.removeItem(ALARM_CANCELLATION_JOURNAL_KEY),
   ]);
+}
+
+function isAlarmCancellationJournalV1(
+  value: unknown,
+): value is AlarmCancellationJournalV1 {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const journal = value as Partial<AlarmCancellationJournalV1>;
+  return (
+    journal.version === 1 &&
+    Array.isArray(journal.entries) &&
+    journal.entries.length <= MAX_ALARM_COUNT &&
+    new Set(journal.entries.map((entry) => entry?.alarmId)).size ===
+      journal.entries.length &&
+    journal.entries.every(isPendingAlarmCancellation)
+  );
+}
+
+function isPendingAlarmCancellation(
+  value: unknown,
+): value is PendingAlarmCancellation {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const pending = value as Partial<PendingAlarmCancellation>;
+  return (
+    typeof pending.alarmId === 'string' &&
+    pending.alarmId.length > 0 &&
+    (pending.completion === 'disable' || pending.completion === 'delete') &&
+    Array.isArray(pending.cycleIds) &&
+    pending.cycleIds.every(
+      (cycleId) => typeof cycleId === 'string' && cycleId.length > 0,
+    ) &&
+    new Set(pending.cycleIds).size === pending.cycleIds.length &&
+    typeof pending.requestedAtMs === 'number' &&
+    Number.isFinite(pending.requestedAtMs)
+  );
 }
 
 function isAlarmStoreV2(value: unknown): value is AlarmStoreV2 {
