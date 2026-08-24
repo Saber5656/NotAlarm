@@ -8,7 +8,36 @@ import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 
 export interface AlarmScheduleFillResult {
   definition: StoredAlarmDefinition;
-  warnings: string[];
+  issues: AlarmScheduleIssue[];
+  scheduledCycles: StoredAlarm[];
+}
+
+export type AlarmScheduleIssue =
+  | {
+      kind: 'main_schedule_failed';
+      alarmId: string;
+      cycleId: string;
+      dueAtMs: number;
+      message: string;
+    }
+  | {
+      kind: 'check_in_schedule_failed';
+      alarmId: string;
+      cycleId: string;
+      dueAtMs: number;
+      mainAlarmId: string;
+      message: string;
+    };
+
+export type AlarmScheduleIssueSeverity = 'none' | 'warning' | 'danger';
+
+export function getAlarmScheduleIssueSeverity(
+  issues: readonly AlarmScheduleIssue[],
+): AlarmScheduleIssueSeverity {
+  if (issues.some((issue) => issue.kind === 'main_schedule_failed')) {
+    return 'danger';
+  }
+  return issues.length > 0 ? 'warning' : 'none';
 }
 
 export async function fillAlarmDefinitionSchedule(
@@ -21,7 +50,8 @@ export async function fillAlarmDefinitionSchedule(
   if (!definition.enabled) {
     return {
       definition: { ...definition, cycles: normalizedCycles },
-      warnings: [],
+      issues: [],
+      scheduledCycles: [],
     };
   }
 
@@ -58,14 +88,16 @@ export async function fillAlarmDefinitionSchedule(
         enabled: false,
         cycles: normalizedCycles,
       },
-      warnings: [],
+      issues: [],
+      scheduledCycles: [],
     };
   }
   const occupiedDueTimes = new Set(
     normalizedCycles.map((cycle) => cycle.dueAtMs),
   );
   const cycles = [...normalizedCycles];
-  const warnings: string[] = [];
+  const issues: AlarmScheduleIssue[] = [];
+  const scheduledCycles: StoredAlarm[] = [];
 
   for (const dueAtMs of dueTimes) {
     if (activeCycleCount >= targetActiveCycles) {
@@ -97,18 +129,31 @@ export async function fillAlarmDefinitionSchedule(
         stepCandidateRecorded: false,
       };
       cycles.push(cycle);
+      scheduledCycles.push(cycle);
       occupiedDueTimes.add(dueAtMs);
       activeCycleCount += 1;
 
       if (scheduled.checkInWarning) {
-        warnings.push(scheduled.checkInWarning);
+        issues.push({
+          kind: 'check_in_schedule_failed',
+          alarmId: definition.id,
+          cycleId,
+          dueAtMs,
+          mainAlarmId: scheduled.mainAlarmId,
+          message: scheduled.checkInWarning,
+        });
       }
     } catch (error) {
-      warnings.push(
-        error instanceof Error
-          ? error.message
-          : 'アラーム通知を予約できませんでした。',
-      );
+      issues.push({
+        kind: 'main_schedule_failed',
+        alarmId: definition.id,
+        cycleId,
+        dueAtMs,
+        message:
+          error instanceof Error
+            ? error.message
+            : 'アラーム通知を予約できませんでした。',
+      });
       break;
     }
   }
@@ -128,11 +173,9 @@ export async function fillAlarmDefinitionSchedule(
         enabled: false,
         cycles: cycles.sort((left, right) => left.dueAtMs - right.dueAtMs),
       },
-      warnings,
+      issues,
+      scheduledCycles,
     };
-  }
-  if (dueTimes.length > 0 && activeCycleCount === 0) {
-    throw new Error(warnings[0] ?? 'アラーム通知を予約できませんでした。');
   }
 
   return {
@@ -140,7 +183,8 @@ export async function fillAlarmDefinitionSchedule(
       ...definition,
       cycles: cycles.sort((left, right) => left.dueAtMs - right.dueAtMs),
     },
-    warnings,
+    issues,
+    scheduledCycles,
   };
 }
 

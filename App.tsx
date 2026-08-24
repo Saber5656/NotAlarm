@@ -41,10 +41,16 @@ import {
   cancelAlarmDefinitionWithCheckpoints,
 } from './src/alarmCancellation';
 import {
+  type AlarmScheduleIssue,
   getNextMonitoringCycle,
   getRingingCycle,
   fillAlarmDefinitionSchedule,
+  getAlarmScheduleIssueSeverity,
 } from './src/alarmScheduling';
+import {
+  ScheduledNotificationRollbackError,
+  withScheduledNotificationRollback,
+} from './src/alarmScheduleRollback';
 import {
   MAX_ALARM_COUNT,
   formatRepeatLabel,
@@ -224,9 +230,14 @@ function nextCycleForDefinition(
 async function fillEnabledSchedules(
   alarms: StoredAlarmDefinition[],
   nowMs: number,
-): Promise<{ alarms: StoredAlarmDefinition[]; warnings: string[] }> {
+): Promise<{
+  alarms: StoredAlarmDefinition[];
+  issues: AlarmScheduleIssue[];
+  scheduledCycles: StoredAlarm[];
+}> {
   const next: StoredAlarmDefinition[] = [];
-  const warnings: string[] = [];
+  const issues: AlarmScheduleIssue[] = [];
+  const scheduledCycles: StoredAlarm[] = [];
 
   for (const alarm of alarms) {
     if (!alarm.enabled) {
@@ -241,18 +252,24 @@ async function fillEnabledSchedules(
         schedulingGateway,
       );
       next.push(filled.definition);
-      warnings.push(...filled.warnings);
+      issues.push(...filled.issues);
+      scheduledCycles.push(...filled.scheduledCycles);
     } catch (error) {
       next.push(alarm);
-      warnings.push(
-        error instanceof Error
-          ? `${formatAlarmTime(alarm.hour, alarm.minute)}: ${error.message}`
-          : `${formatAlarmTime(alarm.hour, alarm.minute)}の通知を予約できませんでした。`,
-      );
+      issues.push({
+        kind: 'main_schedule_failed',
+        alarmId: alarm.id,
+        cycleId: 'schedule-recovery',
+        dueAtMs: nowMs,
+        message:
+          error instanceof Error
+            ? `${formatAlarmTime(alarm.hour, alarm.minute)}: ${error.message}`
+            : `${formatAlarmTime(alarm.hour, alarm.minute)}の通知を予約できませんでした。`,
+      });
     }
   }
 
-  return { alarms: next, warnings };
+  return { alarms: next, issues, scheduledCycles };
 }
 
 interface ScreenFrameProps {
@@ -324,41 +341,50 @@ function AlarmApp() {
   const refreshAfterCycleCompletion = useCallback(
     async (completedCycle: StoredAlarm): Promise<void> => {
       const now = Date.now();
-      const warnings: string[] = [];
-      const next = await mutateAlarmDefinitions(async (current) => {
-        const updated: StoredAlarmDefinition[] = [];
+      const issues: AlarmScheduleIssue[] = [];
+      const next = await withScheduledNotificationRollback(
+        (track) =>
+          mutateAlarmDefinitions(async (current) => {
+            const updated: StoredAlarmDefinition[] = [];
 
-        for (const definition of current) {
-          if (definition.id !== completedCycle.alarmId) {
-            updated.push(definition);
-            continue;
-          }
+            for (const definition of current) {
+              if (definition.id !== completedCycle.alarmId) {
+                updated.push(definition);
+                continue;
+              }
 
-          const base =
-            definition.repeat.kind === 'today'
-              ? { ...definition, enabled: false }
-              : definition;
-          if (!base.enabled) {
-            updated.push(base);
-            continue;
-          }
+              const base =
+                definition.repeat.kind === 'today'
+                  ? { ...definition, enabled: false }
+                  : definition;
+              if (!base.enabled) {
+                updated.push(base);
+                continue;
+              }
 
-          const filled = await fillAlarmDefinitionSchedule(
-            base,
-            now,
-            schedulingGateway,
-          );
-          updated.push(filled.definition);
-          warnings.push(...filled.warnings);
-        }
+              const filled = await fillAlarmDefinitionSchedule(
+                base,
+                now,
+                schedulingGateway,
+              );
+              track(filled.scheduledCycles);
+              updated.push(filled.definition);
+              issues.push(...filled.issues);
+            }
 
-        return updated;
-      });
+            return updated;
+          }),
+        cancellationGateway,
+      );
       setCurrentAlarms(next);
-      if (warnings.length > 0) {
+      const severity = getAlarmScheduleIssueSeverity(issues);
+      if (severity !== 'none') {
         setNotice({
-          tone: 'warning',
-          text: '次回分の一部を予約できませんでした。アプリを開いて状態を確認してください。',
+          tone: severity,
+          text:
+            severity === 'danger'
+              ? '次回分のメイン通知を一部予約できませんでした。アラーム状態を確認してください。'
+              : '次回分の起床確認通知を一部予約できませんでした。',
         });
       }
     },
@@ -391,22 +417,41 @@ function AlarmApp() {
         ) {
           try {
             await prepareNotifications();
-            const fillWarnings: string[] = [];
-            restored = await mutateAlarmDefinitions(async (current) => {
-              const filled = await fillEnabledSchedules(current, Date.now());
-              fillWarnings.push(...filled.warnings);
-              return filled.alarms;
-            });
-            if (fillWarnings.length > 0 && mounted) {
+            const fillIssues: AlarmScheduleIssue[] = [];
+            restored = await withScheduledNotificationRollback(
+              (track) =>
+                mutateAlarmDefinitions(async (current) => {
+                  const filled = await fillEnabledSchedules(
+                    current,
+                    Date.now(),
+                  );
+                  track(filled.scheduledCycles);
+                  fillIssues.push(...filled.issues);
+                  return filled.alarms;
+                }),
+              cancellationGateway,
+            );
+            const severity = getAlarmScheduleIssueSeverity(fillIssues);
+            if (
+              severity !== 'none' &&
+              mounted &&
+              !cancellationRecoveryFailed
+            ) {
               setNotice({
-                tone: 'warning',
-                text: '一部の通知を再予約できませんでした。各アラームの状態を確認してください。',
+                tone: severity,
+                text:
+                  severity === 'danger'
+                    ? '一部のメイン通知を再予約できませんでした。各アラームの状態を確認してください。'
+                    : '一部の起床確認通知を再予約できませんでした。',
               });
             }
           } catch (error) {
-            if (mounted) {
+            if (mounted && !cancellationRecoveryFailed) {
               setNotice({
-                tone: 'warning',
+                tone:
+                  error instanceof ScheduledNotificationRollbackError
+                    ? 'danger'
+                    : 'warning',
                 text:
                   error instanceof Error
                     ? error.message
@@ -776,30 +821,48 @@ function AlarmApp() {
         createdAtMs,
         cycles: [],
       };
-      const fillWarnings: string[] = [];
-      const next = await mutateAlarmDefinitions(async (current) => {
-        if (current.length >= MAX_ALARM_COUNT) {
-          throw new Error(
-            `登録できるアラームは最大${MAX_ALARM_COUNT}件です。`,
-          );
-        }
+      const fillIssues: AlarmScheduleIssue[] = [];
+      const next = await withScheduledNotificationRollback(
+        (track) =>
+          mutateAlarmDefinitions(async (current) => {
+            if (current.length >= MAX_ALARM_COUNT) {
+              throw new Error(
+                `登録できるアラームは最大${MAX_ALARM_COUNT}件です。`,
+              );
+            }
 
-        const filled = await fillAlarmDefinitionSchedule(
-          definition,
-          createdAtMs,
-          schedulingGateway,
-        );
-        fillWarnings.push(...filled.warnings);
-        return [...current, filled.definition];
-      });
+            const filled = await fillAlarmDefinitionSchedule(
+              definition,
+              createdAtMs,
+              schedulingGateway,
+            );
+            track(filled.scheduledCycles);
+            fillIssues.push(...filled.issues);
+            if (
+              getAlarmScheduleIssueSeverity(filled.issues) === 'danger' &&
+              filled.scheduledCycles.length === 0
+            ) {
+              throw new Error(
+                filled.issues.find(
+                  (issue) => issue.kind === 'main_schedule_failed',
+                )?.message ?? 'メインのアラーム通知を予約できませんでした。',
+              );
+            }
+            return [...current, filled.definition];
+          }),
+        cancellationGateway,
+      );
       setCurrentAlarms(next);
       setIsComposerOpen(false);
+      const severity = getAlarmScheduleIssueSeverity(fillIssues);
       setNotice({
-        tone: fillWarnings.length > 0 ? 'warning' : 'success',
+        tone: severity === 'none' ? 'success' : severity,
         text:
-          fillWarnings.length > 0
-            ? 'アラームは登録しましたが、一部の起床確認通知を予約できませんでした。'
-            : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。`,
+          severity === 'danger'
+            ? 'アラームは追加しましたが、メイン通知の一部を予約できていません。状態を確認してください。'
+            : severity === 'warning'
+              ? 'アラームは登録しましたが、一部の起床確認通知を予約できませんでした。'
+              : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。`,
       });
     } catch (error) {
       setNotice({
@@ -833,52 +896,71 @@ function AlarmApp() {
         }
 
         await prepareNotifications();
-        const fillWarnings: string[] = [];
-        const next = await mutateAlarmDefinitions(async (current) => {
-          const latest = current.find(
-            (alarm) => alarm.id === definition.id,
-          );
-          if (!latest) {
-            throw new Error('対象のアラームが見つかりません。');
-          }
+        const fillIssues: AlarmScheduleIssue[] = [];
+        const next = await withScheduledNotificationRollback(
+          (track) =>
+            mutateAlarmDefinitions(async (current) => {
+              const latest = current.find(
+                (alarm) => alarm.id === definition.id,
+              );
+              if (!latest) {
+                throw new Error('対象のアラームが見つかりません。');
+              }
 
-          const now = Date.now();
-          const repeat =
-            latest.repeat.kind === 'today'
-              ? makeAlarmRepeat('today', now)
-              : latest.repeat;
-          const nextAtMs = getNextAlarmTime(
-            now,
-            latest.hour,
-            latest.minute,
-            repeat,
-          );
-          if (!nextAtMs || nextAtMs - now < MIN_ARM_LEAD_MS) {
-            throw new Error(
-              'この「今日だけ」アラームは時刻を過ぎています。削除して新しい時刻を追加してください。',
-            );
-          }
-          const enabledDefinition = {
-            ...latest,
-            repeat,
-            enabled: true,
-            cycles: [],
-          };
-          const filled = await fillAlarmDefinitionSchedule(
-            enabledDefinition,
-            now,
-            schedulingGateway,
-          );
-          fillWarnings.push(...filled.warnings);
-          return current.map((alarm) =>
-            alarm.id === definition.id ? filled.definition : alarm,
-          );
-        });
+              const now = Date.now();
+              const repeat =
+                latest.repeat.kind === 'today'
+                  ? makeAlarmRepeat('today', now)
+                  : latest.repeat;
+              const nextAtMs = getNextAlarmTime(
+                now,
+                latest.hour,
+                latest.minute,
+                repeat,
+              );
+              if (!nextAtMs || nextAtMs - now < MIN_ARM_LEAD_MS) {
+                throw new Error(
+                  'この「今日だけ」アラームは時刻を過ぎています。削除して新しい時刻を追加してください。',
+                );
+              }
+              const enabledDefinition = {
+                ...latest,
+                repeat,
+                enabled: true,
+                cycles: [],
+              };
+              const filled = await fillAlarmDefinitionSchedule(
+                enabledDefinition,
+                now,
+                schedulingGateway,
+              );
+              track(filled.scheduledCycles);
+              fillIssues.push(...filled.issues);
+              if (
+                getAlarmScheduleIssueSeverity(filled.issues) === 'danger' &&
+                filled.scheduledCycles.length === 0
+              ) {
+                throw new Error(
+                  filled.issues.find(
+                    (issue) => issue.kind === 'main_schedule_failed',
+                  )?.message ?? 'メインのアラーム通知を予約できませんでした。',
+                );
+              }
+              return current.map((alarm) =>
+                alarm.id === definition.id ? filled.definition : alarm,
+              );
+            }),
+          cancellationGateway,
+        );
         setCurrentAlarms(next);
-        if (fillWarnings.length > 0) {
+        const severity = getAlarmScheduleIssueSeverity(fillIssues);
+        if (severity !== 'none') {
           setNotice({
-            tone: 'warning',
-            text: 'アラームはオンにしましたが、一部の起床確認通知を予約できませんでした。',
+            tone: severity,
+            text:
+              severity === 'danger'
+                ? 'アラームはオンにしましたが、メイン通知の一部を予約できていません。状態を確認してください。'
+                : 'アラームはオンにしましたが、一部の起床確認通知を予約できませんでした。',
           });
         }
       } catch (error) {

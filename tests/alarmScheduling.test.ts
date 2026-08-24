@@ -3,7 +3,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { fillAlarmDefinitionSchedule } from '../src/alarmScheduling';
+import {
+  fillAlarmDefinitionSchedule,
+  getAlarmScheduleIssueSeverity,
+} from '../src/alarmScheduling';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
 import type { AlarmSchedulingGateway } from '../src/alarmOrchestrator';
 import type { StoredAlarmDefinition } from '../src/alarmStorage';
@@ -92,7 +95,7 @@ test('refilling does not duplicate an existing occurrence', async () => {
   assert.equal(sequence, 3);
 });
 
-test('check-in failure keeps the main cycle and reports a warning', async () => {
+test('check-in failure keeps the main cycle and reports a typed warning', async () => {
   const now = new Date(2026, 7, 20, 6, 0, 0).getTime();
   const definition: StoredAlarmDefinition = {
     id: 'alarm-1',
@@ -119,7 +122,62 @@ test('check-in failure keeps the main cycle and reports a warning', async () => 
 
   assert.equal(result.definition.cycles[0]?.mainAlarmId, 'main-1');
   assert.equal(result.definition.cycles[0]?.checkInNotificationId, undefined);
-  assert.deepEqual(result.warnings, ['check-in unavailable']);
+  assert.deepEqual(result.issues, [
+    {
+      kind: 'check_in_schedule_failed',
+      alarmId: 'alarm-1',
+      cycleId: 'cycle-1',
+      dueAtMs: new Date(2026, 7, 20, 7, 0, 0).getTime(),
+      mainAlarmId: 'main-1',
+      message: 'check-in unavailable',
+    },
+  ]);
+  assert.equal(getAlarmScheduleIssueSeverity(result.issues), 'warning');
+});
+
+test('a later main failure keeps prior cycles but reports danger, not a check-in warning', async () => {
+  const now = new Date(2026, 7, 20, 6, 0, 0).getTime();
+  const definition: StoredAlarmDefinition = {
+    id: 'alarm-1',
+    hour: 7,
+    minute: 0,
+    repeat: makeAlarmRepeat('daily', now),
+    enabled: true,
+    createdAtMs: now,
+    cycles: [],
+  };
+  let mainCalls = 0;
+  const gateway: AlarmSchedulingGateway = {
+    scheduleMain: async ({ cycleId }) => {
+      mainCalls += 1;
+      if (mainCalls === 2) {
+        throw new Error('main unavailable');
+      }
+      return `main-${cycleId}`;
+    },
+    scheduleCheckIn: async ({ cycleId }) => `check-${cycleId}`,
+  };
+  let sequence = 0;
+
+  const result = await fillAlarmDefinitionSchedule(
+    definition,
+    now,
+    gateway,
+    () => `cycle-${++sequence}`,
+  );
+
+  assert.equal(result.definition.cycles.length, 1);
+  assert.equal(result.scheduledCycles.length, 1);
+  assert.deepEqual(result.issues, [
+    {
+      kind: 'main_schedule_failed',
+      alarmId: 'alarm-1',
+      cycleId: 'cycle-2',
+      dueAtMs: new Date(2026, 7, 21, 7, 0, 0).getTime(),
+      message: 'main unavailable',
+    },
+  ]);
+  assert.equal(getAlarmScheduleIssueSeverity(result.issues), 'danger');
 });
 
 test('an expired today-only alarm is disabled without creating tomorrow work', async () => {
