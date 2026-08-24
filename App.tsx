@@ -10,7 +10,6 @@ import {
   useState,
 } from 'react';
 import {
-  AccessibilityInfo,
   ActivityIndicator,
   Alert,
   Platform,
@@ -269,12 +268,6 @@ function AlarmApp() {
     alarmsRef.current = next;
     setAlarms(next);
   }, []);
-
-  useEffect(() => {
-    if (notice && !isComposerOpen && Platform.OS === 'ios') {
-      AccessibilityInfo.announceForAccessibility(notice.text);
-    }
-  }, [isComposerOpen, notice?.text]);
 
   const refreshAfterCycleCompletion = useCallback(
     async (completedCycle: StoredAlarm): Promise<void> => {
