@@ -70,6 +70,7 @@ import {
   loadStoredAlarmByCycleId,
   markDueCyclesRinging,
   mutateAlarmDefinitions,
+  saveMonitoringCycleStepCount,
   saveStoredAlarm,
 } from './src/alarmStorage';
 import {
@@ -634,9 +635,15 @@ function AlarmApp() {
                   return;
                 }
 
-                const failedUpdate = { ...current, stepCount: evidence.steps };
-                const next = await saveStoredAlarm(failedUpdate);
-                setCurrentAlarms(next);
+                const progress = await saveMonitoringCycleStepCount(
+                  current.alarmId,
+                  current.cycleId,
+                  evidence.steps,
+                );
+                setCurrentAlarms(progress.alarms);
+                if (progress.status !== 'updated') {
+                  return;
+                }
                 setNotice({
                   tone: 'danger',
                   text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
@@ -654,9 +661,12 @@ function AlarmApp() {
             return;
           }
 
-          const updated = { ...current, stepCount: evidence.steps };
-          void saveStoredAlarm(updated)
-            .then(setCurrentAlarms)
+          void saveMonitoringCycleStepCount(
+            current.alarmId,
+            current.cycleId,
+            evidence.steps,
+          )
+            .then(({ alarms: next }) => setCurrentAlarms(next))
             .catch(() => {
               setPedometerStatus('歩数の保存に失敗（アラームは維持）');
             });

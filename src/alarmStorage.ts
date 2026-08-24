@@ -1,6 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
+  type MonitoringStepUpdateStatus,
+  updateMonitoringCycleStepCount,
+} from './alarmDefinitionMutations';
+import {
   MAX_ALARM_COUNT,
   isAlarmRepeat,
   localDateKey,
@@ -131,6 +135,28 @@ export async function saveStoredAlarm(
     }
     return next;
   });
+}
+
+export async function saveMonitoringCycleStepCount(
+  alarmId: string,
+  cycleId: string,
+  stepCount: number,
+): Promise<{
+  alarms: StoredAlarmDefinition[];
+  status: MonitoringStepUpdateStatus;
+}> {
+  let status: MonitoringStepUpdateStatus = 'not_found';
+  const alarms = await mutateAlarmDefinitions((current) => {
+    const result = updateMonitoringCycleStepCount(
+      current,
+      alarmId,
+      cycleId,
+      stepCount,
+    );
+    status = result.status;
+    return result.alarms;
+  });
+  return { alarms, status };
 }
 
 export function markDueCyclesRinging(
