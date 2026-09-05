@@ -22,7 +22,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { RepeatKind, Weekday } from '../alarmSchedule';
 import { parseAlarmTimeInput } from '../alarmTime';
-import { shouldScrollAlarmComposer } from '../composerLayout';
+import {
+  doesComposerContentOverflow,
+  getWeekdayColumnCount,
+  shouldScrollAlarmComposer,
+} from '../composerLayout';
 import { GlassSurface } from './GlassSurface';
 import {
   LiquidComposerTabs,
@@ -99,6 +103,14 @@ export function AlarmComposerModal({
     fontScale,
   );
   const minuteInputRef = useRef<TextInput>(null);
+  const [formViewportHeight, setFormViewportHeight] = useState(0);
+  const [formContentHeight, setFormContentHeight] = useState(0);
+  const [weekdayWidth, setWeekdayWidth] = useState(0);
+  const formCanScroll = doesComposerContentOverflow(
+    formContentHeight,
+    formViewportHeight,
+  );
+  const weekdayColumns = getWeekdayColumnCount(weekdayWidth);
   const [activeSection, setActiveSection] =
     useState<ComposerSection>('time');
   const [isTimeEditing, setIsTimeEditing] = useState(false);
@@ -271,14 +283,20 @@ export function AlarmComposerModal({
                 ? 'height'
                 : undefined
           }
-          style={[
-            styles.keyboardLayer,
-            { paddingBottom: Math.max(insets.bottom, 10) },
-          ]}
+          style={styles.keyboardLayer}
         >
+          <View
+            pointerEvents="box-none"
+            testID="alarm-composer-positioner"
+            style={[
+              styles.sheetPositioner,
+              { paddingTop: Math.max(insets.top, 10), paddingBottom: Math.max(insets.bottom, 10) },
+            ]}
+          >
           <View
             accessibilityLabel="アラームを追加"
             accessibilityViewIsModal
+            testID="alarm-composer-sheet"
             style={[
               styles.sheet,
               !usesScrollableFallback && styles.sheetFixed,
@@ -325,14 +343,16 @@ export function AlarmComposerModal({
             />
 
             <ScrollView
-              bounces={usesScrollableFallback}
+              bounces={formCanScroll}
               contentContainerStyle={[
                 styles.formContent,
                 !usesScrollableFallback && styles.formContentFixed,
               ]}
               keyboardShouldPersistTaps="handled"
-              scrollEnabled={usesScrollableFallback}
-              showsVerticalScrollIndicator={usesScrollableFallback}
+              onLayout={(event) => setFormViewportHeight(event.nativeEvent.layout.height)}
+              onContentSizeChange={(_, height) => setFormContentHeight(height)}
+              scrollEnabled={formCanScroll}
+              showsVerticalScrollIndicator={formCanScroll}
               style={styles.formScroll}
               testID="alarm-composer-scroll"
             >
@@ -546,9 +566,12 @@ export function AlarmComposerModal({
                   />
 
                   {repeatKind === 'custom' ? (
-                    <View style={styles.weekdayBlock}>
+                    <View
+                      onLayout={(event) => setWeekdayWidth(event.nativeEvent.layout.width)}
+                      style={styles.weekdayBlock}
+                    >
                       <Text style={styles.weekdayHint}>鳴らす曜日</Text>
-                      <View style={styles.weekdayRow}>
+                      <View style={[styles.weekdayRow, { maxWidth: weekdayColumns * 44 + (weekdayColumns - 1) * 4 }]}>
                         {WEEKDAY_OPTIONS.map((option) => {
                           const selected = customWeekdays.includes(option.value);
                           return (
@@ -604,7 +627,7 @@ export function AlarmComposerModal({
               )}
             </ScrollView>
 
-            <View style={styles.sheetFooter}>
+            {!isTimeEditing ? <View style={styles.sheetFooter}>
               {formNotice ? (
                 <View
                   accessibilityLiveRegion={
@@ -673,14 +696,13 @@ export function AlarmComposerModal({
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
                     <Text style={styles.primaryButtonText}>
-                      {isTimeEditing
-                        ? '時刻を確定してください'
-                        : 'この内容で追加'}
+                      この内容で追加
                     </Text>
                   )}
                 </Pressable>
               </GlassSurface>
-            </View>
+            </View> : null}
+          </View>
           </View>
         </KeyboardAvoidingView>
       </View>
@@ -698,6 +720,11 @@ const styles = StyleSheet.create({
   },
   keyboardLayer: {
     flex: 1,
+    pointerEvents: 'box-none',
+  },
+  sheetPositioner: {
+    flex: 1,
+    minHeight: 0,
     alignItems: 'center',
     justifyContent: 'flex-end',
     paddingHorizontal: 12,
@@ -727,6 +754,7 @@ const styles = StyleSheet.create({
     height: '88%',
   },
   sheetHeader: {
+    flexShrink: 0,
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
@@ -772,6 +800,7 @@ const styles = StyleSheet.create({
     lineHeight: 27,
   },
   sectionTabs: {
+    flexShrink: 0,
     marginHorizontal: 22,
     marginTop: 12,
   },
@@ -781,7 +810,7 @@ const styles = StyleSheet.create({
   },
   formContent: {
     flexGrow: 1,
-    paddingHorizontal: 22,
+    paddingHorizontal: 16,
     paddingTop: 14,
     paddingBottom: 12,
   },
@@ -1090,6 +1119,7 @@ const styles = StyleSheet.create({
     color: '#6F4C00',
   },
   sheetFooter: {
+    flexShrink: 0,
     paddingHorizontal: 22,
     paddingTop: 12,
     paddingBottom: 20,
