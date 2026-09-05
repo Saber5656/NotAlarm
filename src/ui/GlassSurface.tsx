@@ -114,7 +114,7 @@ export function GlassSurface({
   return (
     <BlurView
       {...viewProps}
-      experimentalBlurMethod="none"
+      blurMethod="none"
       intensity={intensity}
       style={[styles.surface, style]}
       tint={blurTint}

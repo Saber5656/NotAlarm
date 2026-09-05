@@ -264,7 +264,7 @@ export function AlarmComposerModal({
     >
       <View style={styles.modalRoot}>
         <BlurView
-          experimentalBlurMethod="none"
+          blurMethod="none"
           intensity={34}
           style={StyleSheet.absoluteFill}
           tint="systemThinMaterialDark"
@@ -716,7 +716,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(3, 12, 28, 0.38)',
   },
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   keyboardLayer: {
     flex: 1,
