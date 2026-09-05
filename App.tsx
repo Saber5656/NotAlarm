@@ -1132,9 +1132,6 @@ function AlarmApp() {
         useAccessibilityScroll={useAccessibilityScreenScroll}
       >
         <View style={styles.brandRow}>
-          <View style={styles.logoMark}>
-            <Text style={styles.logoGlyph}>↑</Text>
-          </View>
           <Text style={styles.brandName}>AlreadyUp</Text>
         </View>
 
@@ -1142,17 +1139,18 @@ function AlarmApp() {
           <View style={styles.titleCopy}>
             <Text style={styles.screenTitle}>アラーム</Text>
             <Text style={styles.screenSubtitle}>
-              起きて100歩歩いた朝は、もう一度鳴らしません。
+              目覚めた朝に、静けさを。
             </Text>
           </View>
           <GlassSurface
-            fallbackColor="rgba(72, 112, 214, 0.42)"
-            glassEffectStyle="clear"
+            blurTint="systemUltraThinMaterialDark"
+            fallbackColor="rgba(20, 30, 45, 0.32)"
+            glassEffectStyle="regular"
             intensity={76}
             isInteractive
-            reducedTransparencyColor="#3E6ED4"
+            reducedTransparencyColor="#263544"
             style={styles.addButtonShell}
-            tintColor="#7198EAA8"
+            tintColor="#FFFFFF18"
           >
             <Pressable
               accessibilityLabel="アラームを追加"
@@ -1204,6 +1202,7 @@ function AlarmApp() {
           </View>
         ) : monitoringCycle && monitoringDefinition ? (
           <GlassSurface
+            blurTint="systemUltraThinMaterialDark"
             fallbackColor="rgba(8, 30, 65, 0.36)"
             glassEffectStyle="regular"
             intensity={76}
@@ -1216,7 +1215,6 @@ function AlarmApp() {
             testID="next-alarm-summary"
             tintColor="#244F8666"
           >
-            <View style={styles.nextAlarmGlow} />
             <View style={styles.nextAlarmHeader}>
               <View>
                 <Text style={styles.nextAlarmLabel}>次のアラーム</Text>
@@ -1269,6 +1267,7 @@ function AlarmApp() {
           </GlassSurface>
         ) : (
           <GlassSurface
+            blurTint="systemUltraThinMaterialDark"
             fallbackColor="rgba(8, 30, 65, 0.36)"
             glassEffectStyle="regular"
             intensity={76}
@@ -1300,8 +1299,7 @@ function AlarmApp() {
         <View style={styles.listPanel}>
           <View style={styles.listHeader}>
             <View>
-              <Text style={styles.sectionTitle}>アラーム一覧</Text>
-              <Text style={styles.sectionHint}>次に鳴る順に表示</Text>
+              <Text style={styles.sectionTitle}>設定したアラーム</Text>
             </View>
             <View style={styles.alarmCountBadge}>
               <Text style={styles.alarmCount}>
@@ -1366,8 +1364,8 @@ function AlarmApp() {
                       onValueChange={(enabled) =>
                         void toggleAlarm(definition, enabled)
                       }
-                      trackColor={{ false: '#D5D9E2', true: '#A8BDF5' }}
-                      thumbColor={definition.enabled ? '#2F5EDB' : '#F7F8FA'}
+                      trackColor={{ false: '#59616B', true: '#34C759' }}
+                      thumbColor="#FFFFFF"
                       value={definition.enabled}
                     />
                   </View>
@@ -1515,8 +1513,8 @@ const styles = StyleSheet.create({
   },
   brandName: {
     color: '#FFFFFF',
-    fontSize: 17,
-    fontWeight: '900',
+    fontSize: 13,
+    fontWeight: '500',
     letterSpacing: -0.35,
   },
   titleRow: {
@@ -1531,7 +1529,7 @@ const styles = StyleSheet.create({
   screenTitle: {
     color: '#FFFFFF',
     fontSize: 31,
-    fontWeight: '900',
+    fontWeight: '600',
     letterSpacing: -1.05,
   },
   screenSubtitle: {
@@ -1543,10 +1541,9 @@ const styles = StyleSheet.create({
   addButtonShell: {
     width: 52,
     height: 52,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.72)',
-    borderRadius: 18,
-    backgroundColor: 'rgba(75, 116, 218, 0.28)',
+    borderWidth: 0,
+    borderRadius: 26,
+    backgroundColor: 'transparent',
     ...Platform.select({
       web: { boxShadow: '0 10px 22px rgba(3, 18, 47, 0.24)' },
       default: {
@@ -1626,8 +1623,9 @@ const styles = StyleSheet.create({
   nextAlarmTime: {
     marginTop: 2,
     color: '#FFFFFF',
-    fontSize: 41,
-    fontWeight: '900',
+    fontSize: 48,
+    fontWeight: '300',
+    fontVariant: ['tabular-nums'],
     letterSpacing: -1.6,
   },
   nextAlarmMeta: {
@@ -1767,35 +1765,23 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     marginTop: 10,
     marginBottom: 1,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.82)',
-    borderRadius: 25,
-    backgroundColor: 'rgba(247, 249, 252, 0.95)',
-    ...Platform.select({
-      web: { boxShadow: '0 14px 28px rgba(0, 13, 35, 0.17)' },
-      default: {
-        shadowColor: '#000D23',
-        shadowOpacity: 0.17,
-        shadowRadius: 24,
-        shadowOffset: { width: 0, height: 14 },
-        elevation: 5,
-      },
-    }),
+    borderWidth: 0,
+    backgroundColor: 'transparent',
   },
   listHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 6,
     paddingTop: 13,
     paddingBottom: 10,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(67, 82, 112, 0.12)',
+    borderBottomColor: 'rgba(255, 255, 255, 0.18)',
   },
   sectionTitle: {
-    color: '#10203B',
+    color: '#E9EDF2',
     fontSize: 13,
-    fontWeight: '900',
+    fontWeight: '500',
   },
   sectionHint: {
     marginTop: 2,
@@ -1807,13 +1793,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(44, 63, 96, 0.12)',
+    borderWidth: 0,
     borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    backgroundColor: 'transparent',
   },
   alarmCount: {
-    color: UI_COLORS.textSecondary,
+    color: '#B7C1CF',
     fontSize: 10,
     fontWeight: '900',
   },
@@ -1823,32 +1808,21 @@ const styles = StyleSheet.create({
   },
   alarmScrollContent: {
     flexGrow: 1,
-    padding: 11,
+    padding: 0,
     paddingBottom: 13,
   },
   alarmList: {
-    gap: 9,
+    gap: 0,
   },
   alarmCard: {
-    padding: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(31, 49, 79, 0.06)',
-    borderRadius: 18,
-    backgroundColor: '#FFFFFF',
-    ...Platform.select({
-      web: { boxShadow: '0 8px 18px rgba(21, 42, 77, 0.08)' },
-      default: {
-        shadowColor: '#152A4D',
-        shadowOpacity: 0.08,
-        shadowRadius: 14,
-        shadowOffset: { width: 0, height: 7 },
-        elevation: 2,
-      },
-    }),
+    paddingVertical: 14,
+    paddingHorizontal: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    backgroundColor: 'transparent',
   },
   alarmCardDisabled: {
-    borderColor: 'rgba(139, 149, 168, 0.12)',
-    backgroundColor: '#ECEFF4',
+    backgroundColor: 'transparent',
   },
   alarmCardMain: {
     flexDirection: 'row',
@@ -1860,9 +1834,10 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   alarmTime: {
-    color: '#0B1A33',
-    fontSize: 29,
-    fontWeight: '900',
+    color: '#FFFFFF',
+    fontSize: 40,
+    fontWeight: '300',
+    fontVariant: ['tabular-nums'],
     letterSpacing: -1,
   },
   textDisabled: {
@@ -1870,22 +1845,19 @@ const styles = StyleSheet.create({
   },
   repeatText: {
     marginTop: 3,
-    color: UI_COLORS.textMuted,
+    color: '#C5CDD8',
     fontSize: 12,
     lineHeight: 17,
-    fontWeight: '700',
+    fontWeight: '400',
   },
   alarmCardFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 9,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(49, 65, 94, 0.1)',
+    marginTop: 0,
   },
   scheduleSummary: {
-    color: UI_COLORS.textMuted,
+    color: '#B7C1CF',
     fontSize: 11,
     flex: 1,
     paddingRight: 8,
@@ -1897,9 +1869,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   deleteText: {
-    color: '#AD4B55',
+    color: '#FFB4AC',
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '500',
   },
   emptyCard: {
     flex: 1,
@@ -1908,20 +1880,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 24,
     paddingVertical: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(53, 71, 102, 0.1)',
-    borderRadius: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.62)',
+    backgroundColor: 'transparent',
   },
   emptyTitle: {
-    color: '#172641',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '900',
   },
   emptyText: {
     maxWidth: 300,
     marginTop: 6,
-    color: UI_COLORS.textMuted,
+    color: '#C5CDD8',
     fontSize: 11,
     lineHeight: 17,
     textAlign: 'center',
