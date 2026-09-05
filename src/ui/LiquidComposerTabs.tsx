@@ -89,7 +89,7 @@ export function LiquidComposerTabs({
             intensity={90}
             reducedTransparencyColor="#FFFFFF"
             style={styles.selectionLens}
-            tintColor="#FFFFFFD8"
+            tintColor="#FFFFFF30"
           >
             <View style={styles.selectionHighlight} />
           </GlassSurface>
@@ -186,7 +186,7 @@ const styles = StyleSheet.create({
   label: {
     color: UI_COLORS.textMuted,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '600',
   },
   labelSelected: {
     color: '#2F5EDB',
