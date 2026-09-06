@@ -1287,7 +1287,11 @@ function AlarmApp() {
             <View style={styles.idleCopy}>
               <Text style={styles.idleTitle}>次のアラームはありません</Text>
               <Text style={styles.idleText}>
-                右上の＋から、最初の起床時刻を追加できます。
+                {alarms.length === 0
+                  ? '右上の＋から、起床時刻を追加できます。'
+                  : alarms.every((alarm) => !alarm.enabled)
+                    ? '一覧のスイッチをオンにすると、次のアラームを設定できます。'
+                    : '次回の予約はありません。設定した時刻と繰り返しを確認してください。'}
               </Text>
             </View>
           </GlassSurface>
@@ -1380,8 +1384,8 @@ function AlarmApp() {
                       )}のアラームを削除`}
                       accessibilityRole="button"
                       disabled={isBusy}
-                      hitSlop={10}
                       onPress={() => confirmDeleteAlarm(definition)}
+                      style={styles.deleteButton}
                     >
                       <Text style={styles.deleteText}>削除</Text>
                     </Pressable>
@@ -1867,8 +1871,8 @@ const styles = StyleSheet.create({
   repeatText: {
     marginTop: 3,
     color: UI_COLORS.textMuted,
-    fontSize: 10,
-    lineHeight: 15,
+    fontSize: 12,
+    lineHeight: 17,
     fontWeight: '700',
   },
   alarmCardFooter: {
@@ -1882,11 +1886,19 @@ const styles = StyleSheet.create({
   },
   scheduleSummary: {
     color: UI_COLORS.textMuted,
-    fontSize: 9,
+    fontSize: 11,
+    flex: 1,
+    paddingRight: 8,
+  },
+  deleteButton: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   deleteText: {
     color: '#AD4B55',
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: '900',
   },
   emptyCard: {
