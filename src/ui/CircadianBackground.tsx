@@ -33,7 +33,7 @@ export function CircadianBackground({ theme }: CircadianBackgroundProps) {
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       pointerEvents="none"
-      style={styles.root}
+      style={[StyleSheet.absoluteFill, styles.root]}
       testID="circadian-background"
     >
       {BACKGROUND_LAYERS.map(([phase, source]) => {
@@ -44,7 +44,7 @@ export function CircadianBackground({ theme }: CircadianBackgroundProps) {
             key={phase}
             resizeMode="cover"
             source={source}
-            style={[styles.photo, { opacity }]}
+            style={[StyleSheet.absoluteFill, styles.photo, { opacity }]}
           />
         ) : null;
       })}
@@ -62,12 +62,10 @@ export function CircadianBackground({ theme }: CircadianBackgroundProps) {
 
 const styles = StyleSheet.create({
   root: {
-    ...StyleSheet.absoluteFill,
     overflow: 'hidden',
     backgroundColor: '#06152D',
   },
   photo: {
-    ...StyleSheet.absoluteFill,
     width: '100%',
     height: '100%',
   },

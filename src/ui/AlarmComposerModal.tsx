@@ -272,7 +272,7 @@ export function AlarmComposerModal({
         <Pressable
           accessible={false}
           onPress={closeIfIdle}
-          style={styles.backdrop}
+          style={StyleSheet.absoluteFill}
         />
 
         <KeyboardAvoidingView
@@ -714,9 +714,6 @@ const styles = StyleSheet.create({
   modalRoot: {
     flex: 1,
     backgroundColor: 'rgba(3, 12, 28, 0.38)',
-  },
-  backdrop: {
-    ...StyleSheet.absoluteFill,
   },
   keyboardLayer: {
     flex: 1,
