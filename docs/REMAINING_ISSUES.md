@@ -445,3 +445,13 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 - [ ] 背景カスタマイズを有効にした利用者にだけ、目的を説明して権限を求める
 - [ ] 国籍を位置・日照のproxyとして使用しない
 - [ ] networkなしでも背景計算が継続し、アラーム予約ロジックへ影響しない
+
+---
+
+## 2026-09-05: Expo Go SDK 57 互換性更新
+
+ユーザー承認により SDK 54 固定を解除し、SDK 55・56 を経由して Expo 57.0.20 / React Native 0.86.3 へ更新した。上記の過去の SDK 54 検証記録は当時の証跡として残す。
+
+- Expo Go による実機確認を継続する。署名・配布方式・アラーム保存形式・権限の追加は行わない。
+- iOS 16.4 以降と SDK 57 対応 Expo Go が必要。Tunnel の manifest / bundle 検証は実機起動成功を意味しない。通知・音・歩数・native Liquid Glass・時刻ダイヤルは実機検証が必要。
+- `npm audit` は moderate 11 / high 0 / critical 0。起点はビルド設定用 `xcode` が使う `uuid` の [GHSA-w5hq-g745-h8pq](https://github.com/advisories/GHSA-w5hq-g745-h8pq)。audit の自動修正案は Expo 46 への降格を含むため適用しない。Expo 対応版の更新を追跡する。警告なし・本番リリース可能とは扱わない。

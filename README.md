@@ -52,17 +52,19 @@
 
 ### 必要なもの
 
-- Node.js と npm
-- Expo Go をインストールした iPhone
+- Node.js 22 LTS（22.x の 22.13.0 以降）と npm を推奨します。任意の上位メジャーバージョンが対応するわけではありません。
+- SDK 57 対応の Expo Go をインストールした iPhone（iOS 16.4 以降）
 - iPhone と開発マシンが接続できるネットワーク
 - Apple Watch 経由の確認を試す場合は、iPhone とペアリング済みの Watch
 
-このリポジトリは App Store 版 Expo Go で実機確認できるよう Expo SDK 54 に固定しています。実装時は [Expo SDK 54 の versioned docs](https://docs.expo.dev/versions/v54.0.0/) を参照してください。
+2026-09-05、実機の Expo Go が SDK 57 対応になったことを確認し、ユーザー承認のもと旧 SDK 54 固定を解除しました。このリポジトリは Expo SDK 57 を使用します。実装時は [Expo SDK 57 の versioned docs](https://docs.expo.dev/versions/v57.0.0/) を参照してください。
 
 ```sh
 npm ci
 npm start
 ```
+
+別ネットワークから接続する場合は `npm start -- --tunnel --go` で起動してください。SDK 不一致のエラーは Tunnel や QR の作り直しだけでは解消しません。Expo Go とプロジェクトの SDK メジャーバージョンを合わせてください。
 
 ターミナルの QR コードを iPhone のカメラまたは Expo Go で読み取ります。初回起動時は通知とモーションの権限を許可してください。
 
@@ -92,7 +94,9 @@ iPhone がアンロックされている場合、通知は原則として Watch 
 ```sh
 npm test
 npm run typecheck
-npm run export:web
+npx expo install --check
+npx expo-doctor
+npx expo export --platform all
 ```
 
 Web export は UI と bundle の smoke test です。通知、Pedometer、Apple Watch 転送は実機で確認する必要があります。
@@ -112,13 +116,13 @@ Web export は UI と bundle の smoke test です。通知、Pedometer、Apple 
 
 ## 参照資料
 
-- [Expo Notifications — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/notifications/)
-- [Expo Pedometer — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/pedometer/)
-- [Expo GlassEffect — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/glass-effect/)
-- [Expo BlurView — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/blur-view/)
-- [Expo DateTimePicker — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/date-time-picker/)
-- [Expo LinearGradient — SDK 54](https://docs.expo.dev/versions/v54.0.0/sdk/linear-gradient/)
-- [React Native 0.81 PanResponder](https://reactnative.dev/docs/0.81/panresponder)
+- [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
+- [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
+- [Expo GlassEffect — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/glass-effect/)
+- [Expo BlurView — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/blur-view/)
+- [Expo DateTimePicker — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/date-time-picker/)
+- [Expo LinearGradient — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/linear-gradient/)
+- [React Native 0.86 PanResponder](https://reactnative.dev/docs/0.86/panresponder)
 - [Apple Human Interface Guidelines: Materials](https://developer.apple.com/design/human-interface-guidelines/materials)
 - [Apple WWDC25: Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/)
 - [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)

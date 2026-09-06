@@ -264,7 +264,7 @@ export function AlarmComposerModal({
     >
       <View style={styles.modalRoot}>
         <BlurView
-          experimentalBlurMethod="none"
+          blurMethod="none"
           intensity={34}
           style={StyleSheet.absoluteFill}
           tint="systemThinMaterialDark"
@@ -272,7 +272,7 @@ export function AlarmComposerModal({
         <Pressable
           accessible={false}
           onPress={closeIfIdle}
-          style={styles.backdrop}
+          style={StyleSheet.absoluteFill}
         />
 
         <KeyboardAvoidingView
@@ -714,9 +714,6 @@ const styles = StyleSheet.create({
   modalRoot: {
     flex: 1,
     backgroundColor: 'rgba(3, 12, 28, 0.38)',
-  },
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
   },
   keyboardLayer: {
     flex: 1,
