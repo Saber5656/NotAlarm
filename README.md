@@ -52,7 +52,7 @@
 
 ### 必要なもの
 
-- Node.js 22.13 以降と npm
+- Node.js 22 LTS（22.x の 22.13.0 以降）と npm を推奨します。任意の上位メジャーバージョンが対応するわけではありません。
 - SDK 57 対応の Expo Go をインストールした iPhone（iOS 16.4 以降）
 - iPhone と開発マシンが接続できるネットワーク
 - Apple Watch 経由の確認を試す場合は、iPhone とペアリング済みの Watch
