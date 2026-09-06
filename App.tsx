@@ -1617,6 +1617,7 @@ const styles = StyleSheet.create({
   nextAlarmLabel: {
     color: 'rgba(255, 255, 255, 0.74)',
     fontSize: 10,
+    lineHeight: 12,
     fontWeight: '900',
     letterSpacing: 0.6,
   },
@@ -1624,6 +1625,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
     color: '#FFFFFF',
     fontSize: 48,
+    lineHeight: 50,
     fontWeight: '300',
     fontVariant: ['tabular-nums'],
     letterSpacing: -1.6,
@@ -1643,7 +1645,7 @@ const styles = StyleSheet.create({
   },
   progressTrack: {
     height: 6,
-    marginTop: 13,
+    marginTop: 8,
     overflow: 'hidden',
     borderRadius: 999,
     backgroundColor: 'rgba(255, 255, 255, 0.18)',
@@ -1663,12 +1665,14 @@ const styles = StyleSheet.create({
   progressText: {
     color: '#92E1D5',
     fontSize: 10,
+    lineHeight: 12,
     fontWeight: '900',
   },
   progressStatus: {
     flex: 1,
     color: 'rgba(255, 255, 255, 0.66)',
     fontSize: 9,
+    lineHeight: 12,
     textAlign: 'right',
   },
   ringingCard: {
