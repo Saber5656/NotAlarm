@@ -768,7 +768,7 @@ const styles = StyleSheet.create({
   sheetTitle: {
     color: '#0B1A33',
     fontSize: 23,
-    fontWeight: '900',
+    fontWeight: '600',
     letterSpacing: -0.6,
   },
   sheetSubtitle: {
@@ -830,13 +830,14 @@ const styles = StyleSheet.create({
   timePreview: {
     color: '#0B1A33',
     fontSize: 27,
-    fontWeight: '900',
+    fontWeight: '400',
+    fontVariant: ['tabular-nums'],
     letterSpacing: -0.8,
   },
   timePreviewShell: {
     minHeight: 64,
     marginTop: 10,
-    borderWidth: 1,
+    borderWidth: 0,
     borderColor: 'rgba(43, 62, 96, 0.08)',
     borderRadius: 18,
   },
@@ -874,10 +875,10 @@ const styles = StyleSheet.create({
   },
   dialPickerShell: {
     overflow: 'hidden',
-    borderWidth: 1,
+    borderWidth: 0,
     borderColor: 'rgba(49, 70, 108, 0.1)',
     borderRadius: 18,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: 'transparent',
   },
   dialPickerHeader: {
     flexDirection: 'row',
@@ -1061,24 +1062,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
     marginTop: 20,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(45, 133, 121, 0.15)',
-    borderRadius: 17,
-    backgroundColor: 'rgba(228, 245, 242, 0.78)',
+    paddingVertical: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(30, 40, 50, 0.18)',
   },
   stepBadge: {
     width: 44,
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 15,
-    backgroundColor: UI_COLORS.positive,
+    borderRadius: 22,
+    backgroundColor: '#E7EBEA',
   },
   stepBadgeText: {
-    color: '#FFFFFF',
+    color: '#244A49',
     fontSize: 15,
-    fontWeight: '900',
+    fontWeight: '500',
   },
   behaviorCopy: {
     flex: 1,
@@ -1154,7 +1153,7 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     color: '#FFFFFF',
     fontSize: 15,
-    fontWeight: '900',
+    fontWeight: '600',
   },
   buttonPressed: {
     transform: [{ scale: 0.98 }],

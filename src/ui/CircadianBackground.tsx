@@ -24,8 +24,8 @@ export function CircadianBackground({ theme }: CircadianBackgroundProps) {
   const scrimColors: [string, string, string, string] = [
     `rgba(2, 13, 32, ${topScrimOpacity})`,
     `rgba(2, 13, 32, ${midScrimOpacity})`,
-    'rgba(2, 13, 32, 0.02)',
-    'rgba(2, 13, 32, 0.12)',
+    'rgba(2, 13, 32, 0.72)',
+    'rgba(2, 13, 32, 0.88)',
   ];
 
   return (
