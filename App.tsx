@@ -1766,7 +1766,8 @@ const styles = StyleSheet.create({
     marginTop: 10,
     marginBottom: 1,
     borderWidth: 0,
-    backgroundColor: 'transparent',
+    backgroundColor: 'rgba(6, 21, 45, 0.86)',
+    borderRadius: 16,
   },
   listHeader: {
     flexDirection: 'row',
