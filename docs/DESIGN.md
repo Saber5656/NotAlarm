@@ -260,7 +260,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | 起動直後（読み込み完了前） | 状態は `null`（未確認）。警告しない |
 | 起動時の読み込み完了後 | `getPermissionsAsync()` で確認する（prompt は出さない） |
 | `AppState` が `active` へ変化 | 再確認する。設定アプリから戻った時の復旧と、設定後の無効化を検知する |
-| アラームの追加・オン操作の終了後 | 成功・失敗とも再確認する（権限 prompt の結果を反映） |
+| アラームの追加・オン/オフ操作の終了後 | 成功・失敗とも再確認する（権限 prompt の結果を反映） |
 | Web | 確認しない（`null` のまま） |
 
 警告は「状態が `ok` 以外」かつ「オンのアラームが1件以上」の場合だけ表示する（`shouldWarnNotificationDelivery`）。
