@@ -120,6 +120,19 @@ export function getStepWindowPhase(
 }
 
 /**
+ * Steps count only while the window is open and the app is on screen. Step
+ * history recorded while the app was closed or in the background is never
+ * added, so walking with the app closed and going back to sleep cannot stop
+ * the alarm.
+ */
+export function shouldWatchSteps(
+  phase: StepWindowPhase | null,
+  isAppForeground: boolean,
+): boolean {
+  return phase === 'active' && isAppForeground;
+}
+
+/**
  * Persisted progress only belongs to the window it was counted in. Progress
  * from another start (or legacy progress without a start) counts as zero.
  */

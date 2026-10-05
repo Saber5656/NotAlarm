@@ -2,7 +2,7 @@
 
 ## 1. 目的と安全原則
 
-AlreadyUp は、設定時刻に実際の音を鳴らし、期限前60分以内の100歩の起床行動または本人の明示操作を確認できた場合だけ、対応する1周期のアラームを抑止する。
+AlreadyUp は、設定時刻に実際の音を鳴らし、期限前60分以内にアプリを画面に表示したまま歩いた100歩の起床行動、または本人の明示操作を確認できた場合だけ、対応する1周期のアラームを抑止する。
 
 > 起きていると確定できない場合は、アラームを残す。
 
@@ -16,7 +16,7 @@ AlreadyUp は、設定時刻に実際の音を鳴らし、期限前60分以内�
 - 今日だけ、毎日、平日、曜日指定
 - 設定ごとのオン／オフと削除
 - 各設定の先3周期を個別 local notification として予約
-- 期限の60分前から数える foreground Pedometer の100歩
+- 期限の60分前から、アプリを画面に表示している間だけ数える foreground Pedometer の100歩
 - 期限直前の actionable notification
 - 対象周期だけを cancel する fail-safe policy
 - foreground ループ音
@@ -135,7 +135,8 @@ main を必ず先に登録する。check-in の登録に失敗しても main を
 - foreground で最も近い未来周期だけを監視する。
 - 歩数 window（2026-10-05決定）は `startMs` から `dueAtMs` 未満までとする。`startMs = max(dueAtMs - 60分, armedAtMs, floorMs, 保存済み stepCountFromMs)` で、App は `getStepCountingStartMs(alarms, cycle)`（`src/stepWindow.ts`）で求めた時刻から数える。`floorMs` は他の周期（全設定）のうち、まだ保存されている `suppressed` かつ `confirmedAtMs < dueAtMs` の最新 `confirmedAtMs` である。別周期の停止に使った歩数や確認済みの時間帯を再利用しない（例: 06:30 と 07:00 の設定）。
 - 床の永続化: 停止済み周期は期限を過ぎると起動時・前面復帰時の補充で整理され、`floorMs` から消える。そのため周期を `suppressed` で保存する同じ mutation（`saveStoredAlarm` → `replaceStoredCycle` → `applySuppressionStepFloor`）で、他の `armed` / `step_candidate` 周期（全設定）のうち `dueAtMs - 60分 < confirmedAtMs < dueAtMs` のものへ `stepCountFromMs = confirmedAtMs`、`stepCount = 0` を書き込む。既に `confirmedAtMs` 以降の `stepCountFromMs` を持つ周期は変更しない。停止後に予約された周期は `armedAtMs` が停止時刻より後になる。例: 06:30・06:40・07:00 の毎日設定で、06:00〜06:10 の100歩が 06:30 を 06:10 に停止した場合、06:30 が整理された後も 07:00 は 06:10 から数える。
-- window 開始前は Pedometer を購読せず、数えない。window 中は保存済みの window 歩数、iOS では `getStepCountAsync(startMs, now)` の大きい方を起点に、即時に1回評価してから `watchStepCount` の増分を加える。履歴取得の失敗は保存済み歩数へ fallback する。
+- 数えるのは、アプリを画面に表示している間に `watchStepCount` で観測した歩数と、同じ window で保存済みの歩数だけとする（2026-10-05決定）。window 開始前と、アプリが背面にある間（`AppState` が `background`）は Pedometer を購読せず、数えない（`shouldWatchSteps`）。window 中は保存済みの window 歩数を起点に即時に1回評価してから `watchStepCount` の増分を加える。
+- iOS の歩数履歴（`getStepCountAsync`）は合算しない。アプリを閉じたまま、または画面をロックしたまま歩いてから再び寝た場合（例: トイレ）に意図せず止めないためで、`NSMotionUsageDescription`（アプリを開いている間の歩数）とも一致する。expo-sensors の iOS 実装は前面復帰時に購読開始時刻から更新を再開し、背面中の歩数も含めるため、背面へ移った時点で購読を外し、前面へ戻ったら保存済み歩数から新しく購読する。
 - 99歩以下は main を変更しない。
 - 100歩以上でも `armedAtMs <= observedAtMs < dueAtMs` を満たさない場合は拒否する。
 - 歩数証拠は数え始めた時刻 `countedFromMs` を持つ。`countedFromMs` が欠落・非有限、`dueAtMs - 60分` より前、`armedAtMs` より前、保存済み `stepCountFromMs` より前（保存値が非有限の場合を含む）、または `observedAtMs` より後の場合は、取消の前に `STEP_COUNT_OUTSIDE_WINDOW` で拒否する（`canSuppressAlarm`）。`processStepThresholdFailSafe` は storage から読み直した周期の `stepCountFromMs` を `AlarmRecord.stepCountFromMs` として渡す。
@@ -310,7 +311,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | 制約 | 現行動作 |
 |---|---|
 | Pedometer background 非対応 | 起床確定にせず main を残す |
-| 歩数監視 window（2026-10-05決定） | 最も近い未来周期を、期限の60分前から foreground 中だけ監視する。前夜・日中の歩数と他周期の停止に使った歩数は数えない。background / terminated 中の判定は未対応で、確認できなければ main を残す |
+| 歩数監視 window（2026-10-05決定） | 最も近い未来周期を、期限の60分前からアプリを画面に表示している間だけ監視し、その間に歩いた分だけ数える。前夜・日中の歩数、他周期の停止に使った歩数、アプリを閉じている間・背面にある間の歩数（iOS の歩数履歴を含む）は数えない。確認できなければ main を残す |
 | アプリを閉じる / 画面ロック（Expo Go） | main 通知の通知音1回だけ。ループ音・歩数確認なし。就寝時はアプリを開いたまま充電する手順とし、表示中は鳴動中・24時間以内の監視周期がある間だけ画面を消さない（11.2）。手動ロック・アプリ切替は防げない |
 | 通知権限拒否 | 新規アラームを追加しない。既存のオンのアラームは解除せず、summary を閉じられない警告へ置き換え、各行に通知オフを表示する（11.1） |
 | 通知音オフ / provisional | 予約は維持し、`silent` 警告を表示する（11.1） |
@@ -341,6 +342,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | POL-11 | window 開始前 | Pedometer を購読せず、開始時刻を表示する |
 | POL-12 | 06:30・06:40・07:00 の毎日設定で 06:30 を 06:10 に停止し、06:30 が整理された後の 07:00 | 07:00 の `stepCountFromMs` は 06:10 のまま。06:00 から数えた歩数は拒否 |
 | POL-13 | 保存済み `stepCountFromMs` より前から数えた100歩 | `processStepThresholdFailSafe` が取消前に `STEP_COUNT_OUTSIDE_WINDOW` で拒否。進捗保存も `stale_window` で無視 |
+| POL-14 | window 中にアプリを背面へ移す・閉じてから歩き、戻る | 背面へ移った時点で購読を外し（`shouldWatchSteps`）、戻った後は保存済み歩数から数える。背面中の歩数と iOS の歩数履歴は数えない（実機検証は未実施） |
 | REP-01 | 毎日 | 次の3日を計算 |
 | REP-02 | 金曜の平日設定 | 月・火・水を計算 |
 | REP-03 | 過去の今日だけ | 翌日へ繰り越さず拒否 |
