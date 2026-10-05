@@ -3,13 +3,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { AlarmSchedulingGateway } from '../src/alarmOrchestrator';
 import { STEP_WINDOW_LEAD_MS } from '../src/alarmPolicy';
+import { fillAlarmDefinitionSchedule } from '../src/alarmScheduling';
 import type {
   StoredAlarm,
   StoredAlarmDefinition,
 } from '../src/alarmStorage';
 import {
+  applySuppressionStepFloor,
   getStepCountingFloorMs,
+  getStepCountingStartMs,
   getStepWindow,
   getStepWindowPhase,
   getWindowStepCount,
@@ -205,4 +209,195 @@ test('merging keeps the larger count within a window and resets for a new one', 
     stepCountFromMs: at(6),
   });
   assert.throws(() => mergeWindowStepCount(cycle(), 5, Number.NaN));
+});
+
+test('the counting start is the latest of the lead, armedAt, floor, and stored start', () => {
+  const target = cycle();
+  const suppressedEarlier = cycle({
+    alarmId: 'alarm-0630',
+    cycleId: 'cycle-0630',
+    dueAtMs: at(6, 30),
+    phase: 'suppressed',
+    confirmedAtMs: at(6, 10),
+  });
+
+  assert.equal(getStepCountingStartMs([definition('alarm-0700', [target])], target), at(6));
+  assert.equal(
+    getStepCountingStartMs(
+      [
+        definition('alarm-0630', [suppressedEarlier]),
+        definition('alarm-0700', [target]),
+      ],
+      target,
+    ),
+    at(6, 10),
+  );
+  const stored = cycle({ stepCountFromMs: at(6, 20) });
+  assert.equal(
+    getStepCountingStartMs(
+      [
+        definition('alarm-0630', [suppressedEarlier]),
+        definition('alarm-0700', [stored]),
+      ],
+      stored,
+    ),
+    at(6, 20),
+  );
+  const armedLate = cycle({ armedAtMs: at(6, 40) });
+  assert.equal(
+    getStepCountingStartMs([definition('alarm-0700', [armedLate])], armedLate),
+    at(6, 40),
+  );
+});
+
+test('a suppression moves every overlapping monitoring cycle past its confirmation', () => {
+  const suppressed = cycle({
+    alarmId: 'alarm-0630',
+    cycleId: 'cycle-0630',
+    dueAtMs: at(6, 30),
+    phase: 'suppressed',
+    stepCount: 100,
+    stepCountFromMs: at(5, 30),
+    confirmedAtMs: at(6, 10),
+  });
+  const sameAlarmTomorrow = cycle({
+    alarmId: 'alarm-0630',
+    cycleId: 'cycle-0630-tomorrow',
+    dueAtMs: at(24 + 6, 30),
+  });
+  const counting = cycle({
+    alarmId: 'alarm-0640',
+    cycleId: 'cycle-0640',
+    dueAtMs: at(6, 40),
+    phase: 'step_candidate',
+    stepCount: 60,
+    stepCountFromMs: at(5, 40),
+  });
+  const target = cycle();
+  const laterStart = cycle({
+    alarmId: 'alarm-0705',
+    cycleId: 'cycle-0705',
+    dueAtMs: at(7, 5),
+    stepCount: 12,
+    stepCountFromMs: at(6, 20),
+  });
+  const windowNotOpen = cycle({
+    alarmId: 'alarm-0710',
+    cycleId: 'cycle-0710',
+    dueAtMs: at(7, 10),
+  });
+  const ringing = cycle({
+    alarmId: 'alarm-0615',
+    cycleId: 'cycle-0615',
+    dueAtMs: at(6, 15),
+    phase: 'ringing',
+    stepCount: 3,
+    stepCountFromMs: at(5, 15),
+  });
+  const alarms = [
+    definition('alarm-0615', [ringing]),
+    definition('alarm-0630', [suppressed, sameAlarmTomorrow]),
+    definition('alarm-0640', [counting]),
+    definition('alarm-0700', [target]),
+    definition('alarm-0705', [laterStart]),
+    definition('alarm-0710', [windowNotOpen]),
+  ];
+
+  const next = applySuppressionStepFloor(alarms, suppressed);
+  const byId = new Map(
+    next.flatMap((alarm) => alarm.cycles).map((entry) => [entry.cycleId, entry]),
+  );
+
+  // Overlapping armed / step_candidate cycles of any alarm restart at 06:10.
+  assert.deepEqual(
+    [byId.get('cycle-0640')?.stepCountFromMs, byId.get('cycle-0640')?.stepCount],
+    [at(6, 10), 0],
+  );
+  assert.deepEqual(
+    [byId.get('cycle-0700')?.stepCountFromMs, byId.get('cycle-0700')?.stepCount],
+    [at(6, 10), 0],
+  );
+  // The suppressed cycle, a later start, a window that opens after 06:10
+  // (07:10 opens at exactly 06:10), another day, and a ringing cycle keep
+  // their progress.
+  assert.deepEqual(byId.get('cycle-0630'), suppressed);
+  assert.deepEqual(byId.get('cycle-0705'), laterStart);
+  assert.deepEqual(byId.get('cycle-0710'), windowNotOpen);
+  assert.deepEqual(byId.get('cycle-0630-tomorrow'), sameAlarmTomorrow);
+  assert.deepEqual(byId.get('cycle-0615'), ringing);
+});
+
+test('only a suppressed cycle with a valid confirmation time sets a floor', () => {
+  const target = cycle();
+  const alarms = [definition('alarm-0700', [target])];
+  for (const source of [
+    cycle({ alarmId: 'x', cycleId: 'x', dueAtMs: at(6, 30), confirmedAtMs: at(6, 10) }),
+    cycle({ alarmId: 'x', cycleId: 'x', dueAtMs: at(6, 30), phase: 'suppressed' }),
+    cycle({
+      alarmId: 'x',
+      cycleId: 'x',
+      dueAtMs: at(6, 30),
+      phase: 'suppressed',
+      confirmedAtMs: Number.NaN,
+    }),
+  ]) {
+    assert.deepEqual(applySuppressionStepFloor(alarms, source), alarms);
+  }
+});
+
+test('steps used for 06:30 stay unusable for 07:00 after 06:30 is pruned', async () => {
+  // Daily alarms at 06:30, 06:40 and 07:00. 100 steps between 06:00 and 06:10
+  // suppress 06:30 at 06:10; monitoring then moves to 06:40.
+  const suppressed = cycle({
+    alarmId: 'alarm-0630',
+    cycleId: 'cycle-0630',
+    dueAtMs: at(6, 30),
+    phase: 'suppressed',
+    stepCount: 100,
+    stepCountFromMs: at(5, 30),
+    confirmedAtMs: at(6, 10),
+  });
+  const next0640 = cycle({
+    alarmId: 'alarm-0640',
+    cycleId: 'cycle-0640',
+    dueAtMs: at(6, 40),
+  });
+  const target = cycle();
+  const saved = applySuppressionStepFloor(
+    [
+      definition('alarm-0630', [suppressed]),
+      definition('alarm-0640', [next0640]),
+      definition('alarm-0700', [target]),
+    ],
+    suppressed,
+  );
+
+  // A later startup / foreground refill prunes the past suppressed cycle.
+  const gateway: AlarmSchedulingGateway = {
+    scheduleMain: async ({ cycleId }) => `main-${cycleId}`,
+    scheduleCheckIn: async ({ cycleId }) => `check-${cycleId}`,
+  };
+  let sequence = 0;
+  const refilled = await fillAlarmDefinitionSchedule(
+    saved[0]!,
+    at(6, 45),
+    gateway,
+    () => `refill-${++sequence}`,
+  );
+  assert.equal(
+    refilled.definition.cycles.some((entry) => entry.cycleId === 'cycle-0630'),
+    false,
+  );
+  const alarms = [refilled.definition, saved[1]!, saved[2]!];
+  assert.equal(getStepCountingFloorMs(alarms, saved[2]!.cycles[0]!), undefined);
+
+  assert.equal(getStepCountingStartMs(alarms, saved[2]!.cycles[0]!), at(6, 10));
+  // Without the stored floor, the same pruning reopens 06:00-06:10.
+  assert.equal(
+    getStepCountingStartMs(
+      [refilled.definition, definition('alarm-0700', [target])],
+      target,
+    ),
+    at(6),
+  );
 });

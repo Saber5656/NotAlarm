@@ -407,3 +407,63 @@ test("a successful cancellation result cannot override a rejected policy decisio
 
   assert.equal(finalizeSuppression(rejected, true), "ALARM_REMAINS_ARMED");
 });
+
+describe("stored step counting start", () => {
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+  const DAY_START = 1_790_000_000_000;
+  const at = (hours: number, minutes = 0) =>
+    DAY_START + hours * HOUR + minutes * MINUTE;
+  // 06:30 was suppressed at 06:10, which wrote 06:10 into this 07:00 cycle.
+  const flooredAlarm: AlarmRecord = {
+    cycleId: "cycle-0700",
+    mainAlarmId: "main-0700",
+    checkInNotificationId: "check-0700",
+    armedAtMs: at(-28),
+    dueAtMs: at(7),
+    stepCountFromMs: at(6, 10),
+  };
+
+  test("steps counted before the stored start are reused and rejected", () => {
+    assert.deepEqual(
+      canSuppressAlarm(
+        flooredAlarm,
+        classifyStepEvidence(150, at(6, 50), at(6)),
+        at(6, 50),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+    assert.deepEqual(
+      canSuppressAlarm(
+        flooredAlarm,
+        classifyStepEvidence(100, at(6, 50), at(6, 10) - 1),
+        at(6, 50),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+  });
+
+  test("steps counted from the stored start or later are accepted", () => {
+    assert.deepEqual(
+      canSuppressAlarm(
+        flooredAlarm,
+        classifyStepEvidence(100, at(6, 50), at(6, 10)),
+        at(6, 50),
+      ),
+      { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" },
+    );
+  });
+
+  test("a non-finite stored start fails closed", () => {
+    for (const stepCountFromMs of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.deepEqual(
+        canSuppressAlarm(
+          { ...flooredAlarm, stepCountFromMs },
+          classifyStepEvidence(100, at(6, 50), at(6, 10)),
+          at(6, 50),
+        ),
+        { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+      );
+    }
+  });
+});

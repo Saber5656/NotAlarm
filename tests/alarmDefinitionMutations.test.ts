@@ -3,7 +3,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { updateMonitoringCycleStepCount } from '../src/alarmDefinitionMutations';
+import {
+  replaceStoredCycle,
+  updateMonitoringCycleStepCount,
+} from '../src/alarmDefinitionMutations';
 import type {
   StoredAlarm,
   StoredAlarmDefinition,
@@ -148,4 +151,78 @@ test('uses the definition id as well as the cycle id', () => {
 
   assert.equal(result.alarms[0]?.cycles[0]?.stepCount, 30);
   assert.equal(result.alarms[1]?.cycles[0]?.stepCount, 7);
+});
+
+test('ignores progress counted from before the stored counting start', () => {
+  // Another suppression moved this cycle's start to WINDOW_START_MS + 500
+  // while an older step callback was still counting from WINDOW_START_MS.
+  const floored = cycle('armed', 0, WINDOW_START_MS + 500);
+  const result = updateMonitoringCycleStepCount(
+    [definition(floored)],
+    'alarm-1',
+    'cycle-1',
+    90,
+    WINDOW_START_MS,
+  );
+
+  assert.equal(result.status, 'stale_window');
+  assert.deepEqual(result.alarms[0]?.cycles[0], floored);
+});
+
+test('saving a suppressed cycle writes its confirmation time into overlapping cycles', () => {
+  const MINUTE = 60_000;
+  const due = 10_000_000;
+  const suppressedTarget = {
+    ...cycle('armed', 40, due - 60 * MINUTE),
+    dueAtMs: due,
+  };
+  const other: StoredAlarm = {
+    ...cycle('armed', 25, due - 50 * MINUTE),
+    alarmId: 'alarm-2',
+    cycleId: 'cycle-2',
+    dueAtMs: due + 30 * MINUTE,
+  };
+  const alarms: StoredAlarmDefinition[] = [
+    { ...definition(suppressedTarget) },
+    { ...definition(other), id: 'alarm-2' },
+  ];
+  const suppressed: StoredAlarm = {
+    ...suppressedTarget,
+    phase: 'suppressed',
+    stepCount: 100,
+    confirmedAtMs: due - 20 * MINUTE,
+  };
+
+  const next = replaceStoredCycle(alarms, suppressed);
+
+  assert.deepEqual(next[0]?.cycles[0], suppressed);
+  assert.equal(next[1]?.cycles[0]?.stepCountFromMs, due - 20 * MINUTE);
+  assert.equal(next[1]?.cycles[0]?.stepCount, 0);
+});
+
+test('saving a non-suppressed cycle leaves other cycles alone', () => {
+  const ringing = { ...cycle('ringing', 10, WINDOW_START_MS), confirmedAtMs: 5_000 };
+  const other: StoredAlarm = {
+    ...cycle('armed', 25, WINDOW_START_MS),
+    alarmId: 'alarm-2',
+    cycleId: 'cycle-2',
+  };
+  const alarms: StoredAlarmDefinition[] = [
+    definition(cycle('armed', 10, WINDOW_START_MS)),
+    { ...definition(other), id: 'alarm-2' },
+  ];
+
+  const next = replaceStoredCycle(alarms, ringing);
+
+  assert.deepEqual(next[0]?.cycles[0], ringing);
+  assert.deepEqual(next[1]?.cycles[0], other);
+});
+
+test('saving an unknown cycle throws', () => {
+  assert.throws(() =>
+    replaceStoredCycle([definition(cycle('armed'))], {
+      ...cycle('suppressed'),
+      cycleId: 'missing',
+    }),
+  );
 });

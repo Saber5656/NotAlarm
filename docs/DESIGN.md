@@ -76,7 +76,7 @@ interface StoredAlarm {
 }
 ```
 
-`stepCount` は `stepCountFromMs` から数えた歩数である。`stepCountFromMs` がその周期の現在の歩数 window 開始時刻と一致しない場合（旧データで未設定の場合を含む）、保存済み `stepCount` は0として扱う。同じ開始時刻での更新は大きい方を保持し、異なる開始時刻での更新は新しい値で置き換えて `stepCountFromMs` も更新する。
+`stepCount` は `stepCountFromMs` から数えた歩数である。`stepCountFromMs` がその周期の現在の歩数 window 開始時刻と一致しない場合（旧データで未設定の場合を含む）、保存済み `stepCount` は0として扱う。同じ開始時刻での更新は大きい方を保持し、より後の開始時刻での更新は新しい値で置き換えて `stepCountFromMs` も更新する。`stepCountFromMs` は後ろへしか動かさず、保存済みより前の開始時刻から数えた更新は無視する（`updateMonitoringCycleStepCount` の `stale_window`）。他の周期が停止した時は、重なる周期の `stepCountFromMs` を停止時刻へ進めて `stepCount` を0にする（7.1）。
 
 `alarmId` はユーザー設定、`cycleId` は特定日の特定時刻を識別する。通知 action の `cycleId`、保存済み `mainAlarmId`、check-in request ID の全てが一致しない限り cancel しない。
 
@@ -133,13 +133,22 @@ main を必ず先に登録する。check-in の登録に失敗しても main を
 ### 7.1 100歩
 
 - foreground で最も近い未来周期だけを監視する。
-- 歩数 window（2026-10-05決定）は `startMs = max(dueAtMs - 60分, armedAtMs, floorMs)` から `dueAtMs` 未満までとする。`floorMs` は他の周期（全設定）のうち `suppressed` かつ `confirmedAtMs < dueAtMs` の最新 `confirmedAtMs` であり、別周期の停止に使った歩数や確認済みの時間帯を再利用しない（例: 06:30 と 07:00 の設定）。一度保存した `stepCountFromMs` より window 開始を早めない。
+- 歩数 window（2026-10-05決定）は `startMs` から `dueAtMs` 未満までとする。`startMs = max(dueAtMs - 60分, armedAtMs, floorMs, 保存済み stepCountFromMs)` で、App は `getStepCountingStartMs(alarms, cycle)`（`src/stepWindow.ts`）で求めた時刻から数える。`floorMs` は他の周期（全設定）のうち、まだ保存されている `suppressed` かつ `confirmedAtMs < dueAtMs` の最新 `confirmedAtMs` である。別周期の停止に使った歩数や確認済みの時間帯を再利用しない（例: 06:30 と 07:00 の設定）。
+- 床の永続化: 停止済み周期は期限を過ぎると起動時・前面復帰時の補充で整理され、`floorMs` から消える。そのため周期を `suppressed` で保存する同じ mutation（`saveStoredAlarm` → `replaceStoredCycle` → `applySuppressionStepFloor`）で、他の `armed` / `step_candidate` 周期（全設定）のうち `dueAtMs - 60分 < confirmedAtMs < dueAtMs` のものへ `stepCountFromMs = confirmedAtMs`、`stepCount = 0` を書き込む。既に `confirmedAtMs` 以降の `stepCountFromMs` を持つ周期は変更しない。停止後に予約された周期は `armedAtMs` が停止時刻より後になる。例: 06:30・06:40・07:00 の毎日設定で、06:00〜06:10 の100歩が 06:30 を 06:10 に停止した場合、06:30 が整理された後も 07:00 は 06:10 から数える。
 - window 開始前は Pedometer を購読せず、数えない。window 中は保存済みの window 歩数、iOS では `getStepCountAsync(startMs, now)` の大きい方を起点に、即時に1回評価してから `watchStepCount` の増分を加える。履歴取得の失敗は保存済み歩数へ fallback する。
 - 99歩以下は main を変更しない。
 - 100歩以上でも `armedAtMs <= observedAtMs < dueAtMs` を満たさない場合は拒否する。
-- 歩数証拠は数え始めた時刻 `countedFromMs` を持つ。`countedFromMs` が欠落・非有限、`dueAtMs - 60分` より前、`armedAtMs` より前、または `observedAtMs` より後の場合は `STEP_COUNT_OUTSIDE_WINDOW` で拒否する。
+- 歩数証拠は数え始めた時刻 `countedFromMs` を持つ。`countedFromMs` が欠落・非有限、`dueAtMs - 60分` より前、`armedAtMs` より前、保存済み `stepCountFromMs` より前（保存値が非有限の場合を含む）、または `observedAtMs` より後の場合は、取消の前に `STEP_COUNT_OUTSIDE_WINDOW` で拒否する（`canSuppressAlarm`）。`processStepThresholdFailSafe` は storage から読み直した周期の `stepCountFromMs` を `AlarmRecord.stepCountFromMs` として渡す。
+- 各境界を強制する場所は次のとおり。
+
+  | 境界 | 数え始め（App） | 取消前の拒否 |
+  |---|---|---|
+  | `dueAtMs - 60分` | `getStepCountingStartMs` | `canSuppressAlarm` |
+  | `armedAtMs` | `getStepCountingStartMs` | `canSuppressAlarm` |
+  | 保存済み `stepCountFromMs`（永続化した床を含む） | `getStepCountingStartMs` | `processStepThresholdFailSafe` → `canSuppressAlarm` |
+  | まだ保存されている他周期の停止時刻 `floorMs` | `getStepCountingStartMs` | 直接は検査しない。停止時に `applySuppressionStepFloor` が重なる周期の `stepCountFromMs` へ書き込むため、上の行で拒否される |
 - 保存済み `mainAlarmId` を cancel し、OS pending 一覧から消えたことを確認した場合だけ `suppressed` にする。
-- 別設定、別日、次の周期は変更しない。
+- 別設定、別日、次の周期の通知と phase は変更しない（歩数の数え始めだけを上記のとおり後ろへずらす）。
 
 ### 7.2 明示確認
 
@@ -330,6 +339,8 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | POL-09 | 06:30 を 06:10 に停止した後の 07:00 | 06:10 以降の歩数だけを数える |
 | POL-10 | window 開始と異なる `stepCountFromMs` の保存歩数 | 0 から数え直す。同じ開始時刻なら大きい方を保持 |
 | POL-11 | window 開始前 | Pedometer を購読せず、開始時刻を表示する |
+| POL-12 | 06:30・06:40・07:00 の毎日設定で 06:30 を 06:10 に停止し、06:30 が整理された後の 07:00 | 07:00 の `stepCountFromMs` は 06:10 のまま。06:00 から数えた歩数は拒否 |
+| POL-13 | 保存済み `stepCountFromMs` より前から数えた100歩 | `processStepThresholdFailSafe` が取消前に `STEP_COUNT_OUTSIDE_WINDOW` で拒否。進捗保存も `stale_window` で無視 |
 | REP-01 | 毎日 | 次の3日を計算 |
 | REP-02 | 金曜の平日設定 | 月・火・水を計算 |
 | REP-03 | 過去の今日だけ | 翌日へ繰り越さず拒否 |

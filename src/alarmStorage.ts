@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
   type MonitoringStepUpdateStatus,
+  replaceStoredCycle,
   updateMonitoringCycleStepCount,
 } from './alarmDefinitionMutations';
 import {
@@ -226,28 +227,7 @@ export async function loadStoredAlarmByCycleId(
 export async function saveStoredAlarm(
   cycle: StoredAlarm,
 ): Promise<StoredAlarmDefinition[]> {
-  return mutateAlarmDefinitions((alarms) => {
-    let found = false;
-    const next = alarms.map((alarm) => {
-      if (alarm.id !== cycle.alarmId) {
-        return alarm;
-      }
-
-      const cycles = alarm.cycles.map((candidate) => {
-        if (candidate.cycleId !== cycle.cycleId) {
-          return candidate;
-        }
-        found = true;
-        return cycle;
-      });
-      return { ...alarm, cycles };
-    });
-
-    if (!found) {
-      throw new Error('対象のアラーム周期が見つかりません。');
-    }
-    return next;
-  });
+  return mutateAlarmDefinitions((alarms) => replaceStoredCycle(alarms, cycle));
 }
 
 export async function saveMonitoringCycleStepCount(

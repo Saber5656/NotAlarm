@@ -240,6 +240,64 @@ test('100 steps counted before the 60-minute window never cancel', async () => {
   assert.deepEqual(saved, []);
 });
 
+test('steps already used for another suppression never cancel', async () => {
+  const minute = 60_000;
+  const dueAtMs = 1_790_000_000_000;
+  // 06:30 was suppressed at 06:10 and has since been pruned; the suppression
+  // left 06:10 in this 07:00 cycle as its earliest counting start.
+  const { calls, dependencies, saved } = createResponseDependencies({
+    alarm: {
+      ...activeAlarm,
+      armedAtMs: dueAtMs - 48 * 60 * minute,
+      dueAtMs,
+      stepCount: 0,
+      stepCountFromMs: dueAtMs - 50 * minute,
+    },
+  });
+
+  // A stale window that still starts at 06:00 includes the 06:00-06:10 steps.
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 140,
+    observedAtMs: dueAtMs - 20 * minute,
+    countedFromMs: dueAtMs - 60 * minute,
+  });
+
+  assert.deepEqual(result, {
+    status: 'alarm_remains',
+    reason: 'STEP_COUNT_OUTSIDE_WINDOW',
+  });
+  assert.deepEqual(calls, ['load']);
+  assert.deepEqual(saved, []);
+});
+
+test('steps counted from the stored start can still cancel', async () => {
+  const minute = 60_000;
+  const dueAtMs = 1_790_000_000_000;
+  const { calls, dependencies, saved } = createResponseDependencies({
+    alarm: {
+      ...activeAlarm,
+      armedAtMs: dueAtMs - 48 * 60 * minute,
+      dueAtMs,
+      stepCount: 0,
+      stepCountFromMs: dueAtMs - 50 * minute,
+    },
+  });
+
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 100,
+    observedAtMs: dueAtMs - 20 * minute,
+    countedFromMs: dueAtMs - 50 * minute,
+  });
+
+  assert.equal(result.status, 'suppressed');
+  assert.deepEqual(calls, [
+    'load',
+    `cancel:${activeAlarm.mainAlarmId}`,
+    'save:suppressed',
+  ]);
+  assert.equal(saved[0]?.stepCountFromMs, dueAtMs - 50 * minute);
+});
+
 test('99 steps never attempt cancellation', async () => {
   const { calls, dependencies, saved } = createResponseDependencies();
 
