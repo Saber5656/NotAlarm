@@ -79,21 +79,26 @@ const WARNING_TITLES: Record<Exclude<NotificationDeliveryState, 'ok'>, string> =
   unknown: '通知の状態を確認できません',
 };
 
-// The in-app loop sound still plays in the foreground, so off / silent only
-// describe what happens when the app is closed.
+// Without notifications only the in-app loop sound can ring, and it stops as
+// soon as the app leaves the screen (closed, screen locked, another app in
+// front). Off / silent therefore name staying on screen, not only closing.
 const WARNING_CONSEQUENCES: Record<
   Exclude<NotificationDeliveryState, 'ok'>,
-  { withNext: string; withoutNext: string }
+  { reason: string; withNext: string; withoutNext: string }
 > = {
   off: {
-    withNext: 'アプリを閉じていると鳴りません。',
-    withoutNext: 'アプリを閉じているとアラームが鳴りません。',
+    reason: '通知がオフのため、',
+    withNext: 'アプリを画面に表示したままにしていないと鳴りません。',
+    withoutNext: 'アプリを画面に表示したままにしていないとアラームが鳴りません。',
   },
   silent: {
-    withNext: 'アプリを閉じていると音が出ません。',
-    withoutNext: 'アプリを閉じているとアラームの音が出ません。',
+    reason: '通知の音がオフのため、',
+    withNext: 'アプリを画面に表示したままにしていないと音が出ません。',
+    withoutNext:
+      'アプリを画面に表示したままにしていないとアラームの音が出ません。',
   },
   unknown: {
+    reason: '',
     withNext: '鳴るか確認できません。',
     withoutNext: 'アラームが鳴るか確認できません。',
   },
@@ -103,8 +108,8 @@ const WARNING_SCHEDULE_LINES: Record<
   Exclude<NotificationDeliveryState, 'ok'>,
   string
 > = {
-  off: '通知オフ・アプリを閉じると鳴りません',
-  silent: '通知音オフ・アプリを閉じると音が出ません',
+  off: '通知オフ・アプリ表示中のみ鳴ります',
+  silent: '通知音オフ・アプリ表示中のみ音が出ます',
   unknown: '通知の状態を確認できません',
 };
 
@@ -116,8 +121,8 @@ export function getNotificationDeliveryWarningCopy(
   return {
     title: WARNING_TITLES[state],
     body: nextAlarmLabel
-      ? `次のアラーム ${nextAlarmLabel} は、${consequence.withNext}`
-      : consequence.withoutNext,
+      ? `${consequence.reason}次のアラーム ${nextAlarmLabel} は、${consequence.withNext}`
+      : `${consequence.reason}${consequence.withoutNext}`,
     scheduleLine: WARNING_SCHEDULE_LINES[state],
   };
 }

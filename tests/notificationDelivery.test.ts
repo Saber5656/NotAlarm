@@ -153,19 +153,19 @@ describe('shouldWarnNotificationDelivery', () => {
 describe('getNotificationDeliveryWarningCopy', () => {
   const nextAlarm = '10/3(土) 07:00';
 
-  test('off names the next alarm and says it will not ring when closed', () => {
+  test('off names the next alarm and says it rings only while the app stays on screen', () => {
     assert.deepEqual(getNotificationDeliveryWarningCopy('off', nextAlarm), {
       title: '通知がオフです',
-      body: '次のアラーム 10/3(土) 07:00 は、アプリを閉じていると鳴りません。',
-      scheduleLine: '通知オフ・アプリを閉じると鳴りません',
+      body: '通知がオフのため、次のアラーム 10/3(土) 07:00 は、アプリを画面に表示したままにしていないと鳴りません。',
+      scheduleLine: '通知オフ・アプリ表示中のみ鳴ります',
     });
   });
 
-  test('silent says the next alarm makes no sound when closed', () => {
+  test('silent says the next alarm makes a sound only while the app stays on screen', () => {
     assert.deepEqual(getNotificationDeliveryWarningCopy('silent', nextAlarm), {
       title: '通知の音がオフです',
-      body: '次のアラーム 10/3(土) 07:00 は、アプリを閉じていると音が出ません。',
-      scheduleLine: '通知音オフ・アプリを閉じると音が出ません',
+      body: '通知の音がオフのため、次のアラーム 10/3(土) 07:00 は、アプリを画面に表示したままにしていないと音が出ません。',
+      scheduleLine: '通知音オフ・アプリ表示中のみ音が出ます',
     });
   });
 
@@ -182,8 +182,9 @@ describe('getNotificationDeliveryWarningCopy', () => {
       Exclude<NotificationDeliveryState, 'ok'>,
       string
     > = {
-      off: 'アプリを閉じているとアラームが鳴りません。',
-      silent: 'アプリを閉じているとアラームの音が出ません。',
+      off: '通知がオフのため、アプリを画面に表示したままにしていないとアラームが鳴りません。',
+      silent:
+        '通知の音がオフのため、アプリを画面に表示したままにしていないとアラームの音が出ません。',
       unknown: 'アラームが鳴るか確認できません。',
     };
     for (const state of ['off', 'silent', 'unknown'] as const) {
@@ -195,14 +196,17 @@ describe('getNotificationDeliveryWarningCopy', () => {
     }
   });
 
-  test('off and silent limit the claim to when the app is closed', () => {
-    // The in-app loop sound still plays in the foreground, so the copy must
-    // not say the alarm never rings.
+  test('off and silent say the alarm needs the app on screen, not just open', () => {
+    // Only the in-app loop sound can ring without notifications, and it stops
+    // when the screen locks or another app comes to the front, so the copy
+    // must name staying on screen rather than only closing the app.
     for (const state of ['off', 'silent'] as const) {
       for (const label of [nextAlarm, null]) {
         const copy = getNotificationDeliveryWarningCopy(state, label);
+        assert.match(copy.body, /アプリを画面に表示したまま/, `${state}: ${copy.body}`);
+        assert.match(copy.scheduleLine, /アプリ表示中のみ/, `${state}: ${copy.scheduleLine}`);
         for (const text of [copy.body, copy.scheduleLine]) {
-          assert.match(text, /アプリを閉じ/, `${state}: ${text}`);
+          assert.doesNotMatch(text, /アプリを閉じ/, `${state}: ${text}`);
         }
       }
     }
