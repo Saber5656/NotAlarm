@@ -81,8 +81,9 @@ const WARNING_TITLES: Record<Exclude<NotificationDeliveryState, 'ok'>, string> =
 
 // Without notifications only the in-app loop sound can ring, and it can only
 // start while the app is on screen: at the due time a closed app, a locked
-// screen or another app in front means it never starts (once started it keeps
-// playing in the background). Off / silent therefore name staying on screen,
+// screen or another app in front means it never starts (once started it is
+// configured to keep playing in the background; unverified on a device in
+// Expo Go). Off / silent therefore name staying on screen,
 // not only closing.
 const WARNING_CONSEQUENCES: Record<
   Exclude<NotificationDeliveryState, 'ok'>,
