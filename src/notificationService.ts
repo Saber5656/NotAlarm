@@ -8,6 +8,7 @@ import {
   MAIN_ALARM_KIND,
   type AlarmNotificationData,
 } from './alarmContracts';
+import { getMainAlarmNotificationBody } from './alarmNotificationContent';
 import {
   assessNotificationDelivery,
   type NotificationDeliveryState,
@@ -161,14 +162,12 @@ export async function scheduleMainAlarmNotification(input: {
   alarmId: string;
   cycleId: string;
   dueAtMs: number;
+  repeats: boolean;
 }): Promise<string> {
   return Notifications.scheduleNotificationAsync({
     content: {
       title: '⏰ 起きる時間です',
-      // Later occurrences are only reserved while the app runs, so users who
-      // stop alarms from the notification are told to open the app.
-      body:
-        '起床が確認できなかったため、アラームを鳴らしています。アプリを開くと次回以降の予約を続けます。',
+      body: getMainAlarmNotificationBody({ repeats: input.repeats }),
       sound: 'default',
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,

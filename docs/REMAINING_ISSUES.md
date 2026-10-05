@@ -298,7 +298,7 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 - 起動時に加え、アプリが前面に戻るたび（`AppState` が `active`）に予約枠を3周期まで補充する。通知が許可されている場合だけ行い、権限 prompt は出さない。停止・オフの処理が終わっていないアラームは補充しない。同じ予約失敗は1回だけ notice する（[DESIGN.md 5章](DESIGN.md)）。
 - 一覧の各行に「10/7(水)まで予約済み」と予約の終わりを表示する。繰り返しアラームが残り1周期になると「…まで予約済み・アプリを開くと先の分を予約します」、未来の予約がないと「予約がありません」を警告色で表示する（`describeScheduleCoverage`、`tests/scheduleCoverage.test.ts`）。
 - そのアラームの直近の補充が予約に失敗した・停止処理が終わっていないため補充しなかった場合は、アプリを開いていても補充できないため「…まで予約済み・先の分を予約できませんでした」と表示する（`recordRefillAttempt`、`getScheduleCoverageLine` の `refillFailed`）。
-- main 通知の本文に「アプリを開くと次回以降の予約を続けます。」を添えた。
+- 繰り返しアラームの main 通知の本文に「アプリを開くと次回以降の予約を続けます。」を添えた。「今日だけ」には添えない（`getMainAlarmNotificationBody`）。
 - 残り: 通知だけで使い、アプリを前面に戻さない利用者は3周期後にアラームが止まる。下のスコープの background/native 補充と、前面復帰時の補充の実機検証が必要。
 
 ### スコープ

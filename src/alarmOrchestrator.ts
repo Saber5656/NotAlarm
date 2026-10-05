@@ -11,6 +11,8 @@ export interface AlarmSchedulingGateway {
     alarmId: string;
     cycleId: string;
     dueAtMs: number;
+    /** False for a today-only alarm, which has no later occurrence. */
+    repeats: boolean;
   }): Promise<string>;
   scheduleCheckIn(input: {
     alarmId: string;
@@ -34,12 +36,14 @@ export async function scheduleAlarmNotificationsFailSafe(
     cycleId: string;
     dueAtMs: number;
     checkInAtMs: number;
+    repeats: boolean;
   },
 ): Promise<ScheduledAlarmNotifications> {
   const mainAlarmId = await gateway.scheduleMain({
     alarmId: input.alarmId,
     cycleId: input.cycleId,
     dueAtMs: input.dueAtMs,
+    repeats: input.repeats,
   });
 
   try {
