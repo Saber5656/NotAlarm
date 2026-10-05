@@ -40,6 +40,30 @@ export function getAlarmScheduleIssueSeverity(
   return issues.length > 0 ? 'warning' : 'none';
 }
 
+/**
+ * Identifies a scheduling problem across refills. Every attempt creates a new
+ * cycle ID (and recovery failures use the current time), so only the alarm and
+ * the kind of failure are compared.
+ */
+export function getAlarmScheduleIssueKey(issue: AlarmScheduleIssue): string {
+  return `${issue.kind}:${issue.alarmId}`;
+}
+
+/**
+ * Decides whether a refill should show a notice. A problem is new when the
+ * previous refill did not report it; problems that went away are forgotten so
+ * they are reported again if they come back.
+ */
+export function reconcileReportedScheduleProblems(
+  reported: ReadonlySet<string>,
+  current: readonly string[],
+): { hasNew: boolean; reported: Set<string> } {
+  return {
+    hasNew: current.some((key) => !reported.has(key)),
+    reported: new Set(current),
+  };
+}
+
 export async function fillAlarmDefinitionSchedule(
   definition: StoredAlarmDefinition,
   nowMs: number,

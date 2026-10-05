@@ -47,7 +47,9 @@ import {
   getNextMonitoringCycle,
   getRingingCycle,
   fillAlarmDefinitionSchedule,
+  getAlarmScheduleIssueKey,
   getAlarmScheduleIssueSeverity,
+  reconcileReportedScheduleProblems,
 } from './src/alarmScheduling';
 import {
   ScheduledNotificationRollbackError,
@@ -101,6 +103,7 @@ import {
   dismissDeliveredNotification,
   installForegroundNotificationHandler,
   prepareNotifications,
+  prepareNotificationsIfGranted,
   readAlarmNotificationData,
   readNotificationDelivery,
   scheduleCheckInNotification,
@@ -115,6 +118,10 @@ import {
   CONFIRM_AWAKE_ACTION,
   MAIN_ALARM_KIND,
 } from './src/alarmContracts';
+import {
+  describeScheduleCoverage,
+  getScheduleCoverageLine,
+} from './src/scheduleCoverage';
 
 installForegroundNotificationHandler();
 
@@ -244,6 +251,7 @@ function nextCycleForDefinition(
 async function fillEnabledSchedules(
   alarms: StoredAlarmDefinition[],
   nowMs: number,
+  excludedAlarmIds: ReadonlySet<string> = new Set(),
 ): Promise<{
   alarms: StoredAlarmDefinition[];
   issues: AlarmScheduleIssue[];
@@ -254,7 +262,7 @@ async function fillEnabledSchedules(
   const scheduledCycles: StoredAlarm[] = [];
 
   for (const alarm of alarms) {
-    if (!alarm.enabled) {
+    if (!alarm.enabled || excludedAlarmIds.has(alarm.id)) {
       next.push(alarm);
       continue;
     }
@@ -284,6 +292,83 @@ async function fillEnabledSchedules(
   }
 
   return { alarms: next, issues, scheduledCycles };
+}
+
+type ScheduleRefillTrigger = 'startup' | 'foreground';
+
+interface ScheduleRefillResult {
+  /** The saved alarms, or null when nothing was saved. */
+  alarms: StoredAlarmDefinition[] | null;
+  /** Identifies the problems found so the same notice is not repeated. */
+  problemKeys: string[];
+  notice: Notice | null;
+}
+
+/**
+ * Tops every enabled alarm back up to its upcoming occurrences. Returns null
+ * when a foreground refill is skipped because notifications are not allowed;
+ * only startup may show the permission prompt.
+ */
+async function refillEnabledSchedulesOnce(
+  trigger: ScheduleRefillTrigger,
+): Promise<ScheduleRefillResult | null> {
+  try {
+    if (trigger === 'startup') {
+      await prepareNotifications();
+    } else if (!(await prepareNotificationsIfGranted())) {
+      return null;
+    }
+
+    // A stop or disable that has not finished must not get new reservations.
+    // Startup retries it before refilling.
+    const pendingAlarmIds = new Set(
+      (await loadPendingAlarmCancellations()).map((pending) => pending.alarmId),
+    );
+    const fillIssues: AlarmScheduleIssue[] = [];
+    const alarms = await withScheduledNotificationRollback(
+      (track) =>
+        mutateAlarmDefinitions(async (current) => {
+          const filled = await fillEnabledSchedules(
+            current,
+            Date.now(),
+            pendingAlarmIds,
+          );
+          track(filled.scheduledCycles);
+          fillIssues.push(...filled.issues);
+          return filled.alarms;
+        }),
+      cancellationGateway,
+    );
+    const severity = getAlarmScheduleIssueSeverity(fillIssues);
+    return {
+      alarms,
+      problemKeys: fillIssues.map(getAlarmScheduleIssueKey),
+      notice:
+        severity === 'none'
+          ? null
+          : {
+              tone: severity,
+              text:
+                severity === 'danger'
+                  ? '一部のメイン通知を再予約できませんでした。各アラームの状態を確認してください。'
+                  : '一部の起床確認通知を再予約できませんでした。',
+            },
+    };
+  } catch (error) {
+    const text =
+      error instanceof Error ? error.message : '通知状態を更新できませんでした。';
+    return {
+      alarms: null,
+      problemKeys: [`refill_failed:${text}`],
+      notice: {
+        tone:
+          error instanceof ScheduledNotificationRollbackError
+            ? 'danger'
+            : 'warning',
+        text,
+      },
+    };
+  }
 }
 
 interface ScreenFrameProps {
@@ -344,6 +429,8 @@ function AlarmApp() {
   const stepSuppressionInFlightRef = useRef(false);
   const dueTransitionInFlightRef = useRef(false);
   const deliveryCheckRef = useRef(0);
+  const refillInFlightRef = useRef(false);
+  const reportedScheduleProblemsRef = useRef<ReadonlySet<string>>(new Set());
   const localMinuteKey = Math.floor(nowMs / 60_000);
   const circadianTheme = useMemo(
     () => getCircadianTheme(new Date(nowMs)),
@@ -367,6 +454,38 @@ function AlarmApp() {
       setNotificationDelivery(next);
     }
   }, []);
+
+  const refillEnabledSchedules = useCallback(
+    async (
+      trigger: ScheduleRefillTrigger,
+    ): Promise<StoredAlarmDefinition[] | null> => {
+      if (Platform.OS === 'web' || refillInFlightRef.current) {
+        return null;
+      }
+
+      refillInFlightRef.current = true;
+      try {
+        const result = await refillEnabledSchedulesOnce(trigger);
+        if (!result) {
+          return null;
+        }
+        // Each row keeps showing how far its alarm is reserved, so a problem
+        // is announced once instead of on every return to the app.
+        const reconciled = reconcileReportedScheduleProblems(
+          reportedScheduleProblemsRef.current,
+          result.problemKeys,
+        );
+        reportedScheduleProblemsRef.current = reconciled.reported;
+        if (reconciled.hasNew && result.notice) {
+          setNotice(result.notice);
+        }
+        return result.alarms;
+      } finally {
+        refillInFlightRef.current = false;
+      }
+    },
+    [],
+  );
 
   const openNotificationSettings = useCallback(() => {
     void Linking.openSettings().catch(() => {
@@ -454,50 +573,7 @@ function AlarmApp() {
           Platform.OS !== 'web' &&
           restored.some((definition) => definition.enabled)
         ) {
-          try {
-            await prepareNotifications();
-            const fillIssues: AlarmScheduleIssue[] = [];
-            restored = await withScheduledNotificationRollback(
-              (track) =>
-                mutateAlarmDefinitions(async (current) => {
-                  const filled = await fillEnabledSchedules(
-                    current,
-                    Date.now(),
-                  );
-                  track(filled.scheduledCycles);
-                  fillIssues.push(...filled.issues);
-                  return filled.alarms;
-                }),
-              cancellationGateway,
-            );
-            const severity = getAlarmScheduleIssueSeverity(fillIssues);
-            if (
-              severity !== 'none' &&
-              mounted &&
-              !cancellationRecoveryFailed
-            ) {
-              setNotice({
-                tone: severity,
-                text:
-                  severity === 'danger'
-                    ? '一部のメイン通知を再予約できませんでした。各アラームの状態を確認してください。'
-                    : '一部の起床確認通知を再予約できませんでした。',
-              });
-            }
-          } catch (error) {
-            if (mounted && !cancellationRecoveryFailed) {
-              setNotice({
-                tone:
-                  error instanceof ScheduledNotificationRollbackError
-                    ? 'danger'
-                    : 'warning',
-                text:
-                  error instanceof Error
-                    ? error.message
-                    : '通知状態を更新できませんでした。',
-              });
-            }
-          }
+          restored = (await refillEnabledSchedules('startup')) ?? restored;
         }
 
         if (mounted) {
@@ -521,7 +597,7 @@ function AlarmApp() {
     return () => {
       mounted = false;
     };
-  }, [setCurrentAlarms]);
+  }, [refillEnabledSchedules, setCurrentAlarms]);
 
   useEffect(() => {
     if (Platform.OS === 'web' || !isLoaded) {
@@ -529,14 +605,29 @@ function AlarmApp() {
     }
 
     void refreshNotificationDelivery();
-    // Notifications can be turned off in Settings while the app is away.
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') {
-        void refreshNotificationDelivery();
+      if (state !== 'active') {
+        return;
+      }
+      // Notifications can be turned off in Settings while the app is away.
+      void refreshNotificationDelivery();
+      // Occurrences stopped from a notification are only replaced while the
+      // app runs, so returning to it tops the schedule back up.
+      if (alarmsRef.current.some((alarm) => alarm.enabled)) {
+        void refillEnabledSchedules('foreground').then((next) => {
+          if (next) {
+            setCurrentAlarms(next);
+          }
+        });
       }
     });
     return () => subscription.remove();
-  }, [isLoaded, refreshNotificationDelivery]);
+  }, [
+    isLoaded,
+    refillEnabledSchedules,
+    refreshNotificationDelivery,
+    setCurrentAlarms,
+  ]);
 
   const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
   const monitoringCycle = useMemo(
@@ -1525,6 +1616,13 @@ function AlarmApp() {
           <View style={styles.alarmList}>
             {orderedAlarms.map((definition) => {
               const nextCycle = nextCycleForDefinition(definition, nowMs);
+              const coverageLine = getScheduleCoverageLine(
+                describeScheduleCoverage(definition, nowMs),
+                formatNextDate,
+              );
+              const scheduleLineWarns =
+                definition.enabled &&
+                (deliveryWarningCopy !== null || coverageLine.isWarning);
               return (
                 <View
                   key={definition.id}
@@ -1570,16 +1668,12 @@ function AlarmApp() {
                     <Text
                       style={[
                         styles.scheduleSummary,
-                        definition.enabled &&
-                          deliveryWarningCopy &&
-                          styles.scheduleSummaryWarning,
+                        scheduleLineWarns && styles.scheduleSummaryWarning,
                       ]}
                     >
-                      {!definition.enabled
-                        ? '通知は予約されていません'
-                        : deliveryWarningCopy
-                          ? deliveryWarningCopy.scheduleLine
-                          : `${definition.cycles.filter((cycle) => isMonitoring(cycle)).length}回分を予約済み`}
+                      {definition.enabled && deliveryWarningCopy
+                        ? deliveryWarningCopy.scheduleLine
+                        : coverageLine.text}
                     </Text>
                     <Pressable
                       accessibilityLabel={`${formatAlarmTime(

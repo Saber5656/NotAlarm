@@ -97,7 +97,7 @@
 
 - 通知権限から配送状態 `ok` / `off` / `silent` / `unknown` を判定する純粋関数を `src/notificationDelivery.ts` に実装し、単体テスト（`tests/notificationDelivery.test.ts`）で固定した。iOS の NOT_DETERMINED / DENIED は `off`、PROVISIONAL と通知音オフは `silent`、取得失敗・未知の値は `unknown` とし、`ok` とみなさない（[DESIGN.md 11.1](DESIGN.md)）。
 - 起動時の読み込み完了後、`AppState` が `active` になるたび、アラームの追加・オン操作の後に `getPermissionsAsync()` で再確認する。
-- `ok` 以外でオンのアラームがある間は、次回アラーム card を閉じられない danger card（「通知がオフです」など）に置き換え、各行の「N回分を予約済み」を配送できない理由に置き換える。設定済みに見える表示をしない。
+- `ok` 以外でオンのアラームがある間は、次回アラーム card を閉じられない danger card（「通知がオフです」など）に置き換え、各行の予約範囲（「…まで予約済み」）を配送できない理由に置き換える。設定済みに見える表示をしない。
 - danger card の `設定を開く` から `Linking.openSettings()` で設定へ移動でき、通知をオンにして戻ると自動で通常表示に戻る。
 - 権限エラー文言から「AlreadyUp」を外した（Expo Go では設定の対象が Expo Go になるため）。
 
@@ -107,7 +107,7 @@
 - メイン通知を OS へ登録し、ID を得た後だけ `armed` にする
 - 設定後の権限変更と通知設定変更を再検査する（foreground 復帰時の再検査は実装済み。background 中は検知できない）
 - 確認通知だけ失敗した場合と、メイン通知が失敗した場合を分ける
-- 残り: 実機（Expo Go / development build、iOS / Android）での検証、Android の通知 channel 単位の音・重要度設定の検出、通知を再びオンにした時点での OS pending 一覧との照合と予約枠の補充（現在は次回起動時などに補充。ALR-008 と関連）、消音スイッチ・音量・Focus の扱い（ALR-001）
+- 残り: 実機（Expo Go / development build、iOS / Android）での検証、Android の通知 channel 単位の音・重要度設定の検出、通知を再びオンにした時点での OS pending 一覧との照合（予約枠の補充は、通知が許可された状態でアプリへ戻った時点で行う。ALR-008 / ALR-010 と関連）、消音スイッチ・音量・Focus の扱い（ALR-001）
 
 ### 受け入れ条件
 
@@ -280,6 +280,15 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 ### 背景
 
 複数アラームと曜日繰り返しは実装済みで、通知上限を守るため各アラームの直近 3 回分を one-shot 通知として予約する。アプリを長期間起動しない場合の継続補充、既存アラームの編集、スヌーズは未実装である。
+
+### 対応状況（2026-10-05）
+
+暫定対策のみ。本番リリース前の native/background 再予約は引き続き必須である。
+
+- 起動時に加え、アプリが前面に戻るたび（`AppState` が `active`）に予約枠を3周期まで補充する。通知が許可されている場合だけ行い、権限 prompt は出さない。停止・オフの処理が終わっていないアラームは補充しない。同じ予約失敗は1回だけ notice する（[DESIGN.md 5章](DESIGN.md)）。
+- 一覧の各行に「10/7(水)まで予約済み」と予約の終わりを表示する。繰り返しアラームが残り1周期になると「…まで予約済み・アプリを開くと先の分を予約します」、未来の予約がないと「予約がありません」を警告色で表示する（`describeScheduleCoverage`、`tests/scheduleCoverage.test.ts`）。
+- main 通知の本文に「アプリを開くと次回以降の予約を続けます。」を添えた。
+- 残り: 通知だけで使い、アプリを前面に戻さない利用者は3周期後にアラームが止まる。下のスコープの background/native 補充と、前面復帰時の補充の実機検証が必要。
 
 ### スコープ
 
