@@ -12,6 +12,7 @@
 - アラーム時刻の60分前から期限前までの100歩による、対象周期だけの自動停止
 - iPhone / Apple Watch の確認通知から「起きています」を押した周期だけの停止
 - foreground でのループ音と、background での local notification 音
+- 就寝時はアプリを開いたまま充電する運用を正式手順とし、鳴動中と24時間以内にオンのアラームがある間は、アプリ表示中の画面を自動で消さない（下記「寝るときの手順」）
 - 通知がオフ・通知音がオフ・状態を確認できない場合は、次のアラームを閉じられない警告に置き換え、`設定を開く` から端末の設定へ移動
 - 既存の単一アラーム保存形式から複数アラーム形式への移行
 - 「時刻」「繰り返し」を分けてレイアウトを動かさない追加モーダルと、一覧だけをスクロールする固定ホーム画面
@@ -120,6 +121,22 @@ npm start
 
 「今日だけ」は現在より後の時刻だけ登録できます。時刻を過ぎた設定をもう一度使う場合は削除し、新しい時刻を登録してください。
 
+## 寝るときの手順
+
+2026-10-05、当面は「アプリを画面に表示したまま充電して寝る」ことを正式な手順にしました。アプリ内のループ音と100歩の起床確認は、アプリが画面に表示されている間しか動かないためです。
+
+1. 寝る前に AlreadyUp を開き、アラーム一覧の画面を表示したままにする。
+2. iPhone を充電器につなぐ（画面を点けたままにするため、電池を多く使います）。
+3. 画面を手動でロックしたり、ほかのアプリへ切り替えたりしない。眩しい場合はコントロールセンターで画面の明るさを下げる。
+
+アプリを表示している間は、鳴動中と、オンのアラームが24時間以内にある間（期限を過ぎて鳴る直前の周期を含む）は画面を自動で消しません（[Expo KeepAwake](https://docs.expo.dev/versions/v57.0.0/sdk/keep-awake/)）。アラーム時刻には止めるまでループ音が鳴り、60分前から100歩の起床確認を行います。オンのアラームが24時間より先にしかない場合や、すべてオフの場合は、端末の自動ロック設定どおりに画面が消えます。
+
+アプリを閉じた場合や画面をロックした場合、アラームは OS の通知音が1回鳴るだけになり、ループ音も歩数による起床確認もありません。この違いは画面下部に「寝るときはアプリを開いたまま充電してください」「閉じると通知音1回だけ・歩数確認なし」として常に表示し、アラーム追加画面の説明にも記載しています。
+
+画面を点けたままにする処理に失敗した場合は「画面を点けたままにできませんでした。…」と警告します。その場合は端末の自動ロックをオフにしてから寝てください。
+
+本番は、アプリを閉じていても鳴り続ける自前ビルド（native alarm / AlarmKit など）へ移行する予定です（[docs/REMAINING_ISSUES.md](docs/REMAINING_ISSUES.md) の ALR-001）。
+
 ## Apple Watch で起床確認する
 
 1. アラームをオンにする。
@@ -147,7 +164,7 @@ Web export は UI と bundle の smoke test です。通知、Pedometer、Apple 
 - `Pedometer.watchStepCount` は background では更新されません。100歩のリアルタイム確認は foreground が前提です。
 - 歩数監視の範囲は2026-10-05に「アラーム時刻の60分前から期限まで」と決定しました。判定はアプリ表示中だけ行います。iOS ではアプリを開いた時点で、窓の開始以降に端末が記録した歩数履歴（`Pedometer.getStepCountAsync`）も合算します。Android は履歴を取得できないため、アプリ表示中に歩いた分だけを数えます。アプリを開かないまま期限を迎えた場合は起床を確認できないため、アラームが鳴ります。
 - 通常の local notification は、消音、音量、Focus、通知権限、OS の配送判断に影響されます。通知権限と通知音の設定は起動時とアプリへ戻るたびに確認して画面に表示しますが、消音スイッチ・音量・Focus は検出できません。音が必ず鳴る保証はありません。
-- foreground のループ音は JavaScript 実行中のみです。background / terminated では通知音に依存します。
+- foreground のループ音は JavaScript 実行中のみです。background / terminated では通知音に依存します。そのため当面は「アプリを開いたまま充電して寝る」ことを正式手順とし、アプリ表示中は画面を自動で消さないようにしています（「寝るときの手順」）。画面を手動でロックした場合、ほかのアプリへ切り替えた場合、着信などでアプリが中断された場合は防げません。
 - 通知アクションを押した時に JavaScript 実行環境が終了している場合、取消処理が走らずアラームが鳴る可能性があります。これは安全側の失敗ですが、UX として未解決です。
 - アプリを開かない間の先3周期を越える予約補充（現在はアプリ起動時と前面へ戻った時だけ補充）、端末再起動、timezone / 手動時刻変更との整合は本番リリース前の gate です。
 - Expo Go は開発確認用です。App Store / Google Play 配布では development build と native alarm 能力を含む別の配布設計が必要です。
@@ -159,6 +176,7 @@ Web export は UI と bundle の smoke test です。通知、Pedometer、Apple 
 
 - [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
+- [Expo KeepAwake — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/keep-awake/)
 - [Expo GlassEffect — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/glass-effect/)
 - [Expo BlurView — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/blur-view/)
 - [Expo DateTimePicker — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/date-time-picker/)
