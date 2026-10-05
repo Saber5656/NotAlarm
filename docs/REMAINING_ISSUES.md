@@ -106,6 +106,7 @@
 - 通知権限から配送状態 `ok` / `off` / `silent` / `unknown` を判定する純粋関数を `src/notificationDelivery.ts` に実装し、単体テスト（`tests/notificationDelivery.test.ts`）で固定した。iOS の NOT_DETERMINED / DENIED は `off`、PROVISIONAL と通知音オフは `silent`、取得失敗・未知の値は `unknown` とし、`ok` とみなさない（[DESIGN.md 11.1](DESIGN.md)）。
 - 起動時の読み込み完了後、`AppState` が `active` になるたび、アラームの追加・オン操作の後に `getPermissionsAsync()` で再確認する。
 - `ok` 以外でオンのアラームがある間は、次回アラーム card を閉じられない danger card（「通知がオフです」など）に置き換え、各行の予約範囲（「…まで予約済み」）を配送できない理由に置き換える。設定済みに見える表示をしない。
+- 通知なしで鳴るのはアプリ表示中のループ音だけで、画面ロックやほかのアプリへの切替でも止まるため、`off` / `silent` は「アプリを画面に表示したままにしていないと鳴りません（音が出ません）」、行は「通知オフ・アプリ表示中のみ鳴ります」「通知音オフ・アプリ表示中のみ音が出ます」と表示する（「アプリを閉じていると」に限定しない。ALR-001 の就寝手順と一致）。
 - danger card の `設定を開く` から `Linking.openSettings()` で設定へ移動でき、通知をオンにして戻ると自動で通常表示に戻る。
 - 権限エラー文言から「AlreadyUp」を外した（Expo Go では設定の対象が Expo Go になるため）。
 
