@@ -227,4 +227,71 @@ describe('getScheduleCoverageLine', () => {
       },
     );
   });
+
+  test('running low after a failed or skipped refill says the later ones could not be reserved', () => {
+    // The app is open, so telling the user to open it would be wrong.
+    assert.deepEqual(
+      getScheduleCoverageLine(
+        {
+          kind: 'scheduled',
+          remaining: 1,
+          lastDueAtMs: WEDNESDAY_7,
+          isRunningLow: true,
+        },
+        formatDate,
+        { refillFailed: true },
+      ),
+      {
+        text: '10/7(水)まで予約済み・先の分を予約できませんでした',
+        isWarning: true,
+      },
+    );
+  });
+
+  test('the open-the-app hint stays when the latest refill succeeded', () => {
+    assert.deepEqual(
+      getScheduleCoverageLine(
+        {
+          kind: 'scheduled',
+          remaining: 1,
+          lastDueAtMs: WEDNESDAY_7,
+          isRunningLow: true,
+        },
+        formatDate,
+        { refillFailed: false },
+      ),
+      {
+        text: '10/7(水)まで予約済み・アプリを開くと先の分を予約します',
+        isWarning: true,
+      },
+    );
+  });
+
+  test('a failed refill leaves rows that are not running low unchanged', () => {
+    assert.deepEqual(
+      getScheduleCoverageLine(
+        {
+          kind: 'scheduled',
+          remaining: 2,
+          lastDueAtMs: WEDNESDAY_7,
+          isRunningLow: false,
+        },
+        formatDate,
+        { refillFailed: true },
+      ),
+      { text: '10/7(水)まで予約済み', isWarning: false },
+    );
+    assert.deepEqual(
+      getScheduleCoverageLine({ kind: 'none' }, formatDate, {
+        refillFailed: true,
+      }),
+      { text: '予約がありません', isWarning: true },
+    );
+    assert.deepEqual(
+      getScheduleCoverageLine({ kind: 'off' }, formatDate, {
+        refillFailed: true,
+      }),
+      { text: '通知は予約されていません', isWarning: false },
+    );
+  });
 });

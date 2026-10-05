@@ -53,7 +53,10 @@ import {
   fillAlarmDefinitionSchedule,
   getAlarmScheduleIssueKey,
   getAlarmScheduleIssueSeverity,
+  getSkippedRefillAttempt,
   reconcileReportedScheduleProblems,
+  recordRefillAttempt,
+  type RefillAttempt,
 } from './src/alarmScheduling';
 import {
   ScheduledNotificationRollbackError,
@@ -316,15 +319,19 @@ interface ScheduleRefillResult {
   /** Identifies the problems found so the same notice is not repeated. */
   problemKeys: string[];
   notice: Notice | null;
+  /** Which alarms this refill covered and which it left short. */
+  attempt: RefillAttempt;
 }
 
 /**
  * Tops every enabled alarm back up to its upcoming occurrences. Returns null
  * when a foreground refill is skipped because notifications are not allowed;
- * only startup may show the permission prompt.
+ * only startup may show the permission prompt. `knownAlarms` stands in for the
+ * stored list when the refill fails before reading it.
  */
 async function refillEnabledSchedulesOnce(
   trigger: ScheduleRefillTrigger,
+  knownAlarms: readonly StoredAlarmDefinition[],
 ): Promise<ScheduleRefillResult | null> {
   try {
     if (trigger === 'startup') {
@@ -339,9 +346,11 @@ async function refillEnabledSchedulesOnce(
       (await loadPendingAlarmCancellations()).map((pending) => pending.alarmId),
     );
     const fillIssues: AlarmScheduleIssue[] = [];
+    let attemptedAlarmIds: string[] = [];
     const alarms = await withScheduledNotificationRollback(
       (track) =>
         mutateAlarmDefinitions(async (current) => {
+          attemptedAlarmIds = current.map((alarm) => alarm.id);
           const filled = await fillEnabledSchedules(
             current,
             Date.now(),
@@ -356,6 +365,11 @@ async function refillEnabledSchedulesOnce(
     const severity = getAlarmScheduleIssueSeverity(fillIssues);
     return {
       alarms,
+      attempt: {
+        attemptedAlarmIds,
+        issues: fillIssues,
+        skippedAlarmIds: [...pendingAlarmIds],
+      },
       problemKeys: fillIssues.map(getAlarmScheduleIssueKey),
       notice:
         severity === 'none'
@@ -373,6 +387,7 @@ async function refillEnabledSchedulesOnce(
       error instanceof Error ? error.message : '通知状態を更新できませんでした。';
     return {
       alarms: null,
+      attempt: getSkippedRefillAttempt(knownAlarms),
       problemKeys: [`refill_failed:${text}`],
       notice: {
         tone:
@@ -434,6 +449,10 @@ function AlarmApp() {
   // null until the first check, so nothing is claimed before it completes.
   const [notificationDelivery, setNotificationDelivery] =
     useState<NotificationDeliveryState | null>(null);
+  // Alarms whose latest refill reported an issue or skipped them.
+  const [refillFailedAlarmIds, setRefillFailedAlarmIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const [pedometerStatus, setPedometerStatus] = useState(
     Platform.OS === 'web' ? '実機のみ対応' : '次のアラームを待機中',
   );
@@ -459,6 +478,12 @@ function AlarmApp() {
     setAlarms(next);
   }, []);
 
+  const recordRefill = useCallback((attempt: RefillAttempt) => {
+    setRefillFailedAlarmIds((previous) =>
+      recordRefillAttempt(previous, attempt),
+    );
+  }, []);
+
   const refreshNotificationDelivery = useCallback(async () => {
     if (Platform.OS === 'web') {
       return;
@@ -475,6 +500,7 @@ function AlarmApp() {
   const refillEnabledSchedules = useCallback(
     async (
       trigger: ScheduleRefillTrigger,
+      knownAlarms: readonly StoredAlarmDefinition[],
     ): Promise<StoredAlarmDefinition[] | null> => {
       if (Platform.OS === 'web' || refillInFlightRef.current) {
         return null;
@@ -482,10 +508,11 @@ function AlarmApp() {
 
       refillInFlightRef.current = true;
       try {
-        const result = await refillEnabledSchedulesOnce(trigger);
+        const result = await refillEnabledSchedulesOnce(trigger, knownAlarms);
         if (!result) {
           return null;
         }
+        recordRefill(result.attempt);
         // Each row keeps showing how far its alarm is reserved, so a problem
         // is announced once instead of on every return to the app.
         const reconciled = reconcileReportedScheduleProblems(
@@ -501,7 +528,7 @@ function AlarmApp() {
         refillInFlightRef.current = false;
       }
     },
-    [],
+    [recordRefill],
   );
 
   const openNotificationSettings = useCallback(() => {
@@ -517,6 +544,7 @@ function AlarmApp() {
     async (completedCycle: StoredAlarm): Promise<void> => {
       const now = Date.now();
       const issues: AlarmScheduleIssue[] = [];
+      const attemptedAlarmIds = [completedCycle.alarmId];
       const next = await withScheduledNotificationRollback(
         (track) =>
           mutateAlarmDefinitions(async (current) => {
@@ -550,7 +578,16 @@ function AlarmApp() {
             return updated;
           }),
         cancellationGateway,
-      );
+      ).catch((error: unknown) => {
+        // Nothing new was reserved, so the row must not promise a refill.
+        recordRefill({
+          attemptedAlarmIds,
+          issues: [],
+          skippedAlarmIds: attemptedAlarmIds,
+        });
+        throw error;
+      });
+      recordRefill({ attemptedAlarmIds, issues });
       setCurrentAlarms(next);
       const severity = getAlarmScheduleIssueSeverity(issues);
       if (severity !== 'none') {
@@ -563,7 +600,7 @@ function AlarmApp() {
         });
       }
     },
-    [setCurrentAlarms],
+    [recordRefill, setCurrentAlarms],
   );
 
   useEffect(() => {
@@ -586,11 +623,16 @@ function AlarmApp() {
         let restored = await markDueCyclesRinging(Date.now());
 
         if (
-          !cancellationRecoveryFailed &&
           Platform.OS !== 'web' &&
           restored.some((definition) => definition.enabled)
         ) {
-          restored = (await refillEnabledSchedules('startup')) ?? restored;
+          if (cancellationRecoveryFailed) {
+            // Startup does not refill until the stop is finished.
+            recordRefill(getSkippedRefillAttempt(restored));
+          } else {
+            restored =
+              (await refillEnabledSchedules('startup', restored)) ?? restored;
+          }
         }
 
         if (mounted) {
@@ -614,7 +656,7 @@ function AlarmApp() {
     return () => {
       mounted = false;
     };
-  }, [refillEnabledSchedules, setCurrentAlarms]);
+  }, [recordRefill, refillEnabledSchedules, setCurrentAlarms]);
 
   useEffect(() => {
     if (Platform.OS === 'web' || !isLoaded) {
@@ -631,11 +673,13 @@ function AlarmApp() {
       // Occurrences stopped from a notification are only replaced while the
       // app runs, so returning to it tops the schedule back up.
       if (alarmsRef.current.some((alarm) => alarm.enabled)) {
-        void refillEnabledSchedules('foreground').then((next) => {
-          if (next) {
-            setCurrentAlarms(next);
-          }
-        });
+        void refillEnabledSchedules('foreground', alarmsRef.current).then(
+          (next) => {
+            if (next) {
+              setCurrentAlarms(next);
+            }
+          },
+        );
       }
     });
     return () => subscription.remove();
@@ -1106,6 +1150,7 @@ function AlarmApp() {
           }),
         cancellationGateway,
       );
+      recordRefill({ attemptedAlarmIds: [definition.id], issues: fillIssues });
       setCurrentAlarms(next);
       setIsComposerOpen(false);
       const severity = getAlarmScheduleIssueSeverity(fillIssues);
@@ -1134,6 +1179,7 @@ function AlarmApp() {
   }, [
     customWeekdays,
     isBusy,
+    recordRefill,
     refreshNotificationDelivery,
     repeatKind,
     selectedTime,
@@ -1215,6 +1261,10 @@ function AlarmApp() {
             }),
           cancellationGateway,
         );
+        recordRefill({
+          attemptedAlarmIds: [definition.id],
+          issues: fillIssues,
+        });
         setCurrentAlarms(next);
         const severity = getAlarmScheduleIssueSeverity(fillIssues);
         if (severity !== 'none') {
@@ -1247,7 +1297,7 @@ function AlarmApp() {
         void refreshNotificationDelivery();
       }
     },
-    [isBusy, refreshNotificationDelivery, setCurrentAlarms],
+    [isBusy, recordRefill, refreshNotificationDelivery, setCurrentAlarms],
   );
 
   const deleteAlarm = useCallback(
@@ -1668,6 +1718,7 @@ function AlarmApp() {
               const coverageLine = getScheduleCoverageLine(
                 describeScheduleCoverage(definition, nowMs),
                 formatNextDate,
+                { refillFailed: refillFailedAlarmIds.has(definition.id) },
               );
               const scheduleLineWarns =
                 definition.enabled &&
