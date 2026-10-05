@@ -105,6 +105,7 @@ import {
   getStepCountingStartMs,
   getStepWindowPhase,
   getWindowStepCount,
+  shouldWatchSteps,
   type StepWindow,
 } from './src/stepWindow';
 import {
@@ -697,7 +698,9 @@ function AlarmApp() {
   const stepWindowPhase = stepWindow
     ? getStepWindowPhase(stepWindow, nowMs)
     : null;
-  const isStepWindowActive = stepWindowPhase === 'active';
+  // Steps count only inside the window and only while the app is on screen.
+  const isWatchingSteps =
+    Platform.OS !== 'web' && shouldWatchSteps(stepWindowPhase, isAppForeground);
 
   useEffect(() => {
     if (ringingCycle) {
@@ -873,20 +876,29 @@ function AlarmApp() {
   }, [setCurrentAlarms]);
 
   useEffect(() => {
-    // Steps only count inside the hour before the alarm, so nothing is
-    // subscribed or counted before the window opens.
-    if (
-      Platform.OS === 'web' ||
-      !monitoringCycle ||
-      !stepWindow ||
-      !isStepWindowActive
-    ) {
+    // Steps only count inside the hour before the alarm and while the app is
+    // on screen, so nothing is subscribed or counted otherwise.
+    if (!isWatchingSteps || !monitoringCycle || !stepWindow) {
       return;
     }
 
     let disposed = false;
     let subscription: ReturnType<typeof Pedometer.watchStepCount> | undefined;
     const countedFromMs = stepWindow.startMs;
+    const stopWatching = () => {
+      disposed = true;
+      subscription?.remove();
+      subscription = undefined;
+    };
+    // On iOS, expo-sensors resumes updates from the original start when the
+    // app returns, which would add steps walked while it was away. Stop as
+    // soon as the app leaves the screen; the effect then restarts from the
+    // saved count of this window when the app is back on screen.
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (!isForegroundAppState(state)) {
+        stopWatching();
+      }
+    });
 
     const evaluateSteps = (steps: number) => {
       if (disposed) {
@@ -997,22 +1009,10 @@ function AlarmApp() {
           return;
         }
 
-        let baseSteps = getWindowStepCount(monitoringCycle, stepWindow);
-        if (Platform.OS === 'ios') {
-          try {
-            // iOS keeps step history, so steps walked inside the window
-            // before the app came on screen are included.
-            const history = await Pedometer.getStepCountAsync(
-              new Date(countedFromMs),
-              new Date(),
-            );
-            if (Number.isFinite(history.steps)) {
-              baseSteps = Math.max(baseSteps, history.steps);
-            }
-          } catch {
-            // Fall back to the persisted count for this window.
-          }
-        }
+        // Only the saved count of this window plus steps observed while the
+        // app is on screen count. Step history recorded while the app was
+        // closed is never added.
+        const baseSteps = getWindowStepCount(monitoringCycle, stepWindow);
         if (disposed) {
           return;
         }
@@ -1030,13 +1030,13 @@ function AlarmApp() {
     })();
 
     return () => {
-      disposed = true;
-      subscription?.remove();
+      stopWatching();
+      appStateSubscription.remove();
     };
   }, [
+    isWatchingSteps,
     monitoringCycle?.cycleId,
     stepWindow?.startMs,
-    isStepWindowActive,
     refreshAfterCycleCompletion,
     setCurrentAlarms,
   ]);

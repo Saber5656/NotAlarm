@@ -18,6 +18,7 @@ import {
   getStepWindowPhase,
   getWindowStepCount,
   mergeWindowStepCount,
+  shouldWatchSteps,
 } from '../src/stepWindow';
 
 const MINUTE = 60_000;
@@ -400,4 +401,14 @@ test('steps used for 06:30 stay unusable for 07:00 after 06:30 is pruned', async
     ),
     at(6),
   );
+});
+
+test('steps are watched only inside the window while the app is on screen', () => {
+  assert.equal(shouldWatchSteps('active', true), true);
+  // Steps walked while the app is in the background (for example a trip to
+  // the bathroom before going back to sleep) are never counted.
+  assert.equal(shouldWatchSteps('active', false), false);
+  assert.equal(shouldWatchSteps('before', true), false);
+  assert.equal(shouldWatchSteps('ended', true), false);
+  assert.equal(shouldWatchSteps(null, true), false);
 });
