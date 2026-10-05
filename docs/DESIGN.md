@@ -193,7 +193,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 上部はブランド、画面タイトル、追加ボタンだけにし、prototype / presentation 表示を置かない。
 - 次回アラームは時刻、日付、残り時間を表示する。歩数 window 開始前は進捗barを出さず「起床確認は HH:MM から」「アプリ表示中に100歩」と開始時刻を示し、window 中だけ「起床確認 N / 100歩」と進捗barを表示する。進捗は現在の window で数えた歩数だけを使う。
 - 通常文字サイズでは有効時 / idleのsummary cardを同じ140pt固定高とし、一覧の開始位置を動かさない。Dynamic Typeのアクセシビリティscroll時だけ、文字を切らないため同じ140pt最小高から内容に応じて拡張する。
-- 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。
+- 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。通知配送の警告中（11.1）は、オンの各行で予約周期数の代わりに配送できない理由を danger 色で表示する。
 - メイン画面は通常文字サイズでは外側を `View` として viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線、一覧panelの丸い下端をviewport内へ固定する。
 - Dynamic Type の `fontScale > 1.3` では情報欠落を避けるアクセシビリティ例外として外側スクロールを許可し、通常文字サイズでは一覧以外を固定する。
 - 追加フォームはメイン画面の layout tree に挿入せず、背景を blur する `Modal` 上のサブ画面として表示する。タイトル直下の「時刻」「繰り返し」で内容を分け、選択中のglass lensをspring移動させる。通常端末（高さ700pt以上、幅360pt以上、`fontScale <= 1.3`）はsheet高を固定して内部スクロールを無効化し、繰り返しと100歩の説明も1画面内で操作できる。小さい画面・狭い画面・大きい文字では情報欠落を避けるためフォーム本体だけを内部スクロールし、repeat labelは2行まで許可する。
@@ -208,13 +208,56 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 背景assetのopacity計算は純粋関数に分離し、任意時刻で隣接する最大2 assetだけを合計opacity 1でblendする。React Nativeの`Image`もopacityが0より大きい最大2枚だけをmountし、4枚同時decodeを避ける。位置情報、国籍、networkは現行モデルへ入力しない。実地点・季節の日の出時刻を使う拡張は、任意の位置情報権限、手動地域設定、privacy copyを別途承認してから追加する。
 - Web は UI smoke test とし、通知操作を disabled にする。
 
+### 11.1 通知配送状態
+
+background / terminated でアラームを鳴らせるのは OS の local notification だけであるため、通知権限から配送状態 `NotificationDeliveryState` を判定し（`src/notificationDelivery.ts`）、鳴らない可能性がある間は「設定済み」に見える表示をしない。判定できない場合は `unknown` とし、`ok` とみなさない。
+
+| `getPermissionsAsync()` の結果 | 状態 |
+|---|---|
+| 結果なし（`null` / `undefined`） | `unknown` |
+| iOS `status` 0（NOT_DETERMINED）/ 1（DENIED） | `off` |
+| iOS `status` 3（PROVISIONAL。通知センターへ静かに配送） | `silent` |
+| iOS `status` 2（AUTHORIZED）/ 4（EPHEMERAL）かつ `allowsSound === false` | `silent` |
+| iOS `status` 2 / 4（上記以外） | `ok` |
+| iOS `status` がそれ以外の値 | `unknown` |
+| `ios` なし（Android） | `granted` なら `ok`、それ以外は `off` |
+| 取得時の例外 | `unknown` |
+
+確認のライフサイクル:
+
+| 契機 | 動作 |
+|---|---|
+| 起動直後（読み込み完了前） | 状態は `null`（未確認）。警告しない |
+| 起動時の読み込み完了後 | `getPermissionsAsync()` で確認する（prompt は出さない） |
+| `AppState` が `active` へ変化 | 再確認する。設定アプリから戻った時の復旧と、設定後の無効化を検知する |
+| アラームの追加・オン操作の終了後 | 成功・失敗とも再確認する（権限 prompt の結果を反映） |
+| Web | 確認しない（`null` のまま） |
+
+警告は「状態が `ok` 以外」かつ「オンのアラームが1件以上」の場合だけ表示する（`shouldWarnNotificationDelivery`）。
+
+| 状態 | summary card（鳴動中でない場合） | オンの各行 |
+|---|---|---|
+| `ok` | 通常の次回アラーム / idle card | `N回分を予約済み` |
+| `off` | 「通知がオフです」「次のアラーム {日付} {時刻} は、アプリを閉じていると鳴りません。」 | `通知オフ・アプリを閉じると鳴りません` |
+| `silent` | 「通知の音がオフです」「…アプリを閉じていると音が出ません。」 | `通知音オフ・アプリを閉じると音が出ません` |
+| `unknown` | 「通知の状態を確認できません」「…鳴るか確認できません。」 | `通知の状態を確認できません` |
+
+- 警告 card は次回アラーム card を置き換える danger 状態であり、閉じられない。配色は鳴動 card の danger tone を流用し、Dynamic Type で文言を切らないため140pt最小高から拡張する。
+- 次回周期がない場合（オンだが予約なし）も、日付を除いた文言で警告する。
+- `設定を開く`（`accessibilityRole="button"`、44pt以上）は `Linking.openSettings()` を呼ぶ。Expo Go では Expo Go の設定画面が開く。失敗時は danger notice を出す。
+- foreground では端末内のループ音で鳴るため、`off` / `silent` の文言は「アプリを閉じていると」に限定し、常に鳴らないとは表示しない。
+- 鳴動中は鳴動 card を優先し、各行の警告だけを表示する。
+- 配送状態はアラーム周期の状態を変更しない。`off` でも予約・保存済み周期を解除しない。
+
 ## 12. Platform 制約
 
 | 制約 | 現行動作 |
 |---|---|
 | Pedometer background 非対応 | 起床確定にせず main を残す |
 | 歩数監視 window（2026-10-05決定） | 最も近い未来周期を、期限の60分前から foreground 中だけ監視する。前夜・日中の歩数と他周期の停止に使った歩数は数えない。background / terminated 中の判定は未対応で、確認できなければ main を残す |
-| 通知権限拒否 | 新規アラームを追加しない |
+| 通知権限拒否 | 新規アラームを追加しない。既存のオンのアラームは解除せず、summary を閉じられない警告へ置き換え、各行に通知オフを表示する（11.1） |
+| 通知音オフ / provisional | 予約は維持し、`silent` 警告を表示する（11.1） |
+| 消音スイッチ / 音量 / Focus / Android の channel 単位の音設定 | 検出しない。`ok` 表示でも鳴動保証はない |
 | check-in 登録失敗 | main を残し警告 |
 | main 登録失敗 | 周期を保存しない |
 | cancel 未確認 | `suppressed` にしない |
@@ -256,6 +299,10 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | UI-09 | 02:00 / 06:00 / 12:00 / 18:00 / 21:00のlocal time | phaseとnight / dawn / day / dusk写真weightが期待する状態になる |
 | UI-10 | 23:59:59から00:00:00へ遷移 | night写真weightが不連続に飛ばない |
 | UI-11 | alarm toggle完全成功 / 部分予約失敗 / 例外失敗 | 完全成功時はbannerなし、部分予約失敗時はwarning、例外失敗時はdanger noticeを表示する |
+| NTF-01 | iOS 未決定・拒否 / provisional / 許可＋音オフ / 許可 / 未知の status / 結果なし | `off` / `silent` / `silent` / `ok` / `unknown` / `unknown` |
+| NTF-02 | `ok` 以外でオンのアラームあり | 閉じられない警告 card と各行の警告を表示し、「次のアラーム」「N回分を予約済み」を表示しない |
+| NTF-03 | オフのアラームだけ、アラームなし、または未確認（`null`） | 警告しない |
+| NTF-04 | 設定アプリで通知をオフにしてアプリへ戻る / オンに戻して戻る | `active` で再確認し、警告を表示 / 通常表示へ戻す（実機確認が必要） |
 
 ## 14. 参照資料
 
