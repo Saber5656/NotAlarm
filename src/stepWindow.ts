@@ -57,6 +57,58 @@ export function getStepWindow(cycle: StoredAlarm, floorMs?: number): StepWindow 
   return { startMs: Math.max(...starts), dueAtMs: cycle.dueAtMs };
 }
 
+/**
+ * The instant from which steps count for `cycle`:
+ * max(due - 60 min, armedAt, latest other suppression before due, stored
+ * `stepCountFromMs`). The stored start carries floors from suppressions that
+ * have since been pruned (see `applySuppressionStepFloor`).
+ */
+export function getStepCountingStartMs(
+  alarms: readonly StoredAlarmDefinition[],
+  cycle: StoredAlarm,
+): number {
+  return getStepWindow(cycle, getStepCountingFloorMs(alarms, cycle)).startMs;
+}
+
+/**
+ * Makes the "steps already used" floor durable. When `suppressed` stops its
+ * alarm at `confirmedAtMs`, every other armed / step_candidate cycle (any
+ * alarm) whose window is open at that instant restarts counting from it, so the
+ * same steps cannot also stop that cycle after the suppressed cycle is pruned.
+ * Cycles that already count from a later start keep their progress.
+ */
+export function applySuppressionStepFloor(
+  alarms: readonly StoredAlarmDefinition[],
+  suppressed: StoredAlarm,
+): StoredAlarmDefinition[] {
+  const floorMs = suppressed.confirmedAtMs;
+  if (
+    suppressed.phase !== 'suppressed' ||
+    typeof floorMs !== 'number' ||
+    !Number.isFinite(floorMs)
+  ) {
+    return [...alarms];
+  }
+
+  return alarms.map((alarm) => ({
+    ...alarm,
+    cycles: alarm.cycles.map((cycle) => {
+      if (
+        (cycle.alarmId === suppressed.alarmId &&
+          cycle.cycleId === suppressed.cycleId) ||
+        (cycle.phase !== 'armed' && cycle.phase !== 'step_candidate') ||
+        !(cycle.dueAtMs - STEP_WINDOW_LEAD_MS < floorMs) ||
+        !(floorMs < cycle.dueAtMs) ||
+        (typeof cycle.stepCountFromMs === 'number' &&
+          cycle.stepCountFromMs >= floorMs)
+      ) {
+        return cycle;
+      }
+      return { ...cycle, stepCount: 0, stepCountFromMs: floorMs };
+    }),
+  }));
+}
+
 export function getStepWindowPhase(
   window: StepWindow,
   nowMs: number,

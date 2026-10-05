@@ -185,10 +185,11 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 
 ### 決定事項（2026-10-05）
 
-- 歩数は各周期の `max(期限の60分前, 周期の予約時刻, 他周期を停止した最新時刻)` から期限未満までだけ数える。前夜・日中の歩数と、別の周期の停止に使った歩数は数えない。
-- window 開始前は Pedometer を購読しない。window の開始時刻が変わった場合、保存済み歩数は0から数え直す（`stepCountFromMs`）。
+- 歩数は各周期の `max(期限の60分前, 周期の予約時刻, 他周期を停止した最新時刻, 保存済みの数え始め)` から期限未満までだけ数える。前夜・日中の歩数と、別の周期の停止に使った歩数は数えない。
+- window 開始前は Pedometer を購読しない。window の開始時刻が変わった場合、保存済み歩数は0から数え直す（`stepCountFromMs`）。`stepCountFromMs` は後ろへしか動かない。
+- 周期を停止した時は、同じ保存処理で、窓が重なる他の監視周期（全設定）の `stepCountFromMs` を停止時刻へ進め歩数を0にする（`applySuppressionStepFloor`）。停止済み周期が後の補充で整理されても、同じ歩数で別の周期を止められない。
 - 判定はアプリ表示中だけ行う。iOS は window 開始以降の `getStepCountAsync` 履歴を表示時に合算し、取得失敗時は保存済み歩数へ fallback する。
-- 方針は `src/alarmPolicy.ts`（`STEP_COUNT_OUTSIDE_WINDOW`）と `src/stepWindow.ts` に実装し、単体テストで固定した。
+- 強制箇所: 60分前と予約時刻の境界は `canSuppressAlarm`（`src/alarmPolicy.ts`、`STEP_COUNT_OUTSIDE_WINDOW`）が取消前に拒否する。保存済みの数え始め（停止時に書き込んだ床を含む）は `processStepThresholdFailSafe` が `canSuppressAlarm` へ渡して取消前に拒否する。App の数え始めは `getStepCountingStartMs`（`src/stepWindow.ts`）で、これらと保存中の停止時刻の最大値とする。いずれも単体テストで固定した。
 
 ### スコープ
 
@@ -202,7 +203,7 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 ### 受け入れ条件
 
 - [ ] サポートする計測状態と非サポート状態が明文化されている
-- [x] 前日の日中歩行や別周期の歩数が、次のアラーム停止根拠にならない（policy / window の単体テストで確認。実機検証は未実施）
+- [x] 前日の日中歩行や別周期の歩数が、次のアラーム停止根拠にならない（60分前・予約時刻は `canSuppressAlarm`、別周期の停止に使った歩数は停止時に書き込む `stepCountFromMs` を `processStepThresholdFailSafe` → `canSuppressAlarm` が取消前に拒否する。停止済み周期が整理された後の 06:30・06:40・07:00 の例を含め単体テストで確認。実機検証は未実施）
 - [ ] 歩数欠落・99 歩以下・API 失敗がメイン通知の自動キャンセルにつながらない
 - [ ] 1 周期につき 100 歩到達時の停止処理が重複実行されない
 - [ ] 期限前の 100 歩だけが、OS キャンセル確認後にメインを停止するテストがある

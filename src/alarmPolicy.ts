@@ -14,6 +14,11 @@ export interface AlarmRecord {
   checkInNotificationId?: string;
   armedAtMs: number;
   dueAtMs: number;
+  /**
+   * The stored start of this cycle's step window. It only moves later, for
+   * example when another suppression already used the steps before it.
+   */
+  stepCountFromMs?: number;
 }
 
 export interface ExplicitAwakeConfirmation {
@@ -224,7 +229,8 @@ export function finalizeSuppression(
 
 /**
  * Steps walked before the window (for example the previous evening, or for an
- * earlier occurrence) must never count toward this cycle's threshold.
+ * earlier occurrence) or already used for another suppression (before the
+ * stored `stepCountFromMs`) must never count toward this cycle's threshold.
  */
 function isCountedInsideStepWindow(
   record: AlarmRecord,
@@ -236,6 +242,9 @@ function isCountedInsideStepWindow(
     Number.isFinite(countedFromMs) &&
     countedFromMs >= record.dueAtMs - STEP_WINDOW_LEAD_MS &&
     countedFromMs >= record.armedAtMs &&
+    (record.stepCountFromMs === undefined ||
+      (Number.isFinite(record.stepCountFromMs) &&
+        countedFromMs >= record.stepCountFromMs)) &&
     evidence.observedAtMs >= countedFromMs
   );
 }

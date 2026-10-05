@@ -102,10 +102,10 @@ import {
   upsertPendingAlarmCancellation,
 } from './src/alarmStorage';
 import {
-  getStepCountingFloorMs,
-  getStepWindow,
+  getStepCountingStartMs,
   getStepWindowPhase,
   getWindowStepCount,
+  type StepWindow,
 } from './src/stepWindow';
 import {
   cancelNotificationIfPresent,
@@ -684,13 +684,13 @@ function AlarmApp() {
     () => (ringingCycle ? null : getNextMonitoringCycle(alarms, nowMs)),
     [alarms, nowMs, ringingCycle],
   );
-  const stepWindow = useMemo(
+  const stepWindow = useMemo<StepWindow | null>(
     () =>
       monitoringCycle
-        ? getStepWindow(
-            monitoringCycle,
-            getStepCountingFloorMs(alarms, monitoringCycle),
-          )
+        ? {
+            startMs: getStepCountingStartMs(alarms, monitoringCycle),
+            dueAtMs: monitoringCycle.dueAtMs,
+          }
         : null,
     [alarms, monitoringCycle],
   );

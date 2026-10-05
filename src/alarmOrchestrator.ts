@@ -179,6 +179,9 @@ export async function processStepThresholdFailSafe(
       checkInNotificationId: activeAlarm.checkInNotificationId,
       armedAtMs: activeAlarm.armedAtMs,
       dueAtMs: activeAlarm.dueAtMs,
+      // Rejects steps another suppression already used, even after that
+      // suppressed cycle has been pruned from storage.
+      stepCountFromMs: activeAlarm.stepCountFromMs,
     },
     {
       kind: 'STEP_THRESHOLD_REACHED',
