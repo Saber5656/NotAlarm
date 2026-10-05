@@ -10,11 +10,12 @@ import type {
   StoredAlarmDefinition,
 } from '../src/alarmStorage';
 import {
-  BEDSIDE_GUIDANCE,
   KEEP_AWAKE_LOOKAHEAD_MS,
+  getBedsideGuidance,
   isForegroundAppState,
   shouldKeepScreenAwake,
 } from '../src/bedsideMode';
+import type { NotificationDeliveryState } from '../src/notificationDelivery';
 import { BEDSIDE_FOOTER_COLORS } from '../src/ui/tokens';
 
 const NOW = new Date(2026, 9, 5, 22, 0, 0).getTime();
@@ -186,16 +187,85 @@ describe('isForegroundAppState', () => {
   });
 });
 
-describe('BEDSIDE_GUIDANCE', () => {
-  test('tells the user to keep the app open while charging', () => {
-    assert.match(BEDSIDE_GUIDANCE.title, /アプリを開いたまま/);
-    assert.match(BEDSIDE_GUIDANCE.title, /充電/);
+describe('getBedsideGuidance', () => {
+  const ALL_STATES: Array<NotificationDeliveryState | null> = [
+    'ok',
+    'off',
+    'silent',
+    'unknown',
+    null,
+  ];
+
+  test('tells the user to keep the app on screen, not merely open, while charging', () => {
+    for (const state of ALL_STATES) {
+      const { title } = getBedsideGuidance(state);
+      assert.equal(
+        title,
+        '寝るときはアプリを画面に表示したまま充電してください',
+        `state ${state}`,
+      );
+      // 「開いたまま」 reads as satisfied after locking the screen by habit.
+      assert.doesNotMatch(title, /開いたまま/);
+    }
   });
 
-  test('states what is lost when the app is closed instead of promising an alarm', () => {
-    assert.match(BEDSIDE_GUIDANCE.detail, /閉じると/);
-    assert.match(BEDSIDE_GUIDANCE.detail, /通知音1回だけ/);
-    assert.match(BEDSIDE_GUIDANCE.detail, /歩数確認なし/);
+  test('names screen lock as well as closing the app as what breaks the alarm', () => {
+    for (const state of ALL_STATES) {
+      const { detail } = getBedsideGuidance(state);
+      assert.match(detail, /^画面ロック・アプリを閉じると/, `state ${state}`);
+    }
+  });
+
+  test('with notifications delivered, states the single notification sound and no step check', () => {
+    assert.equal(
+      getBedsideGuidance('ok').detail,
+      '画面ロック・アプリを閉じると通知音1回だけ・歩数確認なし',
+    );
+  });
+
+  test('never promises a notification sound when delivery is off, silent or unknown', () => {
+    assert.equal(
+      getBedsideGuidance('off').detail,
+      '画面ロック・アプリを閉じると鳴りません',
+    );
+    assert.equal(
+      getBedsideGuidance('silent').detail,
+      '画面ロック・アプリを閉じると音が出ません',
+    );
+    assert.equal(
+      getBedsideGuidance('unknown').detail,
+      '画面ロック・アプリを閉じると鳴るか確認できません',
+    );
+    for (const state of ['off', 'silent', 'unknown'] as const) {
+      assert.doesNotMatch(getBedsideGuidance(state).detail, /通知音/);
+    }
+  });
+
+  test('before the first permission check nothing is promised either', () => {
+    // `null` means not checked yet (and stays so on web).
+    assert.deepEqual(getBedsideGuidance(null), getBedsideGuidance('unknown'));
+  });
+
+  test('the keep-awake failure notice follows the same delivery state', () => {
+    assert.equal(
+      getBedsideGuidance('ok').keepAwakeFailure,
+      '画面を点けたままにできませんでした。画面が消えるとアラームは通知音1回だけ・歩数確認なしになるため、端末の自動ロックをオフにしてください。',
+    );
+    assert.equal(
+      getBedsideGuidance('off').keepAwakeFailure,
+      '画面を点けたままにできませんでした。画面が消えるとアラームが鳴らないため、端末の自動ロックをオフにしてください。',
+    );
+    assert.equal(
+      getBedsideGuidance('silent').keepAwakeFailure,
+      '画面を点けたままにできませんでした。画面が消えるとアラームの音が出ないため、端末の自動ロックをオフにしてください。',
+    );
+    assert.equal(
+      getBedsideGuidance('unknown').keepAwakeFailure,
+      '画面を点けたままにできませんでした。画面が消えるとアラームが鳴るか確認できないため、端末の自動ロックをオフにしてください。',
+    );
+    for (const state of ['off', 'silent', 'unknown', null] as const) {
+      assert.doesNotMatch(getBedsideGuidance(state).keepAwakeFailure, /通知音/);
+    }
   });
 });
 

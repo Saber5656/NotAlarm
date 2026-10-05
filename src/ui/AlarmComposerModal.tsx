@@ -22,7 +22,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { RepeatKind, Weekday } from '../alarmSchedule';
 import { parseAlarmTimeInput } from '../alarmTime';
-import { BEDSIDE_GUIDANCE } from '../bedsideMode';
+import type { BedsideGuidance } from '../bedsideMode';
 import {
   doesComposerContentOverflow,
   getWeekdayColumnCount,
@@ -37,6 +37,8 @@ import { LiquidRepeatSelector } from './LiquidRepeatSelector';
 import { UI_COLORS } from './tokens';
 
 interface AlarmComposerModalProps {
+  /** Same copy as the main-screen footer, for the current delivery state. */
+  bedsideGuidance: BedsideGuidance;
   canSubmit: boolean;
   customWeekdays: Weekday[];
   formNotice?: {
@@ -81,6 +83,7 @@ function sanitizeClockInput(value: string): string {
 }
 
 export function AlarmComposerModal({
+  bedsideGuidance,
   canSubmit,
   customWeekdays,
   formNotice,
@@ -623,7 +626,7 @@ export function AlarmComposerModal({
                         アラームの60分前から、アプリを画面に表示している間に数えます。対象のアラームだけを停止し、ほかの時刻には影響しません。
                       </Text>
                       <Text style={styles.behaviorBedside}>
-                        {BEDSIDE_GUIDANCE.title}。{BEDSIDE_GUIDANCE.detail}。
+                        {bedsideGuidance.title}。{bedsideGuidance.detail}。
                       </Text>
                     </View>
                   </View>
