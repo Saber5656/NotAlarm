@@ -373,6 +373,50 @@ test('a refill reports a problem once until it goes away', () => {
   assert.equal(recurred.hasNew, true);
 });
 
+test('the main notification is told whether the alarm repeats', async () => {
+  const now = new Date(2026, 7, 20, 6, 0, 0).getTime();
+  const cases = [
+    { repeat: makeAlarmRepeat('today', now), repeats: false },
+    { repeat: makeAlarmRepeat('daily', now), repeats: true },
+    { repeat: makeAlarmRepeat('weekdays', now), repeats: true },
+    { repeat: makeAlarmRepeat('custom', now, [1, 3]), repeats: true },
+  ];
+
+  for (const { repeat, repeats } of cases) {
+    const seen: boolean[] = [];
+    const gateway: AlarmSchedulingGateway = {
+      scheduleMain: async (input) => {
+        seen.push(input.repeats);
+        return `main-${input.cycleId}`;
+      },
+      scheduleCheckIn: async ({ cycleId }) => `check-${cycleId}`,
+    };
+    let sequence = 0;
+
+    await fillAlarmDefinitionSchedule(
+      {
+        id: 'alarm-1',
+        hour: 7,
+        minute: 0,
+        repeat,
+        enabled: true,
+        createdAtMs: now,
+        cycles: [],
+      },
+      now,
+      gateway,
+      () => `cycle-${++sequence}`,
+    );
+
+    assert.ok(seen.length > 0, repeat.kind);
+    assert.deepEqual(
+      seen,
+      seen.map(() => repeats),
+      repeat.kind,
+    );
+  }
+});
+
 function issue(
   kind: AlarmScheduleIssue['kind'],
   alarmId: string,

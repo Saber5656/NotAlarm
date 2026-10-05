@@ -79,6 +79,7 @@ test('main notification is scheduled before the check-in notification', async ()
     cycleId: 'cycle-1',
     dueAtMs: 100_000,
     checkInAtMs: 40_000,
+    repeats: true,
   });
 
   assert.deepEqual(calls, [
@@ -110,6 +111,7 @@ test('a check-in scheduling failure preserves the scheduled main alarm', async (
     cycleId: 'cycle-1',
     dueAtMs: 100_000,
     checkInAtMs: 40_000,
+    repeats: true,
   });
 
   assert.deepEqual(calls, ['main', 'check-in']);
@@ -136,10 +138,34 @@ test('a main scheduling failure never attempts to schedule a check-in', async ()
       cycleId: 'cycle-1',
       dueAtMs: 100_000,
       checkInAtMs: 40_000,
+      repeats: true,
     }),
     /main unavailable/,
   );
   assert.equal(checkInAttempted, false);
+});
+
+test('the main notification receives whether the alarm repeats', async () => {
+  for (const repeats of [true, false]) {
+    const seen: boolean[] = [];
+    const gateway: AlarmSchedulingGateway = {
+      scheduleMain: async (input) => {
+        seen.push(input.repeats);
+        return 'main-id';
+      },
+      scheduleCheckIn: async () => 'check-in-id',
+    };
+
+    await scheduleAlarmNotificationsFailSafe(gateway, {
+      alarmId: 'alarm-1',
+      cycleId: 'cycle-1',
+      dueAtMs: 100_000,
+      checkInAtMs: 40_000,
+      repeats,
+    });
+
+    assert.deepEqual(seen, [repeats]);
+  }
 });
 
 test('a fully matching awake response cancels then saves suppressed state', async () => {

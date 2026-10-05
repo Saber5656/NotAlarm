@@ -183,6 +183,7 @@ export async function fillAlarmDefinitionSchedule(
         cycleId,
         dueAtMs,
         checkInAtMs: getCheckInAtMs(dueAtMs, armedAtMs),
+        repeats: definition.repeat.kind !== 'today',
       });
 
       const cycle: StoredAlarm = {
