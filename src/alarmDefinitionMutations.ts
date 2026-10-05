@@ -1,4 +1,5 @@
 import type { StoredAlarmDefinition } from './alarmStorage';
+import { mergeWindowStepCount } from './stepWindow';
 
 export type MonitoringStepUpdateStatus =
   | 'updated'
@@ -15,8 +16,9 @@ export function updateMonitoringCycleStepCount(
   alarmId: string,
   cycleId: string,
   stepCount: number,
+  countedFromMs: number,
 ): MonitoringStepUpdateResult {
-  if (!Number.isFinite(stepCount)) {
+  if (!Number.isFinite(stepCount) || !Number.isFinite(countedFromMs)) {
     throw new Error('歩数が不正です。');
   }
 
@@ -39,7 +41,7 @@ export function updateMonitoringCycleStepCount(
       }
       return {
         ...cycle,
-        stepCount: Math.max(cycle.stepCount, stepCount),
+        ...mergeWindowStepCount(cycle, stepCount, countedFromMs),
       };
     }),
   }));

@@ -167,6 +167,7 @@ test('100 fresh steps cancel then save suppressed state', async () => {
   const result = await processStepThresholdFailSafe(dependencies, {
     steps: 100,
     observedAtMs: 50_000,
+    countedFromMs: activeAlarm.armedAtMs,
   });
 
   assert.deepEqual(calls, [
@@ -176,7 +177,67 @@ test('100 fresh steps cancel then save suppressed state', async () => {
   ]);
   assert.equal(result.status, 'suppressed');
   assert.equal(saved[0]?.stepCount, 100);
+  assert.equal(saved[0]?.stepCountFromMs, activeAlarm.armedAtMs);
   assert.equal(saved[0]?.confirmedAtMs, 50_000);
+});
+
+test('the suppressed cycle keeps only step progress from the same window', async (t) => {
+  const scenarios = [
+    {
+      name: 'same window keeps the larger count',
+      alarm: { ...activeAlarm, stepCount: 140, stepCountFromMs: 1_000 },
+      stepCount: 140,
+    },
+    {
+      name: 'an older window is replaced',
+      alarm: { ...activeAlarm, stepCount: 140, stepCountFromMs: 500 },
+      stepCount: 100,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const { dependencies, saved } = createResponseDependencies({
+        alarm: scenario.alarm,
+      });
+      const result = await processStepThresholdFailSafe(dependencies, {
+        steps: 100,
+        observedAtMs: 50_000,
+        countedFromMs: 1_000,
+      });
+
+      assert.equal(result.status, 'suppressed');
+      assert.equal(saved[0]?.stepCount, scenario.stepCount);
+      assert.equal(saved[0]?.stepCountFromMs, 1_000);
+    });
+  }
+});
+
+test('100 steps counted before the 60-minute window never cancel', async () => {
+  const minute = 60_000;
+  const dueAtMs = 1_790_000_000_000;
+  const { calls, dependencies, saved } = createResponseDependencies({
+    alarm: {
+      ...activeAlarm,
+      // Scheduled two days ahead, as repeat cycles are.
+      armedAtMs: dueAtMs - 48 * 60 * minute,
+      dueAtMs,
+    },
+  });
+
+  const result = await processStepThresholdFailSafe(dependencies, {
+    steps: 100,
+    // Counted from 21:00 and observed at 21:30 the previous evening.
+    observedAtMs: dueAtMs - 9.5 * 60 * minute,
+    countedFromMs: dueAtMs - 10 * 60 * minute,
+  });
+
+  assert.deepEqual(result, {
+    status: 'alarm_remains',
+    reason: 'STEP_COUNT_OUTSIDE_WINDOW',
+  });
+  assert.deepEqual(calls, ['load']);
+  assert.deepEqual(saved, []);
 });
 
 test('99 steps never attempt cancellation', async () => {
@@ -185,6 +246,7 @@ test('99 steps never attempt cancellation', async () => {
   const result = await processStepThresholdFailSafe(dependencies, {
     steps: 99,
     observedAtMs: 50_000,
+    countedFromMs: activeAlarm.armedAtMs,
   });
 
   assert.deepEqual(result, {
@@ -201,6 +263,7 @@ test('100 steps at the due time never cancel', async () => {
   const result = await processStepThresholdFailSafe(dependencies, {
     steps: 100,
     observedAtMs: activeAlarm.dueAtMs,
+    countedFromMs: activeAlarm.armedAtMs,
   });
 
   assert.deepEqual(result, {
@@ -218,6 +281,7 @@ test('unverified step cancellation never saves suppressed state', async () => {
   const result = await processStepThresholdFailSafe(dependencies, {
     steps: 100,
     observedAtMs: 50_000,
+    countedFromMs: activeAlarm.armedAtMs,
   });
 
   assert.deepEqual(result, {
