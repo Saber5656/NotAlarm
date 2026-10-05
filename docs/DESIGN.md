@@ -284,7 +284,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 警告 card は次回アラーム card を置き換える danger 状態であり、閉じられない。配色は鳴動 card の danger tone を流用し、Dynamic Type で文言を切らないため140pt最小高から拡張する。
 - 次回周期がない場合（オンだが予約なし）も、日付を除いた文言で警告する。
 - `設定を開く`（`accessibilityRole="button"`、44pt以上）は `Linking.openSettings()` を呼ぶ。Expo Go では Expo Go の設定画面が開く。失敗時は danger notice を出す。
-- 通知なしで鳴らせるのはアプリ表示中の端末内ループ音だけであり、アプリを閉じた場合に加えて画面ロック・ほかのアプリへの切替でも止まる（11.2）。そのため `off` / `silent` の文言は「アプリを画面に表示したままにしていないと」鳴らない（音が出ない）、行は「アプリ表示中のみ」とし、「アプリを閉じていると」に限定しない。表示中は鳴るため、常に鳴らないとも表示しない。
+- 通知なしで鳴らせるのは端末内ループ音だけであり、ループ音は期限の時点でアプリが画面に表示されている間にしか鳴り始められない（`ringing` への移行と再生開始は JS の1秒 tick で行うため、アプリを閉じている・画面ロック中・ほかのアプリが前面の間は鳴り始めない。11.2）。一度鳴り始めたループ音は、`setAudioModeAsync` の `shouldPlayInBackground` と `expo-audio` config plugin の `enableBackgroundPlayback` により、その後に画面ロック・アプリ切替をしても停止するまで background で鳴り続ける。そのため `off` / `silent` の文言は「アプリを画面に表示したままにしていないと」鳴らない（音が出ない）、行は「アプリ表示中のみ」とし、「アプリを閉じていると」に限定しない。表示中は鳴るため、常に鳴らないとも表示しない。
 - 鳴動中は鳴動 card を優先し、各行の警告だけを表示する。
 - 配送状態はアラーム周期の状態を変更しない。`off` でも予約・保存済み周期を解除しない。
 
@@ -304,6 +304,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 ライフサイクル（`App.tsx`）:
 
 - 条件が true かつアプリが前面にある間だけ `activateKeepAwakeAsync('already-up/bedside')` を呼び、条件が false になった時・前面でなくなった時・unmount 時に同じ tag で `deactivateKeepAwake` を呼ぶ。他の keep-awake 利用（Expo の開発用 tag など）とは tag で分離する。
+- 開発モード（`expo start` の dev bundle）では、Expo の `registerRootComponent` が `withDevTools` 経由で `useKeepAwake(ExpoKeepAwakeTag)` をセッション全体で有効にする。tag が別なので bedside の解除はこれを解除せず、上の条件に関係なく画面は消えない。条件どおりの動作は production の JS bundle（`npx expo start --no-dev --minify` を Expo Go で読み込む）でだけ確認できる（BED-05）。
 - 前面の判定は `isForegroundAppState`。`background` だけを前面外とし、`active`、`inactive`（iOS の Control Center 表示・着信 overlay 中など）、読み取れない状態は前面とみなす。誤って画面を消すより、画面を点けたままにする方を安全側とする。`active` に戻るたびに再取得する。
 - Web では呼ばない。activate の失敗はアプリを止めず、warning notice `getBedsideGuidance(配送状態).keepAwakeFailure`（下の就寝案内の表）を表示する。文言は失敗した時点の最新の配送状態で決め、配送状態の変化で keep-awake を掛け直さない。deactivate の失敗は無視する。
 - 画面の明るさは変更しない。手動ロック、ほかのアプリへの切替、着信などによる中断は防げない。
@@ -393,7 +394,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | BED-02 | アラームなし / オフの定義だけ / 24時間より1ms以上先だけ / `suppressed`・`dismissed` だけ | false |
 | BED-03 | `AppState` が `background` / `active` / `inactive` / 不明 | `background` だけ画面スリープ防止を解除する |
 | BED-04 | 就寝案内 footer の文字色 | 背景写真が白・黒のどちらでも 4.5:1 以上 |
-| BED-05 | Expo Go 実機で一覧を表示したまま、自動ロック時間を過ぎるまで待つ | 24時間以内にオンのアラームがあれば画面が消えない。すべてオフにする・停止後に24時間より先だけになると自動ロックに戻る（実機確認が必要） |
+| BED-05 | Expo Go 実機で production の JS bundle（`npx expo start --no-dev --minify`）を読み込み、一覧を表示したまま自動ロック時間を過ぎるまで待つ | 24時間以内にオンのアラームがあれば画面が消えない。すべてオフにする・停止後に24時間より先だけになると自動ロックに戻る（実機確認が必要）。`npx expo start` の dev bundle では Expo の `withDevTools` がセッション中ずっと画面を点けたままにするため、この確認に使えない |
 | BED-06 | iPhone SE（667pt）を含む画面高、Dynamic Type 標準〜最大（`fontScale > 1.3` の画面スクロールを含む） | footer がスクロールせずに初期表示で見え、上のコンテンツ（一覧 panel またはスクロール領域）が縮む。footer は操作要素に重ならず、文字を省略せず、画面からはみ出さない（実機確認が必要） |
 | BED-07 | 配送状態 `ok` / `off` / `silent` / `unknown`・未確認（`null`） | `getBedsideGuidance` の1行目は常に「…画面に表示したまま…」。2行目は「画面ロック・アプリを閉じると」に続けて「通知音1回だけ・歩数確認なし」/「鳴りません」/「音が出ません」/「鳴るか確認できません」。`ok` 以外の2行目と keep-awake 失敗 notice は通知音に触れない |
 
