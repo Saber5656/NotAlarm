@@ -284,7 +284,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 警告 card は次回アラーム card を置き換える danger 状態であり、閉じられない。配色は鳴動 card の danger tone を流用し、Dynamic Type で文言を切らないため140pt最小高から拡張する。
 - 次回周期がない場合（オンだが予約なし）も、日付を除いた文言で警告する。
 - `設定を開く`（`accessibilityRole="button"`、44pt以上）は `Linking.openSettings()` を呼ぶ。Expo Go では Expo Go の設定画面が開く。失敗時は danger notice を出す。
-- 通知なしで鳴らせるのは端末内ループ音だけであり、ループ音は期限の時点でアプリが画面に表示されている間にしか鳴り始められない（`ringing` への移行と再生開始は JS の1秒 tick で行うため、アプリを閉じている・画面ロック中・ほかのアプリが前面の間は鳴り始めない。11.2）。一度鳴り始めたループ音は、`setAudioModeAsync` の `shouldPlayInBackground` と `expo-audio` config plugin の `enableBackgroundPlayback` により、その後に画面ロック・アプリ切替をしても停止するまで background で鳴り続ける。そのため `off` / `silent` の文言は「アプリを画面に表示したままにしていないと」鳴らない（音が出ない）、行は「アプリ表示中のみ」とし、「アプリを閉じていると」に限定しない。表示中は鳴るため、常に鳴らないとも表示しない。
+- 通知なしで鳴らせるのは端末内ループ音だけであり、ループ音は期限の時点でアプリが画面に表示されている間にしか鳴り始められない（`ringing` への移行と再生開始は JS の1秒 tick で行うため、アプリを閉じている・画面ロック中・ほかのアプリが前面の間は鳴り始めない。11.2）。一度鳴り始めたループ音は `setAudioModeAsync({ shouldPlayInBackground: true })` により background でも継続する設定とする。`expo-audio` config plugin の `enableBackgroundPlayback`（UIBackgroundModes への `audio` 追加）は prebuild / development build でのみ反映され、App Store 版 Expo Go では Expo Go 本体の Info.plist に依存する（Expo Go 57.0.9 の bundle は UIBackgroundModes に `audio` を含む）。画面ロック・アプリ切替の後も鳴り続けるかは Expo Go 実機で未確認（BED-08）。そのため `off` / `silent` の文言は「アプリを画面に表示したままにしていないと」鳴らない（音が出ない）、行は「アプリ表示中のみ」とし、「アプリを閉じていると」に限定しない。表示中は鳴るため、常に鳴らないとも表示しない。
 - 鳴動中は鳴動 card を優先し、各行の警告だけを表示する。
 - 配送状態はアラーム周期の状態を変更しない。`off` でも予約・保存済み周期を解除しない。
 
@@ -397,6 +397,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | BED-05 | Expo Go 実機で production の JS bundle（`npx expo start --no-dev --minify`）を読み込み、一覧を表示したまま自動ロック時間を過ぎるまで待つ | 24時間以内にオンのアラームがあれば画面が消えない。すべてオフにする・停止後に24時間より先だけになると自動ロックに戻る（実機確認が必要）。`npx expo start` の dev bundle では Expo の `withDevTools` がセッション中ずっと画面を点けたままにするため、この確認に使えない |
 | BED-06 | iPhone SE（667pt）を含む画面高、Dynamic Type 標準〜最大（`fontScale > 1.3` の画面スクロールを含む） | footer がスクロールせずに初期表示で見え、上のコンテンツ（一覧 panel またはスクロール領域）が縮む。footer は操作要素に重ならず、文字を省略せず、画面からはみ出さない（実機確認が必要） |
 | BED-07 | 配送状態 `ok` / `off` / `silent` / `unknown`・未確認（`null`） | `getBedsideGuidance` の1行目は常に「…画面に表示したまま…」。2行目は「画面ロック・アプリを閉じると」に続けて「通知音1回だけ・歩数確認なし」/「鳴りません」/「音が出ません」/「鳴るか確認できません」。`ok` 以外の2行目と keep-awake 失敗 notice は通知音に触れない |
+| BED-08 | Expo Go 実機でアプリ表示中にアラームを鳴らし、鳴動中に画面をロック・ほかのアプリへ切替する | ループ音が停止操作まで鳴り続ける（`shouldPlayInBackground` と Expo Go 本体の background audio に依存。実機確認が必要） |
 
 ## 14. 参照資料
 
