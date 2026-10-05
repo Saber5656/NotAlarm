@@ -79,9 +79,11 @@ const WARNING_TITLES: Record<Exclude<NotificationDeliveryState, 'ok'>, string> =
   unknown: '通知の状態を確認できません',
 };
 
-// Without notifications only the in-app loop sound can ring, and it stops as
-// soon as the app leaves the screen (closed, screen locked, another app in
-// front). Off / silent therefore name staying on screen, not only closing.
+// Without notifications only the in-app loop sound can ring, and it can only
+// start while the app is on screen: at the due time a closed app, a locked
+// screen or another app in front means it never starts (once started it keeps
+// playing in the background). Off / silent therefore name staying on screen,
+// not only closing.
 const WARNING_CONSEQUENCES: Record<
   Exclude<NotificationDeliveryState, 'ok'>,
   { reason: string; withNext: string; withoutNext: string }
