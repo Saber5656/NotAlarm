@@ -84,8 +84,8 @@ import {
   stopForegroundAlarmSound,
 } from './src/alarmSound';
 import {
-  BEDSIDE_GUIDANCE,
   BEDSIDE_KEEP_AWAKE_TAG,
+  getBedsideGuidance,
   isForegroundAppState,
   shouldKeepScreenAwake,
 } from './src/bedsideMode';
@@ -201,8 +201,9 @@ async function recoverPendingAlarmCancellations(): Promise<void> {
 }
 
 const ALARM_SUMMARY_CARD_HEIGHT = 140;
-// The bedside guidance follows Dynamic Type up to 2x; larger sizes already
-// switch the whole screen to scrolling.
+// The bedside guidance is pinned below the scrolling content and follows
+// Dynamic Type up to 2x, so at the largest sizes it still leaves the content
+// (which scrolls above `fontScale > 1.3`) most of the screen.
 const FOOTER_MAX_FONT_SCALE = 2;
 
 function makeAlarmId(): string {
@@ -697,6 +698,19 @@ function AlarmApp() {
     return () => subscription.remove();
   }, []);
 
+  // The bedside copy must not promise a notification sound that the current
+  // delivery state cannot make.
+  const bedsideGuidance = useMemo(
+    () => getBedsideGuidance(notificationDelivery),
+    [notificationDelivery],
+  );
+  // Read when activation fails, so the notice uses the latest delivery state
+  // without re-running (and releasing) the keep-awake effect.
+  const keepAwakeFailureTextRef = useRef(bedsideGuidance.keepAwakeFailure);
+  useEffect(() => {
+    keepAwakeFailureTextRef.current = bedsideGuidance.keepAwakeFailure;
+  }, [bedsideGuidance]);
+
   // Bedside mode: the loop sound and step check only run while the app is on
   // screen, so the screen stays on while an alarm is ringing or due soon.
   const keepScreenAwake =
@@ -714,7 +728,7 @@ function AlarmApp() {
       .catch(() => {
         setNotice({
           tone: 'warning',
-          text: '画面を点けたままにできませんでした。画面が消えるとアラームは通知音1回だけになるため、端末の自動ロックをオフにしてください。',
+          text: keepAwakeFailureTextRef.current,
         });
       });
     return () => {
@@ -1803,10 +1817,15 @@ function AlarmApp() {
         ) : null}
           </ScrollView>
         </View>
+      </ScreenFrame>
 
+      {/* Pinned outside the scrolling frame so it is visible on first view at
+          every text size; as a flex sibling it takes its height from the
+          content instead of covering it. */}
+      <View style={styles.footerDock}>
         <View
           accessible
-          accessibilityLabel={`${BEDSIDE_GUIDANCE.title}。${BEDSIDE_GUIDANCE.detail}`}
+          accessibilityLabel={`${bedsideGuidance.title}。${bedsideGuidance.detail}`}
           style={styles.footerNote}
           testID="bedside-guidance"
         >
@@ -1817,18 +1836,18 @@ function AlarmApp() {
               maxFontSizeMultiplier={FOOTER_MAX_FONT_SCALE}
               style={styles.footerTitle}
             >
-              {BEDSIDE_GUIDANCE.title}
+              {bedsideGuidance.title}
             </Text>
             <Text
               allowFontScaling
               maxFontSizeMultiplier={FOOTER_MAX_FONT_SCALE}
               style={styles.footerText}
             >
-              {BEDSIDE_GUIDANCE.detail}
+              {bedsideGuidance.detail}
             </Text>
           </View>
         </View>
-      </ScreenFrame>
+      </View>
 
       <NoticeBanner
         notice={isComposerOpen ? null : notice}
@@ -1836,6 +1855,7 @@ function AlarmApp() {
       />
 
       <AlarmComposerModal
+        bedsideGuidance={bedsideGuidance}
         canSubmit={canSubmitAlarm}
         customWeekdays={customWeekdays}
         formNotice={composerNotice}
@@ -1891,7 +1911,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 5,
+    paddingBottom: 6,
   },
   screenViewport: {
     flex: 1,
@@ -2383,12 +2403,18 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     fontWeight: '700',
   },
+  footerDock: {
+    width: '100%',
+    maxWidth: 620,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingBottom: 5,
+  },
   footerNote: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    marginTop: 6,
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 12,
