@@ -4,8 +4,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  type AlarmScheduleIssue,
   fillAlarmDefinitionSchedule,
+  getAlarmScheduleIssueKey,
   getAlarmScheduleIssueSeverity,
+  reconcileReportedScheduleProblems,
 } from '../src/alarmScheduling';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
 import type { AlarmSchedulingGateway } from '../src/alarmOrchestrator';
@@ -305,4 +308,65 @@ test('suppression before due refills three still-active future occurrences', asy
   );
   assert.equal(refilled.definition.cycles.length, 4);
   assert.equal(sequence, 4);
+});
+
+test('schedule issue keys ignore the regenerated cycle id and due time', () => {
+  const first: AlarmScheduleIssue = {
+    kind: 'main_schedule_failed',
+    alarmId: 'alarm-1',
+    cycleId: 'cycle-1',
+    dueAtMs: 1_000,
+    message: 'failed',
+  };
+  const retried: AlarmScheduleIssue = {
+    ...first,
+    cycleId: 'cycle-2',
+    dueAtMs: 2_000,
+  };
+  const checkIn: AlarmScheduleIssue = {
+    kind: 'check_in_schedule_failed',
+    alarmId: 'alarm-1',
+    cycleId: 'cycle-3',
+    dueAtMs: 3_000,
+    mainAlarmId: 'main-3',
+    message: 'failed',
+  };
+
+  assert.equal(getAlarmScheduleIssueKey(first), getAlarmScheduleIssueKey(retried));
+  assert.notEqual(getAlarmScheduleIssueKey(first), getAlarmScheduleIssueKey(checkIn));
+  assert.notEqual(
+    getAlarmScheduleIssueKey(first),
+    getAlarmScheduleIssueKey({ ...first, alarmId: 'alarm-2' }),
+  );
+});
+
+test('a refill reports a problem once until it goes away', () => {
+  const first = reconcileReportedScheduleProblems(new Set(), ['main:alarm-1']);
+  assert.equal(first.hasNew, true);
+  assert.deepEqual([...first.reported], ['main:alarm-1']);
+
+  const repeated = reconcileReportedScheduleProblems(first.reported, [
+    'main:alarm-1',
+  ]);
+  assert.equal(repeated.hasNew, false);
+  assert.deepEqual([...repeated.reported], ['main:alarm-1']);
+
+  const another = reconcileReportedScheduleProblems(repeated.reported, [
+    'main:alarm-1',
+    'check:alarm-2',
+  ]);
+  assert.equal(another.hasNew, true);
+  assert.deepEqual([...another.reported].sort(), [
+    'check:alarm-2',
+    'main:alarm-1',
+  ]);
+
+  const resolved = reconcileReportedScheduleProblems(another.reported, []);
+  assert.equal(resolved.hasNew, false);
+  assert.equal(resolved.reported.size, 0);
+
+  const recurred = reconcileReportedScheduleProblems(resolved.reported, [
+    'main:alarm-1',
+  ]);
+  assert.equal(recurred.hasNew, true);
 });

@@ -56,6 +56,29 @@ export async function prepareNotifications(): Promise<void> {
     );
   }
 
+  await registerAlarmNotificationTypes();
+}
+
+/**
+ * Like prepareNotifications, but never shows the permission prompt, so it can
+ * run whenever the app returns to the foreground. Returns false when
+ * notifications are not currently allowed.
+ */
+export async function prepareNotificationsIfGranted(): Promise<boolean> {
+  if (Platform.OS === 'web') {
+    return false;
+  }
+
+  const permission = await Notifications.getPermissionsAsync();
+  if (permission.status !== 'granted') {
+    return false;
+  }
+
+  await registerAlarmNotificationTypes();
+  return true;
+}
+
+async function registerAlarmNotificationTypes(): Promise<void> {
   await Notifications.setNotificationCategoryAsync(
     AWAKE_CHECKIN_CATEGORY,
     [
@@ -142,7 +165,10 @@ export async function scheduleMainAlarmNotification(input: {
   return Notifications.scheduleNotificationAsync({
     content: {
       title: '⏰ 起きる時間です',
-      body: '起床が確認できなかったため、アラームを鳴らしています。',
+      // Later occurrences are only reserved while the app runs, so users who
+      // stop alarms from the notification are told to open the app.
+      body:
+        '起床が確認できなかったため、アラームを鳴らしています。アプリを開くと次回以降の予約を続けます。',
       sound: 'default',
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
