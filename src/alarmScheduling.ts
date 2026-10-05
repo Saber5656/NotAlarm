@@ -64,6 +64,50 @@ export function reconcileReportedScheduleProblems(
   };
 }
 
+/**
+ * Tracks the alarms whose latest refill attempt left them short, so a row does
+ * not tell the user to open the app while the app is open and could not
+ * reserve later occurrences. An attempt replaces the earlier result for every
+ * alarm it covered: an alarm is short when the attempt reported any issue for
+ * it or skipped it (an unfinished stop/disable, or a refill that failed as a
+ * whole). Alarms the attempt did not cover keep their earlier result.
+ */
+export interface RefillAttempt {
+  attemptedAlarmIds: Iterable<string>;
+  issues: readonly AlarmScheduleIssue[];
+  skippedAlarmIds?: Iterable<string>;
+}
+
+export function recordRefillAttempt(
+  previous: ReadonlySet<string>,
+  attempt: RefillAttempt,
+): Set<string> {
+  const next = new Set(previous);
+  for (const alarmId of attempt.attemptedAlarmIds) {
+    next.delete(alarmId);
+  }
+  for (const issue of attempt.issues) {
+    next.add(issue.alarmId);
+  }
+  for (const alarmId of attempt.skippedAlarmIds ?? []) {
+    next.add(alarmId);
+  }
+  return next;
+}
+
+/** A refill that could not run at all leaves every enabled alarm short. */
+export function getSkippedRefillAttempt(
+  alarms: readonly StoredAlarmDefinition[],
+): RefillAttempt {
+  return {
+    attemptedAlarmIds: alarms.map((alarm) => alarm.id),
+    issues: [],
+    skippedAlarmIds: alarms
+      .filter((alarm) => alarm.enabled)
+      .map((alarm) => alarm.id),
+  };
+}
+
 export async function fillAlarmDefinitionSchedule(
   definition: StoredAlarmDefinition,
   nowMs: number,

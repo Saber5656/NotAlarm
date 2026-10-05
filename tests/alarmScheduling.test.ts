@@ -8,7 +8,9 @@ import {
   fillAlarmDefinitionSchedule,
   getAlarmScheduleIssueKey,
   getAlarmScheduleIssueSeverity,
+  getSkippedRefillAttempt,
   reconcileReportedScheduleProblems,
+  recordRefillAttempt,
 } from '../src/alarmScheduling';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
 import type { AlarmSchedulingGateway } from '../src/alarmOrchestrator';
@@ -369,4 +371,89 @@ test('a refill reports a problem once until it goes away', () => {
     'main:alarm-1',
   ]);
   assert.equal(recurred.hasNew, true);
+});
+
+function issue(
+  kind: AlarmScheduleIssue['kind'],
+  alarmId: string,
+): AlarmScheduleIssue {
+  return kind === 'main_schedule_failed'
+    ? { kind, alarmId, cycleId: 'cycle', dueAtMs: 1_000, message: 'failed' }
+    : {
+        kind,
+        alarmId,
+        cycleId: 'cycle',
+        dueAtMs: 1_000,
+        mainAlarmId: 'main',
+        message: 'failed',
+      };
+}
+
+test('a refill attempt records the alarms it reported an issue for', () => {
+  assert.deepEqual(
+    recordRefillAttempt(new Set(), {
+      attemptedAlarmIds: ['alarm-1', 'alarm-2', 'alarm-3'],
+      issues: [
+        issue('main_schedule_failed', 'alarm-1'),
+        issue('check_in_schedule_failed', 'alarm-3'),
+      ],
+    }),
+    new Set(['alarm-1', 'alarm-3']),
+  );
+});
+
+test('a refill attempt records the alarms it skipped', () => {
+  assert.deepEqual(
+    recordRefillAttempt(new Set(), {
+      attemptedAlarmIds: ['alarm-1', 'alarm-2'],
+      issues: [],
+      skippedAlarmIds: ['alarm-2'],
+    }),
+    new Set(['alarm-2']),
+  );
+});
+
+test('a successful refill clears the alarms it covered and keeps the others', () => {
+  const previous = new Set(['alarm-1', 'alarm-2']);
+
+  const next = recordRefillAttempt(previous, {
+    attemptedAlarmIds: ['alarm-1'],
+    issues: [],
+  });
+
+  assert.deepEqual(next, new Set(['alarm-2']));
+  assert.deepEqual(previous, new Set(['alarm-1', 'alarm-2']));
+});
+
+test('a refill attempt replaces the earlier result for the alarms it covered', () => {
+  assert.deepEqual(
+    recordRefillAttempt(new Set(['alarm-1']), {
+      attemptedAlarmIds: ['alarm-1', 'alarm-2'],
+      issues: [issue('main_schedule_failed', 'alarm-2')],
+    }),
+    new Set(['alarm-2']),
+  );
+});
+
+test('a refill that cannot run leaves every enabled alarm short', () => {
+  const now = new Date(2026, 7, 20, 6, 0, 0).getTime();
+  const alarm = (id: string, enabled: boolean): StoredAlarmDefinition => ({
+    id,
+    hour: 7,
+    minute: 0,
+    repeat: makeAlarmRepeat('daily', now),
+    enabled,
+    createdAtMs: now,
+    cycles: [],
+  });
+
+  const attempt = getSkippedRefillAttempt([
+    alarm('alarm-on', true),
+    alarm('alarm-off', false),
+  ]);
+
+  assert.deepEqual(
+    recordRefillAttempt(new Set(['alarm-off']), attempt),
+    new Set(['alarm-on']),
+  );
 });

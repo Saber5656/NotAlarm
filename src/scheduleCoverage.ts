@@ -50,9 +50,18 @@ export function describeScheduleCoverage(
   };
 }
 
+export interface ScheduleCoverageLineOptions {
+  /**
+   * The latest refill attempt for this alarm reported an issue or skipped it,
+   * so opening the app would not reserve the later occurrences either.
+   */
+  refillFailed?: boolean;
+}
+
 export function getScheduleCoverageLine(
   coverage: ScheduleCoverage,
   formatDate: (timestampMs: number) => string,
+  options: ScheduleCoverageLineOptions = {},
 ): ScheduleCoverageLine {
   switch (coverage.kind) {
     case 'off':
@@ -61,12 +70,15 @@ export function getScheduleCoverageLine(
       return { text: '予約がありません', isWarning: true };
     case 'scheduled': {
       const until = `${formatDate(coverage.lastDueAtMs)}まで予約済み`;
-      return coverage.isRunningLow
-        ? {
-            text: `${until}・アプリを開くと先の分を予約します`,
-            isWarning: true,
-          }
-        : { text: until, isWarning: false };
+      if (!coverage.isRunningLow) {
+        return { text: until, isWarning: false };
+      }
+      return {
+        text: options.refillFailed
+          ? `${until}・先の分を予約できませんでした`
+          : `${until}・アプリを開くと先の分を予約します`,
+        isWarning: true,
+      };
     }
   }
 }
