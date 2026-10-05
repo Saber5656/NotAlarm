@@ -22,6 +22,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { RepeatKind, Weekday } from '../alarmSchedule';
 import { parseAlarmTimeInput } from '../alarmTime';
+import { BEDSIDE_GUIDANCE } from '../bedsideMode';
 import {
   doesComposerContentOverflow,
   getWeekdayColumnCount,
@@ -621,6 +622,9 @@ export function AlarmComposerModal({
                       <Text style={styles.behaviorText}>
                         アラームの60分前から、アプリを画面に表示している間に数えます。対象のアラームだけを停止し、ほかの時刻には影響しません。
                       </Text>
+                      <Text style={styles.behaviorBedside}>
+                        {BEDSIDE_GUIDANCE.title}。{BEDSIDE_GUIDANCE.detail}。
+                      </Text>
                     </View>
                   </View>
                 </View>
@@ -1092,6 +1096,13 @@ const styles = StyleSheet.create({
     color: '#557274',
     fontSize: 11,
     lineHeight: 16,
+  },
+  behaviorBedside: {
+    marginTop: 4,
+    color: '#244A49',
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
   },
   formNotice: {
     marginBottom: 10,

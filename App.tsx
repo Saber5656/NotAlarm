@@ -1,3 +1,7 @@
+import {
+  activateKeepAwakeAsync,
+  deactivateKeepAwake,
+} from 'expo-keep-awake';
 import * as Notifications from 'expo-notifications';
 import { Pedometer } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
@@ -37,7 +41,7 @@ import {
   NoticeBanner,
   type AppNotice,
 } from './src/ui/NoticeBanner';
-import { UI_COLORS } from './src/ui/tokens';
+import { BEDSIDE_FOOTER_COLORS, UI_COLORS } from './src/ui/tokens';
 
 import {
   cancelAlarmDefinitionWithCheckpoints,
@@ -76,6 +80,12 @@ import {
   startForegroundAlarmSound,
   stopForegroundAlarmSound,
 } from './src/alarmSound';
+import {
+  BEDSIDE_GUIDANCE,
+  BEDSIDE_KEEP_AWAKE_TAG,
+  isForegroundAppState,
+  shouldKeepScreenAwake,
+} from './src/bedsideMode';
 import {
   type AlarmCancellationCompletion,
   type StoredAlarm,
@@ -187,6 +197,9 @@ async function recoverPendingAlarmCancellations(): Promise<void> {
 }
 
 const ALARM_SUMMARY_CARD_HEIGHT = 140;
+// The bedside guidance follows Dynamic Type up to 2x; larger sizes already
+// switch the whole screen to scrolling.
+const FOOTER_MAX_FONT_SCALE = 2;
 
 function makeAlarmId(): string {
   return `alarm-${Date.now().toString(36)}-${Math.random()
@@ -423,6 +436,9 @@ function AlarmApp() {
   const [pedometerStatus, setPedometerStatus] = useState(
     Platform.OS === 'web' ? '実機のみ対応' : '次のアラームを待機中',
   );
+  const [isAppForeground, setIsAppForeground] = useState(() =>
+    isForegroundAppState(AppState.currentState),
+  );
 
   const alarmsRef = useRef<StoredAlarmDefinition[]>([]);
   const responseInFlightRef = useRef<string | null>(null);
@@ -628,6 +644,40 @@ function AlarmApp() {
     refreshNotificationDelivery,
     setCurrentAlarms,
   ]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      setIsAppForeground(isForegroundAppState(state));
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // Bedside mode: the loop sound and step check only run while the app is on
+  // screen, so the screen stays on while an alarm is ringing or due soon.
+  const keepScreenAwake =
+    Platform.OS !== 'web' &&
+    isAppForeground &&
+    shouldKeepScreenAwake(alarms, nowMs);
+
+  useEffect(() => {
+    if (!keepScreenAwake) {
+      return;
+    }
+
+    void Promise.resolve()
+      .then(() => activateKeepAwakeAsync(BEDSIDE_KEEP_AWAKE_TAG))
+      .catch(() => {
+        setNotice({
+          tone: 'warning',
+          text: '画面を点けたままにできませんでした。画面が消えるとアラームは通知音1回だけになるため、端末の自動ロックをオフにしてください。',
+        });
+      });
+    return () => {
+      void Promise.resolve()
+        .then(() => deactivateKeepAwake(BEDSIDE_KEEP_AWAKE_TAG))
+        .catch(() => undefined);
+    };
+  }, [keepScreenAwake]);
 
   const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
   const monitoringCycle = useMemo(
@@ -1337,7 +1387,6 @@ function AlarmApp() {
       ? { text: notice.text, tone: notice.tone }
       : undefined;
   const useAccessibilityScreenScroll = fontScale > 1.3;
-  const useCompactHeightLayout = viewportHeight < 860;
   const accessibilityScreenMinHeight = Math.max(
     viewportHeight,
     Math.round(720 * Math.min(fontScale, 2)),
@@ -1704,14 +1753,30 @@ function AlarmApp() {
           </ScrollView>
         </View>
 
-        {!useCompactHeightLayout ? (
-          <View style={styles.footerNote}>
-            <View style={styles.footerDot} />
-            <Text style={styles.footerText}>
-              歩数判定はアプリ表示中のみ・通知音は端末設定に従います
+        <View
+          accessible
+          accessibilityLabel={`${BEDSIDE_GUIDANCE.title}。${BEDSIDE_GUIDANCE.detail}`}
+          style={styles.footerNote}
+          testID="bedside-guidance"
+        >
+          <View style={styles.footerDot} />
+          <View style={styles.footerCopy}>
+            <Text
+              allowFontScaling
+              maxFontSizeMultiplier={FOOTER_MAX_FONT_SCALE}
+              style={styles.footerTitle}
+            >
+              {BEDSIDE_GUIDANCE.title}
+            </Text>
+            <Text
+              allowFontScaling
+              maxFontSizeMultiplier={FOOTER_MAX_FONT_SCALE}
+              style={styles.footerText}
+            >
+              {BEDSIDE_GUIDANCE.detail}
             </Text>
           </View>
-        ) : null}
+        </View>
       </ScreenFrame>
 
       <NoticeBanner
@@ -2268,22 +2333,35 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   footerNote: {
-    minHeight: 25,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingTop: 7,
+    gap: 8,
+    marginTop: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: BEDSIDE_FOOTER_COLORS.backdrop,
   },
   footerDot: {
-    width: 5,
-    height: 5,
+    width: 6,
+    height: 6,
     borderRadius: 3,
     backgroundColor: '#91D8CC',
   },
+  footerCopy: {
+    flexShrink: 1,
+  },
+  footerTitle: {
+    color: BEDSIDE_FOOTER_COLORS.title,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
   footerText: {
-    color: 'rgba(255, 255, 255, 0.72)',
-    fontSize: 9,
+    color: BEDSIDE_FOOTER_COLORS.detail,
+    fontSize: 11,
+    lineHeight: 15,
     fontWeight: '600',
   },
 });

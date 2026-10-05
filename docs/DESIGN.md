@@ -20,6 +20,7 @@ AlreadyUp は、設定時刻に実際の音を鳴らし、期限前60分以内�
 - 期限直前の actionable notification
 - 対象周期だけを cancel する fail-safe policy
 - foreground ループ音
+- 就寝時の正式手順（アプリを開いたまま充電）と、鳴動中・24時間以内の監視周期がある間の画面スリープ防止（11.2）
 - v1 単一アラーム保存形式から v2 複数形式への移行
 
 ### 含まない
@@ -268,12 +269,40 @@ background / terminated でアラームを鳴らせるのは OS の local notifi
 - 鳴動中は鳴動 card を優先し、各行の警告だけを表示する。
 - 配送状態はアラーム周期の状態を変更しない。`off` でも予約・保存済み周期を解除しない。
 
+### 11.2 就寝時の表示と画面スリープ防止（2026-10-05決定）
+
+Expo Go 配布のままでは、アプリを閉じる・画面がロックされると、アラームは main 通知の通知音1回だけになり、ループ音と歩数確認は動かない。owner 決定（2026-10-05）により、当面は「アプリを画面に表示したまま充電して寝る」ことを正式手順とし、監視中は画面を消さない。本番は自前ビルド（native alarm / AlarmKit 等）へ移行する（ALR-001）。配布方式と native config は変更しない。
+
+画面スリープ防止の条件は純粋関数 `shouldKeepScreenAwake(alarms, nowMs)`（`src/bedsideMode.ts`）で判定する。
+
+| 状態 | 画面を消さない |
+|---|---|
+| いずれかの周期が `ringing`（定義の `enabled` は問わない。鳴動 card とループ音が `enabled` に依存しないため） | する |
+| オンの定義に `armed` / `step_candidate` 周期があり、`dueAtMs <= now + 24時間`（`KEEP_AWAKE_LOOKAHEAD_MS`。ちょうど24時間後を含む） | する |
+| 上記のうち期限を過ぎた監視周期（1秒 tick で `ringing` へ移る直前） | する（移行前に画面が消えてアプリが止まるのを防ぐ） |
+| オンの監視周期が24時間より先だけ、オフの定義だけ、停止済み（`suppressed` / `dismissed`）周期だけ、アラームなし | しない（端末の自動ロック設定に従う） |
+
+ライフサイクル（`App.tsx`）:
+
+- 条件が true かつアプリが前面にある間だけ `activateKeepAwakeAsync('already-up/bedside')` を呼び、条件が false になった時・前面でなくなった時・unmount 時に同じ tag で `deactivateKeepAwake` を呼ぶ。他の keep-awake 利用（Expo の開発用 tag など）とは tag で分離する。
+- 前面の判定は `isForegroundAppState`。`background` だけを前面外とし、`active`、`inactive`（iOS の Control Center 表示・着信 overlay 中など）、読み取れない状態は前面とみなす。誤って画面を消すより、画面を点けたままにする方を安全側とする。`active` に戻るたびに再取得する。
+- Web では呼ばない。activate の失敗はアプリを止めず、warning notice「画面を点けたままにできませんでした。画面が消えるとアラームは通知音1回だけになるため、端末の自動ロックをオフにしてください。」を表示する。deactivate の失敗は無視する。
+- 画面の明るさは変更しない。手動ロック、ほかのアプリへの切替、着信などによる中断は防げない。
+
+就寝案内 footer:
+
+- メイン画面の最下部（一覧 panel の下）に、通常文字サイズ・小さい画面（iPhone SE の667pt を含む）・大きい文字のいずれでも常に表示する。1行目「寝るときはアプリを開いたまま充電してください」（12pt / 700）、2行目「閉じると通知音1回だけ・歩数確認なし」（11pt / 600）とし、11pt 未満にしない。文言は `BEDSIDE_GUIDANCE` に置き、追加フォームの100歩の説明にも同じ文言を1行追加する。
+- footer 全体を1つの accessibility 要素とし、2行をつないだ label を読み上げる。`allowFontScaling` を有効にし、`maxFontSizeMultiplier` は2とする（`fontScale > 1.3` では画面全体がスクロールするため、それ以上の拡大で一覧を圧迫しない）。幅が足りない場合は省略せず折り返す。
+- 背景写真の上に自前の backdrop（`rgba(6, 21, 45, 0.86)`、角丸12pt）を敷き、文字は `#FFFFFF` / `#C5CDD8` とする。写真が白・黒のどちらでも 4.5:1 以上のコントラストを保つことを unit test で確認する（`BEDSIDE_FOOTER_COLORS`）。
+- 高さが足りない画面では footer を隠さず、`flex: 1` の一覧 panel が縮む。一覧は内部スクロールで全件に到達できる。
+
 ## 12. Platform 制約
 
 | 制約 | 現行動作 |
 |---|---|
 | Pedometer background 非対応 | 起床確定にせず main を残す |
 | 歩数監視 window（2026-10-05決定） | 最も近い未来周期を、期限の60分前から foreground 中だけ監視する。前夜・日中の歩数と他周期の停止に使った歩数は数えない。background / terminated 中の判定は未対応で、確認できなければ main を残す |
+| アプリを閉じる / 画面ロック（Expo Go） | main 通知の通知音1回だけ。ループ音・歩数確認なし。就寝時はアプリを開いたまま充電する手順とし、表示中は鳴動中・24時間以内の監視周期がある間だけ画面を消さない（11.2）。手動ロック・アプリ切替は防げない |
 | 通知権限拒否 | 新規アラームを追加しない。既存のオンのアラームは解除せず、summary を閉じられない警告へ置き換え、各行に通知オフを表示する（11.1） |
 | 通知音オフ / provisional | 予約は維持し、`silent` 警告を表示する（11.1） |
 | 消音スイッチ / 音量 / Focus / Android の channel 単位の音設定 | 検出しない。`ok` 表示でも鳴動保証はない |
@@ -326,11 +355,18 @@ background / terminated でアラームを鳴らせるのは OS の local notifi
 | SCH-02 | 通知からの停止だけで2周期進めた後にアプリへ戻る（権限あり） | `active` で先3周期まで補充し、行が「…まで予約済み」に戻る（実機確認が必要） |
 | SCH-03 | 権限なしでアプリへ戻る | 補充も権限 prompt も行わない |
 | SCH-04 | 同じ予約失敗が続く状態でアプリへ繰り返し戻る | notice は最初の1回だけ。解消後の再発は再通知する |
+| BED-01 | 鳴動中（オフの定義を含む） / オンで23時間59分後・ちょうど24時間後の監視周期 / 期限を過ぎた監視周期 / `step_candidate` | `shouldKeepScreenAwake` が true |
+| BED-02 | アラームなし / オフの定義だけ / 24時間より1ms以上先だけ / `suppressed`・`dismissed` だけ | false |
+| BED-03 | `AppState` が `background` / `active` / `inactive` / 不明 | `background` だけ画面スリープ防止を解除する |
+| BED-04 | 就寝案内 footer の文字色 | 背景写真が白・黒のどちらでも 4.5:1 以上 |
+| BED-05 | Expo Go 実機で一覧を表示したまま、自動ロック時間を過ぎるまで待つ | 24時間以内にオンのアラームがあれば画面が消えない。すべてオフにする・停止後に24時間より先だけになると自動ロックに戻る（実機確認が必要） |
+| BED-06 | iPhone SE（667pt）を含む画面高、Dynamic Type 標準〜最大 | footer が常に表示され、一覧 panel が縮む。文字を省略せず、画面からはみ出さない（実機確認が必要） |
 
 ## 14. 参照資料
 
 - [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
+- [Expo KeepAwake — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/keep-awake/)
 - [Expo DateTimePicker — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/date-time-picker/)
 - [Expo LinearGradient — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/linear-gradient/)
 - [React Native 0.86 PanResponder](https://reactnative.dev/docs/0.86/panresponder)
