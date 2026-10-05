@@ -4,6 +4,7 @@ import {
 } from './alarmContracts';
 import { canSuppressAlarm, finalizeSuppression } from './alarmPolicy';
 import type { StoredAlarm } from './alarmStorage';
+import { mergeWindowStepCount } from './stepWindow';
 
 export interface AlarmSchedulingGateway {
   scheduleMain(input: {
@@ -89,6 +90,8 @@ export type AwakeResponseResult =
 export interface StepThresholdInput {
   steps: number;
   observedAtMs: number;
+  /** Start of the step window the total was counted from. */
+  countedFromMs: number;
 }
 
 export async function processAwakeResponseFailSafe(
@@ -181,6 +184,7 @@ export async function processStepThresholdFailSafe(
       kind: 'STEP_THRESHOLD_REACHED',
       steps: input.steps,
       observedAtMs: input.observedAtMs,
+      countedFromMs: input.countedFromMs,
     },
     input.observedAtMs,
   );
@@ -201,7 +205,7 @@ export async function processStepThresholdFailSafe(
   const suppressed: StoredAlarm = {
     ...activeAlarm,
     phase: 'suppressed',
-    stepCount: Math.max(activeAlarm.stepCount, input.steps),
+    ...mergeWindowStepCount(activeAlarm, input.steps, input.countedFromMs),
     stepCandidateRecorded: true,
     stepCandidateAtMs: input.observedAtMs,
     confirmedAtMs: input.observedAtMs,

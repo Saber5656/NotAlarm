@@ -41,6 +41,8 @@ export interface StoredAlarm {
   dueAtMs: number;
   phase: AlarmPhase;
   stepCount: number;
+  /** Start of the step window `stepCount` was counted from. */
+  stepCountFromMs?: number;
   stepCandidateAtMs?: number;
   confirmedAtMs?: number;
   stepCandidateRecorded: boolean;
@@ -252,6 +254,7 @@ export async function saveMonitoringCycleStepCount(
   alarmId: string,
   cycleId: string,
   stepCount: number,
+  countedFromMs: number,
 ): Promise<{
   alarms: StoredAlarmDefinition[];
   status: MonitoringStepUpdateStatus;
@@ -263,6 +266,7 @@ export async function saveMonitoringCycleStepCount(
       alarmId,
       cycleId,
       stepCount,
+      countedFromMs,
     );
     status = result.status;
     return result.alarms;
@@ -395,6 +399,9 @@ function isStoredAlarm(value: unknown, expectedAlarmId: string): value is Stored
     ) &&
     typeof alarm.stepCount === 'number' &&
     Number.isFinite(alarm.stepCount) &&
+    (alarm.stepCountFromMs === undefined ||
+      (typeof alarm.stepCountFromMs === 'number' &&
+        Number.isFinite(alarm.stepCountFromMs))) &&
     typeof alarm.stepCandidateRecorded === 'boolean'
   );
 }

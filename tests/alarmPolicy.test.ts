@@ -1,12 +1,13 @@
 /// <reference types="node" />
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 
 import {
   CHECK_IN_LEAD_MS,
   MIN_ARM_LEAD_MS,
   STEP_THRESHOLD,
+  STEP_WINDOW_LEAD_MS,
   type AlarmRecord,
   canSuppressAlarm,
   classifyStepEvidence,
@@ -49,24 +50,37 @@ test("alarm timing and wake thresholds are fixed", () => {
 });
 
 test("100 steps reaches the automatic suppression threshold", () => {
-  assert.deepEqual(classifyStepEvidence(99, 2_000), {
+  assert.deepEqual(classifyStepEvidence(99, 2_000, ARMED_AT_MS), {
     kind: "STEP_MONITORING",
     observedAtMs: 2_000,
     steps: 99,
+    countedFromMs: ARMED_AT_MS,
   });
-  assert.deepEqual(classifyStepEvidence(100, 2_000), {
+  assert.deepEqual(classifyStepEvidence(100, 2_000, ARMED_AT_MS), {
     kind: "STEP_THRESHOLD_REACHED",
     observedAtMs: 2_000,
     steps: 100,
+    countedFromMs: ARMED_AT_MS,
   });
 });
 
 test("invalid step samples become error evidence", () => {
-  assert.deepEqual(classifyStepEvidence(Number.NaN, 2_000), {
+  assert.deepEqual(classifyStepEvidence(Number.NaN, 2_000, ARMED_AT_MS), {
     kind: "ERROR",
     reason: "INVALID_STEP_SAMPLE",
   });
-  assert.deepEqual(classifyStepEvidence(-1, 2_000), {
+  assert.deepEqual(classifyStepEvidence(-1, 2_000, ARMED_AT_MS), {
+    kind: "ERROR",
+    reason: "INVALID_STEP_SAMPLE",
+  });
+});
+
+test("step samples without a valid counting start become error evidence", () => {
+  assert.deepEqual(classifyStepEvidence(100, 2_000, Number.NaN), {
+    kind: "ERROR",
+    reason: "INVALID_STEP_SAMPLE",
+  });
+  assert.deepEqual(classifyStepEvidence(100, 2_000, 2_001), {
     kind: "ERROR",
     reason: "INVALID_STEP_SAMPLE",
   });
@@ -74,14 +88,22 @@ test("invalid step samples become error evidence", () => {
 
 test("step evidence below 100 never suppresses the alarm", () => {
   assert.deepEqual(
-    canSuppressAlarm(activeAlarm, classifyStepEvidence(99, 5_000), 5_000),
+    canSuppressAlarm(
+      activeAlarm,
+      classifyStepEvidence(99, 5_000, ARMED_AT_MS),
+      5_000,
+    ),
     { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" },
   );
 });
 
 test("100 fresh steps authorize suppression", () => {
   assert.deepEqual(
-    canSuppressAlarm(activeAlarm, classifyStepEvidence(100, 5_000), 5_000),
+    canSuppressAlarm(
+      activeAlarm,
+      classifyStepEvidence(100, 5_000, ARMED_AT_MS),
+      5_000,
+    ),
     { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" },
   );
 });
@@ -90,7 +112,7 @@ test("stale or due-time step evidence never suppresses", () => {
   assert.deepEqual(
     canSuppressAlarm(
       activeAlarm,
-      classifyStepEvidence(100, ARMED_AT_MS - 1),
+      classifyStepEvidence(100, ARMED_AT_MS - 1, ARMED_AT_MS - 1),
       5_000,
     ),
     { canSuppress: false, reason: "STALE_STEP_EVIDENCE" },
@@ -98,11 +120,134 @@ test("stale or due-time step evidence never suppresses", () => {
   assert.deepEqual(
     canSuppressAlarm(
       activeAlarm,
-      classifyStepEvidence(100, DUE_AT_MS),
+      classifyStepEvidence(100, DUE_AT_MS, ARMED_AT_MS),
       DUE_AT_MS,
     ),
     { canSuppress: false, reason: "ALARM_DUE_OR_PAST" },
   );
+});
+
+describe("step counting window", () => {
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+  // Wall-clock labels below are relative to this arbitrary midnight.
+  const DAY_START = 1_790_000_000_000;
+  const at = (hours: number, minutes = 0) =>
+    DAY_START + hours * HOUR + minutes * MINUTE;
+  // A repeating 07:00 occurrence scheduled at 20:00 two evenings earlier.
+  const morningAlarm: AlarmRecord = {
+    cycleId: "cycle-0700",
+    mainAlarmId: "main-0700",
+    checkInNotificationId: "check-0700",
+    armedAtMs: at(-28),
+    dueAtMs: at(7),
+  };
+  const windowStartMs = at(7) - STEP_WINDOW_LEAD_MS;
+
+  test("lead is 60 minutes", () => {
+    assert.equal(STEP_WINDOW_LEAD_MS, 60 * MINUTE);
+    assert.equal(windowStartMs, at(6));
+  });
+
+  test("100 steps counted from 21:00 the previous evening cannot suppress a 07:00 alarm", () => {
+    assert.deepEqual(
+      canSuppressAlarm(
+        morningAlarm,
+        classifyStepEvidence(100, at(-3, 30), at(-3)),
+        at(-3, 30),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+  });
+
+  test("an evening walk observed inside the window still counts from outside it", () => {
+    assert.deepEqual(
+      canSuppressAlarm(
+        morningAlarm,
+        classifyStepEvidence(200, at(6, 30), at(-3)),
+        at(6, 30),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+  });
+
+  test("one walk cannot also suppress tomorrow's occurrence", () => {
+    const tomorrow: AlarmRecord = {
+      ...morningAlarm,
+      cycleId: "cycle-0700-tomorrow",
+      mainAlarmId: "main-0700-tomorrow",
+      dueAtMs: at(24 + 7),
+    };
+    assert.deepEqual(
+      canSuppressAlarm(
+        tomorrow,
+        classifyStepEvidence(200, at(6, 30), windowStartMs),
+        at(6, 30),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+  });
+
+  test("100 steps counted from exactly the window start are accepted", () => {
+    assert.deepEqual(
+      canSuppressAlarm(
+        morningAlarm,
+        classifyStepEvidence(100, at(6, 50), windowStartMs),
+        at(6, 50),
+      ),
+      { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" },
+    );
+  });
+
+  test("counting that starts one millisecond before the window is rejected", () => {
+    assert.deepEqual(
+      canSuppressAlarm(
+        morningAlarm,
+        classifyStepEvidence(100, at(6, 50), windowStartMs - 1),
+        at(6, 50),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+  });
+
+  test("counting that starts before armedAt is rejected", () => {
+    const armedLate: AlarmRecord = { ...morningAlarm, armedAtMs: at(6, 30) };
+    assert.deepEqual(
+      canSuppressAlarm(
+        armedLate,
+        classifyStepEvidence(100, at(6, 50), at(6)),
+        at(6, 50),
+      ),
+      { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" },
+    );
+    assert.deepEqual(
+      canSuppressAlarm(
+        armedLate,
+        classifyStepEvidence(100, at(6, 50), at(6, 30)),
+        at(6, 50),
+      ),
+      { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" },
+    );
+  });
+
+  test("threshold evidence without a valid counting start is rejected", () => {
+    const base = {
+      kind: "STEP_THRESHOLD_REACHED" as const,
+      observedAtMs: at(6, 50),
+      steps: 100,
+    };
+    const scenarios: WakeEvidence[] = [
+      base as unknown as WakeEvidence,
+      { ...base, countedFromMs: Number.NaN },
+      { ...base, countedFromMs: at(6, 51) },
+    ];
+    for (const evidence of scenarios) {
+      assert.deepEqual(canSuppressAlarm(morningAlarm, evidence, at(6, 50)), {
+        canSuppress: false,
+        reason: "STEP_COUNT_OUTSIDE_WINDOW",
+      });
+    }
+  });
 });
 
 test("unknown and error evidence never suppress the alarm", () => {

@@ -619,7 +619,7 @@ export function AlarmComposerModal({
                     <View style={styles.behaviorCopy}>
                       <Text style={styles.behaviorTitle}>100歩で起床を確認</Text>
                       <Text style={styles.behaviorText}>
-                        対象のアラームだけを停止し、ほかの時刻には影響しません。
+                        アラームの60分前から、アプリを画面に表示している間に数えます。対象のアラームだけを停止し、ほかの時刻には影響しません。
                       </Text>
                     </View>
                   </View>

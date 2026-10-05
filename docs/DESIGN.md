@@ -2,7 +2,7 @@
 
 ## 1. 目的と安全原則
 
-AlreadyUp は、設定時刻に実際の音を鳴らし、期限前に100歩の起床行動または本人の明示操作を確認できた場合だけ、対応する1周期のアラームを抑止する。
+AlreadyUp は、設定時刻に実際の音を鳴らし、期限前60分以内の100歩の起床行動または本人の明示操作を確認できた場合だけ、対応する1周期のアラームを抑止する。
 
 > 起きていると確定できない場合は、アラームを残す。
 
@@ -16,7 +16,7 @@ AlreadyUp は、設定時刻に実際の音を鳴らし、期限前に100歩の�
 - 今日だけ、毎日、平日、曜日指定
 - 設定ごとのオン／オフと削除
 - 各設定の先3周期を個別 local notification として予約
-- foreground Pedometer の100歩
+- 期限の60分前から数える foreground Pedometer の100歩
 - 期限直前の actionable notification
 - 対象周期だけを cancel する fail-safe policy
 - foreground ループ音
@@ -68,11 +68,14 @@ interface StoredAlarm {
   dueAtMs: number;
   phase: 'armed' | 'step_candidate' | 'suppressed' | 'ringing' | 'dismissed';
   stepCount: number;
+  stepCountFromMs?: number;
   stepCandidateAtMs?: number;
   confirmedAtMs?: number;
   stepCandidateRecorded: boolean;
 }
 ```
+
+`stepCount` は `stepCountFromMs` から数えた歩数である。`stepCountFromMs` がその周期の現在の歩数 window 開始時刻と一致しない場合（旧データで未設定の場合を含む）、保存済み `stepCount` は0として扱う。同じ開始時刻での更新は大きい方を保持し、異なる開始時刻での更新は新しい値で置き換えて `stepCountFromMs` も更新する。
 
 `alarmId` はユーザー設定、`cycleId` は特定日の特定時刻を識別する。通知 action の `cycleId`、保存済み `mainAlarmId`、check-in request ID の全てが一致しない限り cancel しない。
 
@@ -119,8 +122,11 @@ main を必ず先に登録する。check-in の登録に失敗しても main を
 ### 7.1 100歩
 
 - foreground で最も近い未来周期だけを監視する。
+- 歩数 window（2026-10-05決定）は `startMs = max(dueAtMs - 60分, armedAtMs, floorMs)` から `dueAtMs` 未満までとする。`floorMs` は他の周期（全設定）のうち `suppressed` かつ `confirmedAtMs < dueAtMs` の最新 `confirmedAtMs` であり、別周期の停止に使った歩数や確認済みの時間帯を再利用しない（例: 06:30 と 07:00 の設定）。一度保存した `stepCountFromMs` より window 開始を早めない。
+- window 開始前は Pedometer を購読せず、数えない。window 中は保存済みの window 歩数、iOS では `getStepCountAsync(startMs, now)` の大きい方を起点に、即時に1回評価してから `watchStepCount` の増分を加える。履歴取得の失敗は保存済み歩数へ fallback する。
 - 99歩以下は main を変更しない。
 - 100歩以上でも `armedAtMs <= observedAtMs < dueAtMs` を満たさない場合は拒否する。
+- 歩数証拠は数え始めた時刻 `countedFromMs` を持つ。`countedFromMs` が欠落・非有限、`dueAtMs - 60分` より前、`armedAtMs` より前、または `observedAtMs` より後の場合は `STEP_COUNT_OUTSIDE_WINDOW` で拒否する。
 - 保存済み `mainAlarmId` を cancel し、OS pending 一覧から消えたことを確認した場合だけ `suppressed` にする。
 - 別設定、別日、次の周期は変更しない。
 
@@ -177,7 +183,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - v2 key: `already-up/alarm-definitions/v2`
 - legacy key: `already-up/active-alarm/v1`
 - v2 は `{ version: 2, alarms }` として保存する。
-- ID 重複、時刻範囲、repeat rule、cycle shape、最大10件を load / save の両方で検証する。
+- ID 重複、時刻範囲、repeat rule、cycle shape、最大10件を load / save の両方で検証する。`stepCountFromMs` は任意項目で、存在する場合だけ有限の数値であることを検証する（未設定の旧データは有効）。
 - 全ての read-modify-write は直列 mutation queue 内で最新値を読み直し、通知応答・歩数更新・画面操作・起動時補充が互いの保存結果を古い snapshot で上書きしない。
 - v2 が存在せず valid な v1 がある場合、`today` definition 1件へ移行し、v2 保存成功後に v1 key を削除する。
 - malformed data では推測復旧せず、予約済み通知を勝手に解除しない。
@@ -185,7 +191,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 ## 11. UI 契約
 
 - 上部はブランド、画面タイトル、追加ボタンだけにし、prototype / presentation 表示を置かない。
-- 次回アラームは時刻、日付、残り時間、100歩進捗を表示する。
+- 次回アラームは時刻、日付、残り時間を表示する。歩数 window 開始前は進捗barを出さず「起床確認は HH:MM から」「アプリ表示中に100歩」と開始時刻を示し、window 中だけ「起床確認 N / 100歩」と進捗barを表示する。進捗は現在の window で数えた歩数だけを使う。
 - 通常文字サイズでは有効時 / idleのsummary cardを同じ140pt固定高とし、一覧の開始位置を動かさない。Dynamic Typeのアクセシビリティscroll時だけ、文字を切らないため同じ140pt最小高から内容に応じて拡張する。
 - 設定一覧は時刻、repeat label、次回日付、toggle、予約周期数、削除を表示する。
 - メイン画面は通常文字サイズでは外側を `View` として viewport 内に固定し、ページ全体をスクロールさせない。アラーム一覧だけを独立した `ScrollView` とし、件数が増えた場合もヘッダー、次回アラーム、追加導線、一覧panelの丸い下端をviewport内へ固定する。
@@ -207,7 +213,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | 制約 | 現行動作 |
 |---|---|
 | Pedometer background 非対応 | 起床確定にせず main を残す |
-| 歩数監視 window 未確定 | 最も近い未来周期を foreground 中に監視。日中歩行の混入防止は release gate |
+| 歩数監視 window（2026-10-05決定） | 最も近い未来周期を、期限の60分前から foreground 中だけ監視する。前夜・日中の歩数と他周期の停止に使った歩数は数えない。background / terminated 中の判定は未対応で、確認できなければ main を残す |
 | 通知権限拒否 | 新規アラームを追加しない |
 | check-in 登録失敗 | main を残し警告 |
 | main 登録失敗 | 周期を保存しない |
@@ -226,6 +232,13 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 | POL-02 | 期限前100歩 + cancel verified | 対象周期だけ suppress |
 | POL-03 | 期限時100歩 | main 優先 |
 | POL-04 | 古い cycle action | 現周期を維持 |
+| POL-05 | 前夜21:00から数えた100歩で07:00を評価 | `STEP_COUNT_OUTSIDE_WINDOW` で main を維持 |
+| POL-06 | 06:00（60分前ちょうど）から数えた100歩 | 07:00 周期だけ suppress |
+| POL-07 | window 開始の1ms前から数えた歩数、または翌日周期へ同じ歩数を適用 | 拒否して main を維持 |
+| POL-08 | window 内に予約された周期 | `armedAtMs` から数え、それより前の歩数は拒否 |
+| POL-09 | 06:30 を 06:10 に停止した後の 07:00 | 06:10 以降の歩数だけを数える |
+| POL-10 | window 開始と異なる `stepCountFromMs` の保存歩数 | 0 から数え直す。同じ開始時刻なら大きい方を保持 |
+| POL-11 | window 開始前 | Pedometer を購読せず、開始時刻を表示する |
 | REP-01 | 毎日 | 次の3日を計算 |
 | REP-02 | 金曜の平日設定 | 月・火・水を計算 |
 | REP-03 | 過去の今日だけ | 翌日へ繰り越さず拒否 |

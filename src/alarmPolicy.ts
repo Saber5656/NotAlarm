@@ -1,6 +1,8 @@
 export const STEP_THRESHOLD = 100;
 export const CHECK_IN_LEAD_MS = 60_000;
 export const MIN_ARM_LEAD_MS = 10_000;
+/** Steps count as wake evidence only from this long before the due time. */
+export const STEP_WINDOW_LEAD_MS = 60 * 60_000;
 
 /**
  * The minimum immutable identity and timing data needed to decide whether a
@@ -27,11 +29,15 @@ export type StepEvidence =
       kind: "STEP_MONITORING";
       observedAtMs: number;
       steps: number;
+      /** The instant from which `steps` was counted. */
+      countedFromMs: number;
     }
   | {
       kind: "STEP_THRESHOLD_REACHED";
       observedAtMs: number;
       steps: number;
+      /** The instant from which `steps` was counted. */
+      countedFromMs: number;
     }
   | {
       kind: "ERROR";
@@ -52,6 +58,7 @@ export type SuppressionRejectionReason =
   | "INVALID_STEP_TIME"
   | "STALE_STEP_EVIDENCE"
   | "STEP_AT_OR_AFTER_DUE"
+  | "STEP_COUNT_OUTSIDE_WINDOW"
   | "WRONG_CYCLE"
   | "WRONG_MAIN_ALARM"
   | "WRONG_CHECK_IN"
@@ -69,16 +76,20 @@ export type SuppressionOutcome = "SUPPRESSED" | "ALARM_REMAINS_ARMED";
 
 /**
  * Converts pedometer output into wake evidence. Reaching 100 steps is treated
- * as sufficient wake evidence for the active alarm cycle.
+ * as sufficient wake evidence for the active alarm cycle, provided the total
+ * was counted inside that cycle's window (checked by `canSuppressAlarm`).
  */
 export function classifyStepEvidence(
   steps: number,
   observedAtMs: number,
+  countedFromMs: number,
 ): StepEvidence {
   if (
     !Number.isFinite(steps) ||
     steps < 0 ||
-    !Number.isFinite(observedAtMs)
+    !Number.isFinite(observedAtMs) ||
+    !Number.isFinite(countedFromMs) ||
+    observedAtMs < countedFromMs
   ) {
     return { kind: "ERROR", reason: "INVALID_STEP_SAMPLE" };
   }
@@ -87,6 +98,7 @@ export function classifyStepEvidence(
     kind: steps >= STEP_THRESHOLD ? "STEP_THRESHOLD_REACHED" : "STEP_MONITORING",
     observedAtMs,
     steps,
+    countedFromMs,
   };
 }
 
@@ -102,9 +114,9 @@ export function getCheckInAtMs(dueAtMs: number, armedAtMs: number): number {
 /**
  * Fail-closed cancellation policy.
  *
- * A 100-step threshold observation or an explicit confirmation for the exact
- * active cycle may authorize cancellation. Unknown/error/stale evidence leaves
- * the alarm armed.
+ * A 100-step threshold observation counted inside the cycle's step window, or
+ * an explicit confirmation for the exact active cycle, may authorize
+ * cancellation. Unknown/error/stale evidence leaves the alarm armed.
  */
 export function canSuppressAlarm(
   record: AlarmRecord,
@@ -136,6 +148,9 @@ export function canSuppressAlarm(
     }
     if (confirmation.observedAtMs >= record.dueAtMs) {
       return { canSuppress: false, reason: "STEP_AT_OR_AFTER_DUE" };
+    }
+    if (!isCountedInsideStepWindow(record, confirmation)) {
+      return { canSuppress: false, reason: "STEP_COUNT_OUTSIDE_WINDOW" };
     }
     if (confirmation.steps < STEP_THRESHOLD) {
       return { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" };
@@ -205,6 +220,24 @@ export function finalizeSuppression(
   return decision.canSuppress && cancellationSucceeded === true
     ? "SUPPRESSED"
     : "ALARM_REMAINS_ARMED";
+}
+
+/**
+ * Steps walked before the window (for example the previous evening, or for an
+ * earlier occurrence) must never count toward this cycle's threshold.
+ */
+function isCountedInsideStepWindow(
+  record: AlarmRecord,
+  evidence: { observedAtMs: number; countedFromMs?: unknown },
+): boolean {
+  const { countedFromMs } = evidence;
+  return (
+    typeof countedFromMs === "number" &&
+    Number.isFinite(countedFromMs) &&
+    countedFromMs >= record.dueAtMs - STEP_WINDOW_LEAD_MS &&
+    countedFromMs >= record.armedAtMs &&
+    evidence.observedAtMs >= countedFromMs
+  );
 }
 
 function isValidAlarmRecord(record: AlarmRecord): boolean {

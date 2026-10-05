@@ -88,6 +88,12 @@ import {
   upsertPendingAlarmCancellation,
 } from './src/alarmStorage';
 import {
+  getStepCountingFloorMs,
+  getStepWindow,
+  getStepWindowPhase,
+  getWindowStepCount,
+} from './src/stepWindow';
+import {
   cancelNotificationIfPresent,
   cancelScheduledNotification,
   dismissDeliveredNotification,
@@ -326,7 +332,6 @@ function AlarmApp() {
   const responseInFlightRef = useRef<string | null>(null);
   const stepSuppressionInFlightRef = useRef(false);
   const dueTransitionInFlightRef = useRef(false);
-  const stepOffsetRef = useRef(0);
   const localMinuteKey = Math.floor(nowMs / 60_000);
   const circadianTheme = useMemo(
     () => getCircadianTheme(new Date(nowMs)),
@@ -489,6 +494,20 @@ function AlarmApp() {
     () => (ringingCycle ? null : getNextMonitoringCycle(alarms, nowMs)),
     [alarms, nowMs, ringingCycle],
   );
+  const stepWindow = useMemo(
+    () =>
+      monitoringCycle
+        ? getStepWindow(
+            monitoringCycle,
+            getStepCountingFloorMs(alarms, monitoringCycle),
+          )
+        : null,
+    [alarms, monitoringCycle],
+  );
+  const stepWindowPhase = stepWindow
+    ? getStepWindowPhase(stepWindow, nowMs)
+    : null;
+  const isStepWindowActive = stepWindowPhase === 'active';
 
   useEffect(() => {
     if (ringingCycle) {
@@ -664,14 +683,116 @@ function AlarmApp() {
   }, [setCurrentAlarms]);
 
   useEffect(() => {
-    if (Platform.OS === 'web' || !monitoringCycle) {
+    // Steps only count inside the hour before the alarm, so nothing is
+    // subscribed or counted before the window opens.
+    if (
+      Platform.OS === 'web' ||
+      !monitoringCycle ||
+      !stepWindow ||
+      !isStepWindowActive
+    ) {
       return;
     }
 
     let disposed = false;
     let subscription: ReturnType<typeof Pedometer.watchStepCount> | undefined;
-    stepOffsetRef.current = monitoringCycle.stepCount;
+    const countedFromMs = stepWindow.startMs;
 
+    const evaluateSteps = (steps: number) => {
+      if (disposed) {
+        return;
+      }
+      const observedAtMs = Date.now();
+      const current = getNextMonitoringCycle(alarmsRef.current, observedAtMs);
+      if (!current || current.cycleId !== monitoringCycle.cycleId) {
+        return;
+      }
+
+      const evidence = classifyStepEvidence(
+        steps,
+        observedAtMs,
+        countedFromMs,
+      );
+      if (evidence.kind === 'ERROR') {
+        setPedometerStatus('歩数データ異常（アラームは維持）');
+        return;
+      }
+
+      if (evidence.kind === 'STEP_THRESHOLD_REACHED') {
+        if (stepSuppressionInFlightRef.current) {
+          return;
+        }
+        stepSuppressionInFlightRef.current = true;
+
+        void processStepThresholdFailSafe(
+          {
+            loadAlarm: () => loadStoredAlarmByCycleId(current.cycleId),
+            saveAlarm: async (cycle) => {
+              await saveStoredAlarm(cycle);
+            },
+            cancelScheduled: cancelScheduledNotification,
+          },
+          {
+            steps: evidence.steps,
+            observedAtMs: evidence.observedAtMs,
+            countedFromMs,
+          },
+        )
+          .then(async (result) => {
+            if (result.status === 'suppressed') {
+              await cancelNotificationIfPresent(
+                result.alarm.checkInNotificationId,
+              );
+              await refreshAfterCycleCompletion(result.alarm);
+              setPedometerStatus('100歩を検知・アラーム停止済み');
+              setNotice({
+                tone: 'success',
+                text: '100歩を検知しました。この時刻のアラームだけ停止しました。',
+              });
+              return;
+            }
+
+            const progress = await saveMonitoringCycleStepCount(
+              current.alarmId,
+              current.cycleId,
+              evidence.steps,
+              countedFromMs,
+            );
+            setCurrentAlarms(progress.alarms);
+            if (progress.status !== 'updated') {
+              return;
+            }
+            setNotice({
+              tone: 'danger',
+              text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
+            });
+          })
+          .catch(() => {
+            setNotice({
+              tone: 'danger',
+              text: '100歩の確認処理に失敗しました。安全のためアラームは有効です。',
+            });
+          })
+          .finally(() => {
+            stepSuppressionInFlightRef.current = false;
+          });
+        return;
+      }
+
+      void saveMonitoringCycleStepCount(
+        current.alarmId,
+        current.cycleId,
+        evidence.steps,
+        countedFromMs,
+      )
+        .then(({ alarms: next }) => setCurrentAlarms(next))
+        .catch(() => {
+          setPedometerStatus('歩数の保存に失敗（アラームは維持）');
+        });
+    };
+
+    // Clears any status left over from a previous cycle.
+    setPedometerStatus('歩数計を準備中');
     void (async () => {
       try {
         const available = await Pedometer.isAvailableAsync();
@@ -686,93 +807,30 @@ function AlarmApp() {
           return;
         }
 
-        setPedometerStatus('100歩まで計測中（アプリ表示中のみ）');
-        subscription = Pedometer.watchStepCount(({ steps }) => {
-          const current = getNextMonitoringCycle(
-            alarmsRef.current,
-            Date.now(),
-          );
-          if (!current || current.cycleId !== monitoringCycle.cycleId) {
-            return;
-          }
-
-          const evidence = classifyStepEvidence(
-            stepOffsetRef.current + steps,
-            Date.now(),
-          );
-          if (evidence.kind === 'ERROR') {
-            setPedometerStatus('歩数データ異常（アラームは維持）');
-            return;
-          }
-
-          if (evidence.kind === 'STEP_THRESHOLD_REACHED') {
-            if (stepSuppressionInFlightRef.current) {
-              return;
+        let baseSteps = getWindowStepCount(monitoringCycle, stepWindow);
+        if (Platform.OS === 'ios') {
+          try {
+            // iOS keeps step history, so steps walked inside the window
+            // before the app came on screen are included.
+            const history = await Pedometer.getStepCountAsync(
+              new Date(countedFromMs),
+              new Date(),
+            );
+            if (Number.isFinite(history.steps)) {
+              baseSteps = Math.max(baseSteps, history.steps);
             }
-            stepSuppressionInFlightRef.current = true;
-
-            void processStepThresholdFailSafe(
-              {
-                loadAlarm: () => loadStoredAlarmByCycleId(current.cycleId),
-                saveAlarm: async (cycle) => {
-                  await saveStoredAlarm(cycle);
-                },
-                cancelScheduled: cancelScheduledNotification,
-              },
-              {
-                steps: evidence.steps,
-                observedAtMs: evidence.observedAtMs,
-              },
-            )
-              .then(async (result) => {
-                if (result.status === 'suppressed') {
-                  await cancelNotificationIfPresent(
-                    result.alarm.checkInNotificationId,
-                  );
-                  await refreshAfterCycleCompletion(result.alarm);
-                  setPedometerStatus('100歩を検知・アラーム停止済み');
-                  setNotice({
-                    tone: 'success',
-                    text: '100歩を検知しました。この時刻のアラームだけ停止しました。',
-                  });
-                  return;
-                }
-
-                const progress = await saveMonitoringCycleStepCount(
-                  current.alarmId,
-                  current.cycleId,
-                  evidence.steps,
-                );
-                setCurrentAlarms(progress.alarms);
-                if (progress.status !== 'updated') {
-                  return;
-                }
-                setNotice({
-                  tone: 'danger',
-                  text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
-                });
-              })
-              .catch(() => {
-                setNotice({
-                  tone: 'danger',
-                  text: '100歩の確認処理に失敗しました。安全のためアラームは有効です。',
-                });
-              })
-              .finally(() => {
-                stepSuppressionInFlightRef.current = false;
-              });
-            return;
+          } catch {
+            // Fall back to the persisted count for this window.
           }
+        }
+        if (disposed) {
+          return;
+        }
 
-          void saveMonitoringCycleStepCount(
-            current.alarmId,
-            current.cycleId,
-            evidence.steps,
-          )
-            .then(({ alarms: next }) => setCurrentAlarms(next))
-            .catch(() => {
-              setPedometerStatus('歩数の保存に失敗（アラームは維持）');
-            });
+        setPedometerStatus('100歩まで計測中（アプリ表示中のみ）');
+        evaluateSteps(baseSteps);
+        subscription = Pedometer.watchStepCount(({ steps }) => {
+          evaluateSteps(baseSteps + steps);
         });
       } catch {
         if (!disposed) {
@@ -785,7 +843,13 @@ function AlarmApp() {
       disposed = true;
       subscription?.remove();
     };
-  }, [monitoringCycle?.cycleId, refreshAfterCycleCompletion, setCurrentAlarms]);
+  }, [
+    monitoringCycle?.cycleId,
+    stepWindow?.startMs,
+    isStepWindowActive,
+    refreshAfterCycleCompletion,
+    setCurrentAlarms,
+  ]);
 
   const addAlarm = useCallback(async () => {
     if (isBusy) {
@@ -1082,6 +1146,16 @@ function AlarmApp() {
   const monitoringDefinition = monitoringCycle
     ? alarms.find((alarm) => alarm.id === monitoringCycle.alarmId)
     : undefined;
+  const windowStepCount =
+    monitoringCycle && stepWindow
+      ? getWindowStepCount(monitoringCycle, stepWindow)
+      : 0;
+  const stepWindowStartLabel = stepWindow
+    ? formatAlarmTime(
+        new Date(stepWindow.startMs).getHours(),
+        new Date(stepWindow.startMs).getMinutes(),
+      )
+    : '';
   const canOpenComposer =
     !ringingCycle && alarms.length < MAX_ALARM_COUNT && !isBusy;
   const canSubmitAlarm =
@@ -1234,36 +1308,53 @@ function AlarmApp() {
                 </Text>
               </View>
             </View>
-            <View
-              accessible
-              accessibilityLabel="起床確認の歩数"
-              accessibilityRole="progressbar"
-              accessibilityValue={{
-                max: STEP_THRESHOLD,
-                min: 0,
-                now: Math.min(monitoringCycle.stepCount, STEP_THRESHOLD),
-                text: `${monitoringCycle.stepCount} / ${STEP_THRESHOLD}歩`,
-              }}
-              style={styles.progressTrack}
-            >
+            {stepWindowPhase === 'before' ? (
               <View
-                style={[
-                  styles.progressFill,
-                  {
-                    width: `${Math.min(
-                      100,
-                      (monitoringCycle.stepCount / STEP_THRESHOLD) * 100,
-                    )}%`,
-                  },
-                ]}
-              />
-            </View>
-            <View style={styles.progressCopy}>
-              <Text style={styles.progressText}>
-                {monitoringCycle.stepCount} / {STEP_THRESHOLD}歩
-              </Text>
-              <Text style={styles.progressStatus}>{pedometerStatus}</Text>
-            </View>
+                accessible
+                accessibilityLabel={`起床確認は${stepWindowStartLabel}から。アプリを表示している間に${STEP_THRESHOLD}歩で確認します`}
+                style={[styles.progressCopy, styles.progressCopyPending]}
+              >
+                <Text style={styles.progressText}>
+                  起床確認は {stepWindowStartLabel} から
+                </Text>
+                <Text style={styles.progressStatus}>
+                  アプリ表示中に{STEP_THRESHOLD}歩
+                </Text>
+              </View>
+            ) : (
+              <>
+                <View
+                  accessible
+                  accessibilityLabel="起床確認の歩数"
+                  accessibilityRole="progressbar"
+                  accessibilityValue={{
+                    max: STEP_THRESHOLD,
+                    min: 0,
+                    now: Math.min(windowStepCount, STEP_THRESHOLD),
+                    text: `${windowStepCount} / ${STEP_THRESHOLD}歩`,
+                  }}
+                  style={styles.progressTrack}
+                >
+                  <View
+                    style={[
+                      styles.progressFill,
+                      {
+                        width: `${Math.min(
+                          100,
+                          (windowStepCount / STEP_THRESHOLD) * 100,
+                        )}%`,
+                      },
+                    ]}
+                  />
+                </View>
+                <View style={styles.progressCopy}>
+                  <Text style={styles.progressText}>
+                    起床確認 {windowStepCount} / {STEP_THRESHOLD}歩
+                  </Text>
+                  <Text style={styles.progressStatus}>{pedometerStatus}</Text>
+                </View>
+              </>
+            )}
           </GlassSurface>
         ) : (
           <GlassSurface
@@ -1661,6 +1752,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 10,
     marginTop: 7,
+  },
+  progressCopyPending: {
+    // Keeps the copy where it sits when the progress track is shown.
+    marginTop: 21,
   },
   progressText: {
     color: '#92E1D5',
