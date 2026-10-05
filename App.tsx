@@ -12,6 +12,8 @@ import {
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -100,9 +102,15 @@ import {
   installForegroundNotificationHandler,
   prepareNotifications,
   readAlarmNotificationData,
+  readNotificationDelivery,
   scheduleCheckInNotification,
   scheduleMainAlarmNotification,
 } from './src/notificationService';
+import {
+  type NotificationDeliveryState,
+  getNotificationDeliveryWarningCopy,
+  shouldWarnNotificationDelivery,
+} from './src/notificationDelivery';
 import {
   CONFIRM_AWAKE_ACTION,
   MAIN_ALARM_KIND,
@@ -324,6 +332,9 @@ function AlarmApp() {
   const [customWeekdays, setCustomWeekdays] = useState<Weekday[]>([1, 2, 3, 4, 5]);
   const [nowMs, setNowMs] = useState(Date.now());
   const [notice, setNotice] = useState<Notice | null>(null);
+  // null until the first check, so nothing is claimed before it completes.
+  const [notificationDelivery, setNotificationDelivery] =
+    useState<NotificationDeliveryState | null>(null);
   const [pedometerStatus, setPedometerStatus] = useState(
     Platform.OS === 'web' ? '実機のみ対応' : '次のアラームを待機中',
   );
@@ -332,6 +343,7 @@ function AlarmApp() {
   const responseInFlightRef = useRef<string | null>(null);
   const stepSuppressionInFlightRef = useRef(false);
   const dueTransitionInFlightRef = useRef(false);
+  const deliveryCheckRef = useRef(0);
   const localMinuteKey = Math.floor(nowMs / 60_000);
   const circadianTheme = useMemo(
     () => getCircadianTheme(new Date(nowMs)),
@@ -341,6 +353,28 @@ function AlarmApp() {
   const setCurrentAlarms = useCallback((next: StoredAlarmDefinition[]) => {
     alarmsRef.current = next;
     setAlarms(next);
+  }, []);
+
+  const refreshNotificationDelivery = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      return;
+    }
+
+    // Only the latest check may update the state when checks overlap.
+    const check = ++deliveryCheckRef.current;
+    const next = await readNotificationDelivery();
+    if (check === deliveryCheckRef.current) {
+      setNotificationDelivery(next);
+    }
+  }, []);
+
+  const openNotificationSettings = useCallback(() => {
+    void Linking.openSettings().catch(() => {
+      setNotice({
+        tone: 'danger',
+        text: '設定を開けませんでした。設定アプリで通知をオンにしてください。',
+      });
+    });
   }, []);
 
   const refreshAfterCycleCompletion = useCallback(
@@ -488,6 +522,21 @@ function AlarmApp() {
       mounted = false;
     };
   }, [setCurrentAlarms]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web' || !isLoaded) {
+      return;
+    }
+
+    void refreshNotificationDelivery();
+    // Notifications can be turned off in Settings while the app is away.
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        void refreshNotificationDelivery();
+      }
+    });
+    return () => subscription.remove();
+  }, [isLoaded, refreshNotificationDelivery]);
 
   const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
   const monitoringCycle = useMemo(
@@ -938,8 +987,17 @@ function AlarmApp() {
       });
     } finally {
       setIsBusy(false);
+      // The permission prompt or a failure may have changed what can ring.
+      void refreshNotificationDelivery();
     }
-  }, [customWeekdays, isBusy, repeatKind, selectedTime, setCurrentAlarms]);
+  }, [
+    customWeekdays,
+    isBusy,
+    refreshNotificationDelivery,
+    repeatKind,
+    selectedTime,
+    setCurrentAlarms,
+  ]);
 
   const toggleAlarm = useCallback(
     async (definition: StoredAlarmDefinition, enabled: boolean) => {
@@ -1044,9 +1102,11 @@ function AlarmApp() {
         });
       } finally {
         setIsBusy(false);
+        // The permission prompt or a failure may have changed what can ring.
+        void refreshNotificationDelivery();
       }
     },
-    [isBusy, setCurrentAlarms],
+    [isBusy, refreshNotificationDelivery, setCurrentAlarms],
   );
 
   const deleteAlarm = useCallback(
@@ -1156,6 +1216,23 @@ function AlarmApp() {
         new Date(stepWindow.startMs).getMinutes(),
       )
     : '';
+  const deliveryWarning =
+    notificationDelivery &&
+    notificationDelivery !== 'ok' &&
+    shouldWarnNotificationDelivery(notificationDelivery, alarms)
+      ? notificationDelivery
+      : null;
+  const deliveryWarningCopy = deliveryWarning
+    ? getNotificationDeliveryWarningCopy(
+        deliveryWarning,
+        monitoringCycle
+          ? `${formatNextDate(monitoringCycle.dueAtMs)} ${formatAlarmTime(
+              new Date(monitoringCycle.dueAtMs).getHours(),
+              new Date(monitoringCycle.dueAtMs).getMinutes(),
+            )}`
+          : null,
+      )
+    : null;
   const canOpenComposer =
     !ringingCycle && alarms.length < MAX_ALARM_COUNT && !isBusy;
   const canSubmitAlarm =
@@ -1273,6 +1350,35 @@ function AlarmApp() {
             >
               <Text style={styles.stopButtonText}>起きました・停止</Text>
             </Pressable>
+          </View>
+        ) : deliveryWarningCopy ? (
+          <View
+            style={styles.deliveryWarningCard}
+            testID="notification-delivery-warning"
+          >
+            <View style={styles.deliveryWarningHeader}>
+              <Text
+                accessibilityRole="header"
+                style={styles.deliveryWarningTitle}
+              >
+                {deliveryWarningCopy.title}
+              </Text>
+              <Pressable
+                accessibilityHint="端末の設定で通知をオンにできます"
+                accessibilityRole="button"
+                hitSlop={4}
+                onPress={openNotificationSettings}
+                style={({ pressed }) => [
+                  styles.settingsButton,
+                  pressed && styles.buttonDimmed,
+                ]}
+              >
+                <Text style={styles.settingsButtonText}>設定を開く</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.deliveryWarningBody}>
+              {deliveryWarningCopy.body}
+            </Text>
           </View>
         ) : monitoringCycle && monitoringDefinition ? (
           <GlassSurface
@@ -1461,10 +1567,19 @@ function AlarmApp() {
                     />
                   </View>
                   <View style={styles.alarmCardFooter}>
-                    <Text style={styles.scheduleSummary}>
-                      {definition.enabled
-                        ? `${definition.cycles.filter((cycle) => isMonitoring(cycle)).length}回分を予約済み`
-                        : '通知は予約されていません'}
+                    <Text
+                      style={[
+                        styles.scheduleSummary,
+                        definition.enabled &&
+                          deliveryWarningCopy &&
+                          styles.scheduleSummaryWarning,
+                      ]}
+                    >
+                      {!definition.enabled
+                        ? '通知は予約されていません'
+                        : deliveryWarningCopy
+                          ? deliveryWarningCopy.scheduleLine
+                          : `${definition.cycles.filter((cycle) => isMonitoring(cycle)).length}回分を予約済み`}
                     </Text>
                     <Pressable
                       accessibilityLabel={`${formatAlarmTime(
@@ -1814,6 +1929,51 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
   },
+  deliveryWarningCard: {
+    // Grows with Dynamic Type so the warning is never clipped.
+    minHeight: ALARM_SUMMARY_CARD_HEIGHT,
+    overflow: 'hidden',
+    marginTop: 12,
+    padding: 17,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.28)',
+    borderRadius: 25,
+    backgroundColor: 'rgba(128, 28, 42, 0.92)',
+  },
+  deliveryWarningHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  deliveryWarningTitle: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '900',
+  },
+  deliveryWarningBody: {
+    marginTop: 10,
+    color: '#FECDCA',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
+  },
+  settingsButton: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  settingsButtonText: {
+    color: '#B42318',
+    fontSize: 13,
+    fontWeight: '900',
+  },
   idleCard: {
     height: ALARM_SUMMARY_CARD_HEIGHT,
     flexDirection: 'row',
@@ -1961,6 +2121,10 @@ const styles = StyleSheet.create({
     fontSize: 11,
     flex: 1,
     paddingRight: 8,
+  },
+  scheduleSummaryWarning: {
+    color: '#FFB4AC',
+    fontWeight: '700',
   },
   deleteButton: {
     minWidth: 44,

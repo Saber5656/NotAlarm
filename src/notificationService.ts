@@ -8,6 +8,10 @@ import {
   MAIN_ALARM_KIND,
   type AlarmNotificationData,
 } from './alarmContracts';
+import {
+  assessNotificationDelivery,
+  type NotificationDeliveryState,
+} from './notificationDelivery';
 
 const ALARM_CHANNEL_ID = 'already-up-alarm';
 const CHECK_IN_CHANNEL_ID = 'already-up-check-in';
@@ -48,7 +52,7 @@ export async function prepareNotifications(): Promise<void> {
 
   if (permission.status !== 'granted') {
     throw new Error(
-      '通知が許可されていません。設定アプリでAlreadyUpの通知を許可してください。',
+      '通知が許可されていません。設定アプリで通知をオンにしてください。',
     );
   }
 
@@ -88,6 +92,18 @@ export async function prepareNotifications(): Promise<void> {
         sound: null,
       }),
     ]);
+  }
+}
+
+/**
+ * Reads the current permission without prompting. A failed read is reported as
+ * 'unknown' so the UI never assumes the alarm can ring.
+ */
+export async function readNotificationDelivery(): Promise<NotificationDeliveryState> {
+  try {
+    return assessNotificationDelivery(await Notifications.getPermissionsAsync());
+  } catch {
+    return 'unknown';
   }
 }
 

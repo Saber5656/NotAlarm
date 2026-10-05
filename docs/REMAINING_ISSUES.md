@@ -93,19 +93,28 @@
 
 通知権限が拒否・制限・後から変更された状態で「アラーム設定済み」と表示すると、OS 上に有効なアラームがない事故につながる。
 
+### 対応状況（2026-10-05）
+
+- 通知権限から配送状態 `ok` / `off` / `silent` / `unknown` を判定する純粋関数を `src/notificationDelivery.ts` に実装し、単体テスト（`tests/notificationDelivery.test.ts`）で固定した。iOS の NOT_DETERMINED / DENIED は `off`、PROVISIONAL と通知音オフは `silent`、取得失敗・未知の値は `unknown` とし、`ok` とみなさない（[DESIGN.md 11.1](DESIGN.md)）。
+- 起動時の読み込み完了後、`AppState` が `active` になるたび、アラームの追加・オン操作の後に `getPermissionsAsync()` で再確認する。
+- `ok` 以外でオンのアラームがある間は、次回アラーム card を閉じられない danger card（「通知がオフです」など）に置き換え、各行の「N回分を予約済み」を配送できない理由に置き換える。設定済みに見える表示をしない。
+- danger card の `設定を開く` から `Linking.openSettings()` で設定へ移動でき、通知をオンにして戻ると自動で通常表示に戻る。
+- 権限エラー文言から「AlreadyUp」を外した（Expo Go では設定の対象が Expo Go になるため）。
+
 ### スコープ
 
-- `undetermined` / `denied` / `provisional` / `granted` の扱いを定義する
+- ~~`undetermined` / `denied` / `provisional` / `granted` の扱いを定義する~~（2026-10-05 定義済み）
 - メイン通知を OS へ登録し、ID を得た後だけ `armed` にする
-- 設定後の権限変更と通知設定変更を再検査する
+- 設定後の権限変更と通知設定変更を再検査する（foreground 復帰時の再検査は実装済み。background 中は検知できない）
 - 確認通知だけ失敗した場合と、メイン通知が失敗した場合を分ける
+- 残り: 実機（Expo Go / development build、iOS / Android）での検証、Android の通知 channel 単位の音・重要度設定の検出、通知を再びオンにした時点での OS pending 一覧との照合と予約枠の補充（現在は次回起動時などに補充。ALR-008 と関連）、消音スイッチ・音量・Focus の扱い（ALR-001）
 
 ### 受け入れ条件
 
 - [ ] メイン通知を登録できない場合、UI は `armed` を表示しない
 - [ ] 確認通知だけ登録できない場合、メインを残しつつ明確な警告を表示する
-- [ ] 権限拒否から Settings へ移動して復旧する手順がある
-- [ ] 設定後に権限を無効化した状態を検知できる
+- [x] 権限拒否から Settings へ移動して復旧する手順がある（`設定を開く` と foreground 復帰時の再確認。実機検証は未実施）
+- [x] 設定後に権限を無効化した状態を検知できる（アプリへ戻った時点で検知し、設定済み表示を警告へ置き換える。background 中の検知と実機検証は未実施）
 
 ---
 
