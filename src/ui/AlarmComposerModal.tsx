@@ -23,6 +23,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { RepeatKind, Weekday } from '../alarmSchedule';
 import { parseAlarmTimeInput } from '../alarmTime';
 import type { BedsideGuidance } from '../bedsideMode';
+import type { NewAlarmSummary } from '../homeStatus';
 import {
   doesComposerContentOverflow,
   getWeekdayColumnCount,
@@ -47,12 +48,16 @@ interface AlarmComposerModalProps {
   };
   isBusy: boolean;
   onClose: () => void;
+  /** iOS: the modal finished closing (used to hand over screen-reader focus). */
+  onDismissed?: () => void;
   onRepeatKindChange: (kind: RepeatKind) => void;
   onSubmit: () => void;
   onTimeChange: (date: Date) => void;
   onToggleWeekday: (weekday: Weekday) => void;
   repeatKind: RepeatKind;
   selectedTime: Date;
+  /** Repeat and first ring, shown on every tab above the add button. */
+  summary: NewAlarmSummary;
   visible: boolean;
 }
 
@@ -95,6 +100,8 @@ export function AlarmComposerModal({
   onToggleWeekday,
   repeatKind,
   selectedTime,
+  summary,
+  onDismissed,
   visible,
 }: AlarmComposerModalProps) {
   const insets = useSafeAreaInsets();
@@ -260,6 +267,7 @@ export function AlarmComposerModal({
   return (
     <Modal
       animationType="fade"
+      onDismiss={onDismissed}
       onRequestClose={closeIfIdle}
       presentationStyle="overFullScreen"
       statusBarTranslucent
@@ -635,6 +643,17 @@ export function AlarmComposerModal({
             </ScrollView>
 
             {!isTimeEditing ? <View style={styles.sheetFooter}>
+              <Text
+                accessibilityLabel={`追加する内容。${summary.text}`}
+                accessibilityLiveRegion="polite"
+                style={[
+                  styles.summaryText,
+                  summary.isDistant && styles.summaryTextDistant,
+                ]}
+                testID="composer-summary"
+              >
+                {summary.text}
+              </Text>
               {formNotice ? (
                 <View
                   accessibilityLiveRegion={
@@ -1135,6 +1154,17 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     borderTopWidth: 1,
     borderTopColor: 'rgba(50, 67, 98, 0.1)',
+  },
+  summaryText: {
+    marginBottom: 8,
+    color: UI_COLORS.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  summaryTextDistant: {
+    color: '#8A4B00',
   },
   deviceHint: {
     marginBottom: 8,

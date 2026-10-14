@@ -14,10 +14,12 @@ import {
   useState,
 } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
   AppState,
   Linking,
+  findNodeHandle,
   Platform,
   Pressable,
   ScrollView,
@@ -41,7 +43,11 @@ import {
   NoticeBanner,
   type AppNotice,
 } from './src/ui/NoticeBanner';
-import { BEDSIDE_FOOTER_COLORS, UI_COLORS } from './src/ui/tokens';
+import {
+  BEDSIDE_FOOTER_COLORS,
+  HOME_COLORS,
+  UI_COLORS,
+} from './src/ui/tokens';
 
 import {
   cancelAlarmDefinitionWithCheckpoints,
@@ -73,6 +79,7 @@ import {
 import {
   processAwakeResponseFailSafe,
   processStepThresholdFailSafe,
+  recoverSuppressionJournal,
 } from './src/alarmOrchestrator';
 import {
   MIN_ARM_LEAD_MS,
@@ -114,6 +121,7 @@ import {
 import {
   cancelNotificationIfPresent,
   cancelScheduledNotification,
+  listScheduledNotificationIds,
   dismissDeliveredNotification,
   installForegroundNotificationHandler,
   prepareNotifications,
@@ -132,6 +140,23 @@ import {
   CONFIRM_AWAKE_ACTION,
   MAIN_ALARM_KIND,
 } from './src/alarmContracts';
+import {
+  RINGING_STOP_HINT,
+  RINGING_STOP_LABEL,
+  STORAGE_LOAD_FAILED_COPY,
+  SUPPRESSION_WARNING_COPY,
+  type PedometerState,
+  type SuppressionWarningKind,
+  classifySuppressionFailure,
+  describeAlarmRemains,
+  describeSuppressedOccurrence,
+  getRingingStopA11yLabel,
+  getStepGuidance,
+  isAlarmListLocked,
+  runUnlessAlarmListLocked,
+  summarizeNewAlarm,
+} from './src/homeStatus';
+import { suppressionJournal } from './src/suppressionJournalStorage';
 import {
   describeScheduleCoverage,
   getScheduleCoverageLine,
@@ -198,6 +223,61 @@ async function recoverPendingAlarmCancellations(): Promise<void> {
     });
     await removePendingAlarmCancellation(pending.alarmId);
   }
+}
+
+interface SuppressionReconcileResult {
+  /** 'ok' only when no half-finished suppression remains. */
+  state: 'ok' | SuppressionWarningKind;
+  recovered: number;
+}
+
+let reconcileInFlight: Promise<SuppressionReconcileResult> | null = null;
+
+/**
+ * Settles stops that were cancelled but not saved (restoring them) and
+ * reports stops whose cancellation result is unknown. Never cancels anything.
+ * Concurrent callers share one run.
+ */
+function reconcileSuppressions(): Promise<SuppressionReconcileResult> {
+  if (reconcileInFlight) {
+    return reconcileInFlight;
+  }
+  const run = (async (): Promise<SuppressionReconcileResult> => {
+    try {
+      const outcome = await recoverSuppressionJournal(
+        {
+          saveAlarm: async (cycle) => {
+            await saveStoredAlarm(cycle);
+          },
+          journal: suppressionJournal,
+          listScheduledIds: listScheduledNotificationIds,
+        },
+        loadStoredAlarmByCycleId,
+      );
+      for (const intent of outcome.recovered) {
+        try {
+          // The exact check-in id recorded for that cycle, nothing else.
+          await cancelNotificationIfPresent(intent.checkInNotificationId);
+        } catch {
+          // Best effort: the cycle itself is already suppressed.
+        }
+      }
+      const state: SuppressionReconcileResult['state'] =
+        outcome.saveFailed.length > 0
+          ? 'save_failed'
+          : outcome.unresolved.length > 0
+            ? 'status_unknown'
+            : 'ok';
+      return { state, recovered: outcome.recovered.length };
+    } catch {
+      // The journal itself is unreadable: treat the state as unknown.
+      return { state: 'status_unknown', recovered: 0 };
+    }
+  })().finally(() => {
+    reconcileInFlight = null;
+  });
+  reconcileInFlight = run;
+  return run;
 }
 
 const ALARM_SUMMARY_CARD_HEIGHT = 140;
@@ -346,6 +426,12 @@ async function refillEnabledSchedulesOnce(
     const pendingAlarmIds = new Set(
       (await loadPendingAlarmCancellations()).map((pending) => pending.alarmId),
     );
+    // A half-finished suppression means that cycle's state is not settled, so
+    // its alarm must not be refilled until recovery resolves it. An
+    // unreadable journal throws here and skips the whole refill.
+    for (const pending of await suppressionJournal.load()) {
+      pendingAlarmIds.add(pending.alarmId);
+    }
     const fillIssues: AlarmScheduleIssue[] = [];
     let attemptedAlarmIds: string[] = [];
     const alarms = await withScheduledNotificationRollback(
@@ -454,9 +540,18 @@ function AlarmApp() {
   const [refillFailedAlarmIds, setRefillFailedAlarmIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const [pedometerStatus, setPedometerStatus] = useState(
-    Platform.OS === 'web' ? '実機のみ対応' : '次のアラームを待機中',
+  // Saved alarms could not be read: this is not the same as having none.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [pedometerState, setPedometerState] = useState<PedometerState>(
+    Platform.OS === 'web' ? 'unavailable' : 'preparing',
   );
+  // A stop whose cancel/save outcome is not fully known; persistent.
+  const [suppressionWarning, setSuppressionWarning] =
+    useState<SuppressionWarningKind | null>(null);
+  const stopButtonRef = useRef<View>(null);
+  // Set when an alarm starts ringing under the open composer; focus waits for
+  // the modal to finish dismissing.
+  const ringFocusPendingRef = useRef(false);
   const [isAppForeground, setIsAppForeground] = useState(() =>
     isForegroundAppState(AppState.currentState),
   );
@@ -621,6 +716,13 @@ function AlarmApp() {
             });
           }
         }
+        // Finish or report half-done stops before anything is marked due.
+        const reconciled = await reconcileSuppressions();
+        if (mounted) {
+          setSuppressionWarning(
+            reconciled.state === 'ok' ? null : reconciled.state,
+          );
+        }
         let restored = await markDueCyclesRinging(Date.now());
 
         if (
@@ -642,10 +744,9 @@ function AlarmApp() {
         }
       } catch {
         if (mounted) {
-          setNotice({
-            tone: 'danger',
-            text: '保存済みのアラームを読み取れませんでした。予約済み通知は解除していません。',
-          });
+          // A persistent card explains this state; a banner would be lost
+          // on the next tap.
+          setLoadFailed(true);
         }
       } finally {
         if (mounted) {
@@ -673,15 +774,28 @@ function AlarmApp() {
       void refreshNotificationDelivery();
       // Occurrences stopped from a notification are only replaced while the
       // app runs, so returning to it tops the schedule back up.
-      if (alarmsRef.current.some((alarm) => alarm.enabled)) {
-        void refillEnabledSchedules('foreground', alarmsRef.current).then(
-          (next) => {
-            if (next) {
-              setCurrentAlarms(next);
-            }
-          },
+      void (async () => {
+        const reconciled = await reconcileSuppressions();
+        setSuppressionWarning(
+          reconciled.state === 'ok' ? null : reconciled.state,
         );
-      }
+        if (reconciled.recovered > 0) {
+          try {
+            setCurrentAlarms(await loadAlarmDefinitions());
+          } catch {
+            // Keep the in-memory list; the next load will show the result.
+          }
+        }
+        if (alarmsRef.current.some((alarm) => alarm.enabled)) {
+          const next = await refillEnabledSchedules(
+            'foreground',
+            alarmsRef.current,
+          );
+          if (next) {
+            setCurrentAlarms(next);
+          }
+        }
+      })();
     });
     return () => subscription.remove();
   }, [
@@ -766,6 +880,50 @@ function AlarmApp() {
     }
   }, [ringingCycle?.cycleId]);
 
+  const focusStopButton = useCallback(() => {
+    const handle = findNodeHandle(stopButtonRef.current);
+    if (handle) {
+      AccessibilityInfo.setAccessibilityFocus(handle);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!ringingCycle || Platform.OS === 'web') {
+      ringFocusPendingRef.current = false;
+      return;
+    }
+
+    // The stop control's label carries the time and that it is ringing, so
+    // moving focus there is the whole announcement; a separate announce would
+    // be cut off by the focus change. Not yet measured with VoiceOver on a
+    // device (see docs/DEVICE_TEST.md).
+    if (isComposerOpen) {
+      // The composer is closing under the ringing card. On iOS its
+      // onDismiss moves focus; elsewhere a timer covers the close animation.
+      ringFocusPendingRef.current = true;
+      if (Platform.OS === 'ios') {
+        return;
+      }
+    }
+    const focusTimer = setTimeout(
+      () => {
+        ringFocusPendingRef.current = false;
+        focusStopButton();
+      },
+      isComposerOpen ? 700 : 300,
+    );
+    return () => clearTimeout(focusTimer);
+  }, [ringingCycle?.cycleId]);
+
+  const handleComposerDismissed = useCallback(() => {
+    if (!ringFocusPendingRef.current) {
+      return;
+    }
+    ringFocusPendingRef.current = false;
+    // One frame for the ringing card to settle after the modal is gone.
+    setTimeout(focusStopButton, 100);
+  }, [focusStopButton]);
+
   useEffect(() => {
     if (!ringingCycle) {
       stopForegroundAlarmSound();
@@ -796,6 +954,7 @@ function AlarmApp() {
       }
       responseInFlightRef.current = responseKey;
 
+      let suppressedConfirmed = false;
       try {
         const cycleId = data?.cycleId;
         const result = await processAwakeResponseFailSafe(
@@ -808,6 +967,7 @@ function AlarmApp() {
               await saveStoredAlarm(cycle);
             },
             cancelScheduled: cancelScheduledNotification,
+            journal: suppressionJournal,
           },
           {
             actionIdentifier: response.actionIdentifier,
@@ -824,27 +984,42 @@ function AlarmApp() {
           return;
         }
         if (result.status === 'alarm_remains') {
-          setNotice({
-            tone: result.reason === 'CANCEL_NOT_VERIFIED' ? 'danger' : 'warning',
-            text:
-              result.reason === 'CANCEL_NOT_VERIFIED'
-                ? 'アラーム停止を確認できませんでした。鳴る前提で扱ってください。'
-                : 'この確認は現在のアラーム周期と一致しないため、アラームを維持します。',
-          });
+          if (result.reason === 'SUPPRESSION_PENDING') {
+            // An earlier stop for this cycle is half done: settle it.
+            const reconciled = await reconcileSuppressions();
+            setSuppressionWarning(
+              reconciled.state === 'ok' ? null : reconciled.state,
+            );
+            return;
+          }
+          setNotice(describeAlarmRemains(result.reason));
           return;
         }
 
+        suppressedConfirmed = true;
         await cancelNotificationIfPresent(result.alarm.checkInNotificationId);
         await refreshAfterCycleCompletion(result.alarm);
         setNotice({
           tone: 'success',
           text: '起床を確認しました。この時刻のアラームだけ停止しました。',
         });
-      } catch {
-        setNotice({
-          tone: 'danger',
-          text: '起床確認の処理に失敗しました。安全のためアラームは維持します。',
-        });
+      } catch (error) {
+        const failure = classifySuppressionFailure(error);
+        if (failure) {
+          setSuppressionWarning(failure.warning);
+          setNotice({ tone: 'danger', text: failure.notice });
+        } else if (suppressedConfirmed) {
+          // The stop itself succeeded; only the follow-up failed.
+          setNotice({
+            tone: 'warning',
+            text: '起床を確認し、この回のアラームは停止しました。次回分の予約更新に失敗したため、アラームの状態を確認してください。',
+          });
+        } else {
+          setNotice({
+            tone: 'danger',
+            text: '起床確認の処理に失敗しました。安全のためアラームは維持します。',
+          });
+        }
       } finally {
         responseInFlightRef.current = null;
       }
@@ -974,15 +1149,18 @@ function AlarmApp() {
         countedFromMs,
       );
       if (evidence.kind === 'ERROR') {
-        setPedometerStatus('歩数データ異常（アラームは維持）');
+        setPedometerState('error');
         return;
       }
+      // The subscription is alive and producing valid counts again.
+      setPedometerState('counting');
 
       if (evidence.kind === 'STEP_THRESHOLD_REACHED') {
         if (stepSuppressionInFlightRef.current) {
           return;
         }
         stepSuppressionInFlightRef.current = true;
+        let suppressedConfirmed = false;
 
         void processStepThresholdFailSafe(
           {
@@ -991,6 +1169,7 @@ function AlarmApp() {
               await saveStoredAlarm(cycle);
             },
             cancelScheduled: cancelScheduledNotification,
+            journal: suppressionJournal,
           },
           {
             steps: evidence.steps,
@@ -999,12 +1178,23 @@ function AlarmApp() {
           },
         )
           .then(async (result) => {
+            if (
+              result.status === 'alarm_remains' &&
+              result.reason === 'SUPPRESSION_PENDING'
+            ) {
+              const reconciled = await reconcileSuppressions();
+              setSuppressionWarning(
+                reconciled.state === 'ok' ? null : reconciled.state,
+              );
+              return;
+            }
             if (result.status === 'suppressed') {
+              suppressedConfirmed = true;
               await cancelNotificationIfPresent(
                 result.alarm.checkInNotificationId,
               );
               await refreshAfterCycleCompletion(result.alarm);
-              setPedometerStatus('100歩を検知・アラーム停止済み');
+              setPedometerState('counting');
               setNotice({
                 tone: 'success',
                 text: '100歩を検知しました。この時刻のアラームだけ停止しました。',
@@ -1027,11 +1217,22 @@ function AlarmApp() {
               text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
             });
           })
-          .catch(() => {
-            setNotice({
-              tone: 'danger',
-              text: '100歩の確認処理に失敗しました。安全のためアラームは有効です。',
-            });
+          .catch((error: unknown) => {
+            const failure = classifySuppressionFailure(error);
+            if (failure) {
+              setSuppressionWarning(failure.warning);
+              setNotice({ tone: 'danger', text: failure.notice });
+            } else if (suppressedConfirmed) {
+              setNotice({
+                tone: 'warning',
+                text: '100歩を検知し、この回のアラームは停止しました。次回分の予約更新に失敗したため、アラームの状態を確認してください。',
+              });
+            } else {
+              setNotice({
+                tone: 'danger',
+                text: '100歩の確認処理に失敗しました。アラームの状態を確認してください。',
+              });
+            }
           })
           .finally(() => {
             stepSuppressionInFlightRef.current = false;
@@ -1045,25 +1246,28 @@ function AlarmApp() {
         evidence.steps,
         countedFromMs,
       )
-        .then(({ alarms: next }) => setCurrentAlarms(next))
+        .then(({ alarms: next }) => {
+          setCurrentAlarms(next);
+          setPedometerState('counting');
+        })
         .catch(() => {
-          setPedometerStatus('歩数の保存に失敗（アラームは維持）');
+          setPedometerState('error');
         });
     };
 
     // Clears any status left over from a previous cycle.
-    setPedometerStatus('歩数計を準備中');
+    setPedometerState('preparing');
     void (async () => {
       try {
         const available = await Pedometer.isAvailableAsync();
         if (!available || disposed) {
-          setPedometerStatus('この端末では歩数を取得できません');
+          setPedometerState('unavailable');
           return;
         }
 
         const permission = await Pedometer.requestPermissionsAsync();
         if (permission.status !== 'granted' || disposed) {
-          setPedometerStatus('歩数権限なし（アラームは維持）');
+          setPedometerState('denied');
           return;
         }
 
@@ -1075,14 +1279,14 @@ function AlarmApp() {
           return;
         }
 
-        setPedometerStatus('100歩まで計測中（アプリ表示中のみ）');
+        setPedometerState('counting');
         evaluateSteps(baseSteps);
         subscription = Pedometer.watchStepCount(({ steps }) => {
           evaluateSteps(baseSteps + steps);
         });
       } catch {
         if (!disposed) {
-          setPedometerStatus('歩数計測エラー（アラームは維持）');
+          setPedometerState('error');
         }
       }
     })();
@@ -1167,6 +1371,10 @@ function AlarmApp() {
       recordRefill({ attemptedAlarmIds: [definition.id], issues: fillIssues });
       setCurrentAlarms(next);
       setIsComposerOpen(false);
+      const firstRingLabel = `${formatNextDate(nextAtMs)} ${formatAlarmTime(
+        definition.hour,
+        definition.minute,
+      )}`;
       const severity = getAlarmScheduleIssueSeverity(fillIssues);
       setNotice({
         tone: severity === 'none' ? 'success' : severity,
@@ -1175,7 +1383,7 @@ function AlarmApp() {
             ? 'アラームは追加しましたが、メイン通知の一部を予約できていません。状態を確認してください。'
             : severity === 'warning'
               ? 'アラームは登録しましたが、一部の起床確認通知を予約できませんでした。'
-              : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。`,
+              : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。初回は${firstRingLabel}に鳴ります。`,
       });
     } catch (error) {
       setNotice({
@@ -1200,7 +1408,7 @@ function AlarmApp() {
     setCurrentAlarms,
   ]);
 
-  const toggleAlarm = useCallback(
+  const performToggleAlarm = useCallback(
     async (definition: StoredAlarmDefinition, enabled: boolean) => {
       if (isBusy) {
         return;
@@ -1314,7 +1522,7 @@ function AlarmApp() {
     [isBusy, recordRefill, refreshNotificationDelivery, setCurrentAlarms],
   );
 
-  const deleteAlarm = useCallback(
+  const performDeleteAlarm = useCallback(
     async (definition: StoredAlarmDefinition) => {
       if (isBusy) {
         return;
@@ -1343,6 +1551,37 @@ function AlarmApp() {
       }
     },
     [isBusy, setCurrentAlarms],
+  );
+
+  const notifyListLocked = useCallback(() => {
+    setNotice({
+      tone: 'warning',
+      text: `アラームが鳴っている間は、オン・オフや削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`,
+    });
+  }, []);
+
+  // Both read the latest alarms and clock when they run: a confirm dialog or
+  // switch can outlive the render that enabled it.
+  const toggleAlarm = useCallback(
+    (definition: StoredAlarmDefinition, enabled: boolean) =>
+      runUnlessAlarmListLocked({
+        getAlarms: () => alarmsRef.current,
+        nowMs: Date.now,
+        onBlocked: notifyListLocked,
+        run: () => performToggleAlarm(definition, enabled),
+      }),
+    [notifyListLocked, performToggleAlarm],
+  );
+
+  const deleteAlarm = useCallback(
+    (definition: StoredAlarmDefinition) =>
+      runUnlessAlarmListLocked({
+        getAlarms: () => alarmsRef.current,
+        nowMs: Date.now,
+        onBlocked: notifyListLocked,
+        run: () => performDeleteAlarm(definition),
+      }),
+    [notifyListLocked, performDeleteAlarm],
   );
 
   const confirmDeleteAlarm = useCallback(
@@ -1438,12 +1677,27 @@ function AlarmApp() {
           : null,
       )
     : null;
+  const listLocked = isAlarmListLocked(ringingCycle);
+  const suppressedOccurrence = describeSuppressedOccurrence(
+    alarms,
+    nowMs,
+    formatNextDate,
+  );
+  const stepGuidance = getStepGuidance(pedometerState);
   const canOpenComposer =
-    !ringingCycle && alarms.length < MAX_ALARM_COUNT && !isBusy;
+    !ringingCycle && !loadFailed && alarms.length < MAX_ALARM_COUNT && !isBusy;
+  const newAlarmSummary = summarizeNewAlarm({
+    nowMs,
+    hour: selectedTime.getHours(),
+    minute: selectedTime.getMinutes(),
+    repeatKind,
+    customWeekdays,
+    formatDate: formatNextDate,
+  });
   const canSubmitAlarm =
     Platform.OS !== 'web' &&
     canOpenComposer &&
-    (repeatKind !== 'custom' || customWeekdays.length > 0);
+    newAlarmSummary.canAdd;
   const composerNotice =
     isComposerOpen &&
     notice &&
@@ -1487,12 +1741,23 @@ function AlarmApp() {
         useAccessibilityScroll={useAccessibilityScreenScroll}
       >
         <View style={styles.brandRow}>
-          <Text style={styles.brandName}>AlreadyUp</Text>
+          <Text maxFontSizeMultiplier={1.4} numberOfLines={1} style={styles.brandName}>
+            AlreadyUp
+          </Text>
         </View>
 
         <View style={styles.titleRow}>
           <View style={styles.titleCopy}>
-            <Text style={styles.screenTitle}>アラーム</Text>
+            <Text
+              accessibilityRole="header"
+              adjustsFontSizeToFit
+              maxFontSizeMultiplier={1.4}
+              minimumFontScale={0.6}
+              numberOfLines={1}
+              style={styles.screenTitle}
+            >
+              アラーム
+            </Text>
             <Text style={styles.screenSubtitle}>
               目覚めた朝に、静けさを。
             </Text>
@@ -1510,6 +1775,12 @@ function AlarmApp() {
             <Pressable
               accessibilityLabel="アラームを追加"
               accessibilityRole="button"
+              accessibilityHint={
+                loadFailed
+                  ? STORAGE_LOAD_FAILED_COPY.addDisabledReason
+                  : undefined
+              }
+              accessibilityState={{ disabled: !canOpenComposer }}
               disabled={!canOpenComposer}
               onPress={() => {
                 setNotice(null);
@@ -1521,6 +1792,7 @@ function AlarmApp() {
               ]}
             >
               <Text
+                allowFontScaling={false}
                 style={[
                   styles.addButtonText,
                   !canOpenComposer && styles.addButtonTextDisabled,
@@ -1532,10 +1804,32 @@ function AlarmApp() {
           </GlassSurface>
         </View>
 
+        {suppressionWarning && !ringingCycle ? (
+          <View
+            accessibilityRole="alert"
+            style={styles.deliveryWarningCard}
+            testID="suppression-warning"
+          >
+            <Text accessibilityRole="header" style={styles.deliveryWarningTitle}>
+              {SUPPRESSION_WARNING_COPY[suppressionWarning].title}
+            </Text>
+            <Text style={styles.deliveryWarningBody}>
+              {SUPPRESSION_WARNING_COPY[suppressionWarning].body}
+            </Text>
+          </View>
+        ) : null}
+
         {ringingCycle ? (
           <View style={styles.ringingCard}>
-            <Text style={styles.ringingLabel}>ALARM</Text>
-            <Text style={styles.ringingTime}>
+            <Text accessibilityRole="header" style={styles.ringingLabel}>
+              鳴っています
+            </Text>
+            <Text
+              adjustsFontSizeToFit
+              minimumFontScale={0.5}
+              numberOfLines={1}
+              style={styles.ringingTime}
+            >
               {formatAlarmTime(
                 new Date(ringingCycle.dueAtMs).getHours(),
                 new Date(ringingCycle.dueAtMs).getMinutes(),
@@ -1543,17 +1837,45 @@ function AlarmApp() {
             </Text>
             <Text style={styles.ringingTitle}>起きる時間です</Text>
             <Pressable
+              accessibilityHint={RINGING_STOP_HINT}
+              accessibilityLabel={getRingingStopA11yLabel(
+                new Date(ringingCycle.dueAtMs).getHours(),
+                new Date(ringingCycle.dueAtMs).getMinutes(),
+              )}
               accessibilityRole="button"
+              accessibilityState={{ disabled: isBusy }}
               disabled={isBusy}
               hitSlop={4}
               onPress={() => void stopRinging()}
+              ref={stopButtonRef}
               style={({ pressed }) => [
                 styles.stopButton,
                 (isBusy || pressed) && styles.buttonDimmed,
               ]}
             >
-              <Text style={styles.stopButtonText}>起きました・停止</Text>
+              <Text style={styles.stopButtonText}>{RINGING_STOP_LABEL}</Text>
             </Pressable>
+          </View>
+        ) : loadFailed ? (
+          <View
+            accessibilityRole="alert"
+            style={styles.deliveryWarningCard}
+            testID="storage-load-failed"
+          >
+            <Text accessibilityRole="header" style={styles.deliveryWarningTitle}>
+              {STORAGE_LOAD_FAILED_COPY.title}
+            </Text>
+            <Text style={styles.deliveryWarningBody}>
+              {STORAGE_LOAD_FAILED_COPY.body}
+            </Text>
+            <Text style={styles.deliveryWarningBody}>
+              {STORAGE_LOAD_FAILED_COPY.addDisabledReason}
+            </Text>
+            {STORAGE_LOAD_FAILED_COPY.restartSteps.map((step, index) => (
+              <Text key={step} style={styles.deliveryWarningBody}>
+                {index + 1}. {step}
+              </Text>
+            ))}
           </View>
         ) : deliveryWarningCopy ? (
           <View
@@ -1587,13 +1909,13 @@ function AlarmApp() {
         ) : monitoringCycle && monitoringDefinition ? (
           <GlassSurface
             blurTint="systemUltraThinMaterialDark"
-            fallbackColor="rgba(8, 30, 65, 0.36)"
+            fallbackColor={HOME_COLORS.summaryBackdrop}
             glassEffectStyle="regular"
             intensity={76}
             reducedTransparencyColor="#173A68"
             style={[
               styles.nextAlarmCard,
-              useAccessibilityScreenScroll &&
+              (useAccessibilityScreenScroll || !stepGuidance.showProgress) &&
                 styles.alarmSummaryCardAccessible,
             ]}
             testID="next-alarm-summary"
@@ -1602,7 +1924,12 @@ function AlarmApp() {
             <View style={styles.nextAlarmHeader}>
               <View>
                 <Text style={styles.nextAlarmLabel}>次のアラーム</Text>
-                <Text style={styles.nextAlarmTime}>
+                <Text
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.5}
+                  numberOfLines={1}
+                  style={styles.nextAlarmTime}
+                >
                   {formatAlarmTime(
                     monitoringDefinition.hour,
                     monitoringDefinition.minute,
@@ -1631,6 +1958,23 @@ function AlarmApp() {
                   アプリ表示中に{STEP_THRESHOLD}歩
                 </Text>
               </View>
+            ) : !stepGuidance.showProgress ? (
+              <View style={[styles.progressCopy, styles.progressCopyPending]}>
+                <Text style={styles.progressStatus}>{stepGuidance.message}</Text>
+                {stepGuidance.canOpenSettings ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    hitSlop={4}
+                    onPress={openNotificationSettings}
+                    style={({ pressed }) => [
+                      styles.stepSettingsButton,
+                      pressed && styles.buttonDimmed,
+                    ]}
+                  >
+                    <Text style={styles.stepSettingsButtonText}>設定を開く</Text>
+                  </Pressable>
+                ) : null}
+              </View>
             ) : (
               <>
                 <View
@@ -1641,7 +1985,7 @@ function AlarmApp() {
                     max: STEP_THRESHOLD,
                     min: 0,
                     now: Math.min(windowStepCount, STEP_THRESHOLD),
-                    text: `${windowStepCount} / ${STEP_THRESHOLD}歩`,
+                    text: `${STEP_THRESHOLD}歩中${windowStepCount}歩`,
                   }}
                   style={styles.progressTrack}
                 >
@@ -1658,10 +2002,14 @@ function AlarmApp() {
                   />
                 </View>
                 <View style={styles.progressCopy}>
-                  <Text style={styles.progressText}>
+                  <Text
+                    accessibilityElementsHidden
+                    importantForAccessibility="no"
+                    style={styles.progressText}
+                  >
                     起床確認 {windowStepCount} / {STEP_THRESHOLD}歩
                   </Text>
-                  <Text style={styles.progressStatus}>{pedometerStatus}</Text>
+                  <Text style={styles.progressStatus}>{stepGuidance.message}</Text>
                 </View>
               </>
             )}
@@ -1669,7 +2017,7 @@ function AlarmApp() {
         ) : (
           <GlassSurface
             blurTint="systemUltraThinMaterialDark"
-            fallbackColor="rgba(8, 30, 65, 0.36)"
+            fallbackColor={HOME_COLORS.summaryBackdrop}
             glassEffectStyle="regular"
             intensity={76}
             reducedTransparencyColor="#173A68"
@@ -1697,10 +2045,30 @@ function AlarmApp() {
           </GlassSurface>
         )}
 
-        <View style={styles.listPanel}>
+        {suppressedOccurrence && !ringingCycle ? (
+          <View
+            accessible
+            accessibilityLabel={suppressedOccurrence.text}
+            style={styles.suppressedNote}
+            testID="suppressed-occurrence"
+          >
+            <Text style={styles.suppressedMark}>✓</Text>
+            <Text style={styles.suppressedText}>{suppressedOccurrence.text}</Text>
+          </View>
+        ) : null}
+
+        <View
+          accessibilityElementsHidden={listLocked}
+          importantForAccessibility={
+            listLocked ? 'no-hide-descendants' : 'auto'
+          }
+          style={[styles.listPanel, listLocked && styles.listPanelLocked]}
+        >
           <View style={styles.listHeader}>
             <View>
-              <Text style={styles.sectionTitle}>設定したアラーム</Text>
+              <Text accessibilityRole="header" style={styles.sectionTitle}>
+                設定したアラーム
+              </Text>
             </View>
             <View style={styles.alarmCountBadge}>
               <Text style={styles.alarmCount}>
@@ -1718,7 +2086,16 @@ function AlarmApp() {
             testID="alarm-list-scroll"
           >
 
-        {orderedAlarms.length === 0 ? (
+        {orderedAlarms.length === 0 && loadFailed ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyTitle}>
+              アラーム情報を読み込めません
+            </Text>
+            <Text style={styles.emptyText}>
+              {STORAGE_LOAD_FAILED_COPY.body}
+            </Text>
+          </View>
+        ) : orderedAlarms.length === 0 ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>アラームはまだありません</Text>
             <Text style={styles.emptyText}>
@@ -1748,6 +2125,9 @@ function AlarmApp() {
                   <View style={styles.alarmCardMain}>
                     <View style={styles.alarmCardCopy}>
                       <Text
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.5}
+                        numberOfLines={1}
                         style={[
                           styles.alarmTime,
                           !definition.enabled && styles.textDisabled,
@@ -1765,11 +2145,12 @@ function AlarmApp() {
                       </Text>
                     </View>
                     <Switch
+                      accessibilityHint="オフにすると、セット済みの通知をすべて取り消します"
                       accessibilityLabel={`${formatAlarmTime(
                         definition.hour,
                         definition.minute,
-                      )}のアラーム`}
-                      disabled={isBusy || Platform.OS === 'web'}
+                      )}、${formatRepeatLabel(definition.repeat)}のアラーム`}
+                      disabled={isBusy || listLocked || Platform.OS === 'web'}
                       onValueChange={(enabled) =>
                         void toggleAlarm(definition, enabled)
                       }
@@ -1778,6 +2159,12 @@ function AlarmApp() {
                       value={definition.enabled}
                     />
                   </View>
+                  {suppressedOccurrence?.alarmId === definition.id &&
+                  definition.enabled ? (
+                    <Text style={styles.rowSuppressedText}>
+                      ✓ {suppressedOccurrence.text}
+                    </Text>
+                  ) : null}
                   <View style={styles.alarmCardFooter}>
                     <Text
                       style={[
@@ -1793,9 +2180,9 @@ function AlarmApp() {
                       accessibilityLabel={`${formatAlarmTime(
                         definition.hour,
                         definition.minute,
-                      )}のアラームを削除`}
+                      )}、${formatRepeatLabel(definition.repeat)}のアラームを削除`}
                       accessibilityRole="button"
-                      disabled={isBusy}
+                      disabled={isBusy || listLocked}
                       onPress={() => confirmDeleteAlarm(definition)}
                       style={styles.deleteButton}
                     >
@@ -1857,6 +2244,7 @@ function AlarmApp() {
       <AlarmComposerModal
         bedsideGuidance={bedsideGuidance}
         canSubmit={canSubmitAlarm}
+        onDismissed={handleComposerDismissed}
         customWeekdays={customWeekdays}
         formNotice={composerNotice}
         isBusy={isBusy}
@@ -1869,6 +2257,7 @@ function AlarmApp() {
         onRepeatKindChange={setRepeatKind}
         onSubmit={() => void addAlarm()}
         onTimeChange={setSelectedTime}
+        summary={newAlarmSummary}
         onToggleWeekday={toggleCustomWeekday}
         repeatKind={repeatKind}
         selectedTime={selectedTime}
@@ -2051,9 +2440,9 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   nextAlarmLabel: {
-    color: 'rgba(255, 255, 255, 0.74)',
-    fontSize: 10,
-    lineHeight: 12,
+    color: HOME_COLORS.summaryText.label,
+    fontSize: 11,
+    lineHeight: 13,
     fontWeight: '900',
     letterSpacing: 0.6,
   },
@@ -2070,26 +2459,26 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
   },
   nextAlarmDate: {
-    color: '#FFFFFF',
+    color: HOME_COLORS.summaryText.date,
     fontSize: 12,
     fontWeight: '900',
   },
   nextAlarmCountdown: {
     marginTop: 4,
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 11,
+    color: HOME_COLORS.summaryText.countdown,
+    fontSize: 12,
   },
   progressTrack: {
     height: 6,
     marginTop: 8,
     overflow: 'hidden',
     borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+    backgroundColor: HOME_COLORS.progressTrack,
   },
   progressFill: {
     height: '100%',
     borderRadius: 999,
-    backgroundColor: '#73CFC0',
+    backgroundColor: HOME_COLORS.progressFill,
   },
   progressCopy: {
     flexDirection: 'row',
@@ -2103,16 +2492,16 @@ const styles = StyleSheet.create({
     marginTop: 21,
   },
   progressText: {
-    color: '#92E1D5',
-    fontSize: 10,
-    lineHeight: 12,
+    color: HOME_COLORS.summaryText.progress,
+    fontSize: 11,
+    lineHeight: 14,
     fontWeight: '900',
   },
   progressStatus: {
     flex: 1,
-    color: 'rgba(255, 255, 255, 0.66)',
-    fontSize: 9,
-    lineHeight: 12,
+    color: HOME_COLORS.summaryText.status,
+    fontSize: 11,
+    lineHeight: 15,
     textAlign: 'right',
   },
   ringingCard: {
@@ -2139,15 +2528,13 @@ const styles = StyleSheet.create({
     letterSpacing: -1.5,
   },
   ringingTitle: {
-    position: 'absolute',
-    top: 25,
-    right: 19,
+    marginTop: 2,
     color: '#FECDCA',
     fontSize: 13,
     fontWeight: '700',
   },
   stopButton: {
-    minHeight: 48,
+    minHeight: 56,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 8,
@@ -2156,8 +2543,9 @@ const styles = StyleSheet.create({
   },
   stopButtonText: {
     color: '#B42318',
-    fontSize: 14,
+    fontSize: 17,
     fontWeight: '900',
+    textAlign: 'center',
   },
   deliveryWarningCard: {
     // Grows with Dynamic Type so the warning is never clipped.
@@ -2255,8 +2643,11 @@ const styles = StyleSheet.create({
     marginTop: 10,
     marginBottom: 1,
     borderWidth: 0,
-    backgroundColor: 'rgba(6, 21, 45, 0.86)',
+    backgroundColor: HOME_COLORS.listBackdrop,
     borderRadius: 16,
+  },
+  listPanelLocked: {
+    opacity: 0.45,
   },
   listHeader: {
     flexDirection: 'row',
@@ -2288,8 +2679,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   alarmCount: {
-    color: '#B7C1CF',
-    fontSize: 10,
+    color: HOME_COLORS.listText.count,
+    fontSize: 11,
     fontWeight: '900',
   },
   alarmScroll: {
@@ -2331,11 +2722,11 @@ const styles = StyleSheet.create({
     letterSpacing: -1,
   },
   textDisabled: {
-    color: '#9AA3BA',
+    color: HOME_COLORS.listText.disabledTime,
   },
   repeatText: {
     marginTop: 3,
-    color: '#C5CDD8',
+    color: HOME_COLORS.listText.repeat,
     fontSize: 12,
     lineHeight: 17,
     fontWeight: '400',
@@ -2347,13 +2738,13 @@ const styles = StyleSheet.create({
     marginTop: 0,
   },
   scheduleSummary: {
-    color: '#B7C1CF',
-    fontSize: 11,
+    color: HOME_COLORS.listText.schedule,
+    fontSize: 12,
     flex: 1,
     paddingRight: 8,
   },
   scheduleSummaryWarning: {
-    color: '#FFB4AC',
+    color: HOME_COLORS.listText.warning,
     fontWeight: '700',
   },
   deleteButton: {
@@ -2363,7 +2754,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   deleteText: {
-    color: '#FFB4AC',
+    color: HOME_COLORS.listText.delete,
     fontSize: 12,
     fontWeight: '500',
   },
@@ -2384,10 +2775,54 @@ const styles = StyleSheet.create({
   emptyText: {
     maxWidth: 300,
     marginTop: 6,
-    color: '#C5CDD8',
-    fontSize: 11,
+    color: HOME_COLORS.listText.empty,
+    fontSize: 12,
     lineHeight: 17,
     textAlign: 'center',
+  },
+  suppressedNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: BEDSIDE_FOOTER_COLORS.backdrop,
+  },
+  suppressedMark: {
+    color: HOME_COLORS.summaryText.progress,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '900',
+  },
+  suppressedText: {
+    flex: 1,
+    color: BEDSIDE_FOOTER_COLORS.title,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
+  rowSuppressedText: {
+    marginTop: 4,
+    color: HOME_COLORS.listText.repeat,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '700',
+  },
+  stepSettingsButton: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  stepSettingsButtonText: {
+    color: '#173A68',
+    fontSize: 13,
+    fontWeight: '900',
   },
   deviceNotice: {
     marginTop: 10,
