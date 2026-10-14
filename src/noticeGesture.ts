@@ -1,5 +1,8 @@
 export const NOTICE_OFFSCREEN_Y = -160;
 
+/** Apple's minimum touch target; the close control never goes below it. */
+export const NOTICE_CLOSE_MIN_SIZE = 44;
+
 const NOTICE_SWIPE_CAPTURE_DISTANCE = 6;
 const NOTICE_SWIPE_DISMISS_DISTANCE = 32;
 const NOTICE_SWIPE_DISMISS_VELOCITY = -0.55;

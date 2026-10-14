@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  NOTICE_CLOSE_MIN_SIZE,
   NOTICE_OFFSCREEN_Y,
   clampNoticeSwipeOffset,
   shouldCaptureNoticeSwipe,
@@ -27,4 +28,8 @@ test('notice swipe dismisses by distance or upward velocity', () => {
   assert.equal(shouldDismissNoticeSwipe(-12, -0.6), true);
   assert.equal(shouldDismissNoticeSwipe(-12, -0.2), false);
   assert.equal(shouldDismissNoticeSwipe(18, -1), false);
+});
+
+test('notice close control meets the 44pt minimum touch target', () => {
+  assert.equal(NOTICE_CLOSE_MIN_SIZE >= 44, true);
 });
