@@ -12,6 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
+  NOTICE_CLOSE_MIN_SIZE,
   NOTICE_OFFSCREEN_Y,
   clampNoticeSwipeOffset,
   shouldCaptureNoticeSwipe,
@@ -199,21 +200,30 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
             style={styles.swipeCue}
           />
           <View style={[styles.symbol, styles[`symbol_${notice.tone}`]]}>
-            <Text style={styles.symbolText}>{SYMBOLS[notice.tone]}</Text>
+            <Text
+              accessibilityElementsHidden
+              allowFontScaling={false}
+              importantForAccessibility="no"
+              style={styles.symbolText}
+            >
+              {SYMBOLS[notice.tone]}
+            </Text>
           </View>
           <Text style={styles.text}>{notice.text}</Text>
           <Pressable
             accessibilityHint="上にスワイプしても閉じられます"
             accessibilityLabel="お知らせを閉じる"
             accessibilityRole="button"
-            hitSlop={10}
+            hitSlop={4}
             onPress={dismiss}
             style={({ pressed }) => [
               styles.close,
               pressed && styles.closePressed,
             ]}
           >
-            <Text style={styles.closeText}>×</Text>
+            <Text allowFontScaling={false} style={styles.closeText}>
+              ×
+            </Text>
           </Pressable>
         </GlassSurface>
       </Animated.View>
@@ -309,8 +319,8 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   close: {
-    width: 38,
-    height: 38,
+    width: NOTICE_CLOSE_MIN_SIZE,
+    height: NOTICE_CLOSE_MIN_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
