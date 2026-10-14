@@ -2,7 +2,11 @@ import {
   CHECK_IN_KIND,
   CONFIRM_AWAKE_ACTION,
 } from './alarmContracts';
-import { canSuppressAlarm, finalizeSuppression } from './alarmPolicy';
+import {
+  canSuppressAlarm,
+  finalizeSuppression,
+  type SuppressionDecision,
+} from './alarmPolicy';
 import type { StoredAlarm } from './alarmStorage';
 import { mergeWindowStepCount } from './stepWindow';
 
@@ -84,6 +88,61 @@ export interface AwakeResponseDependencies {
   loadAlarm(): Promise<StoredAlarm | null>;
   saveAlarm(alarm: StoredAlarm): Promise<void>;
   cancelScheduled(notificationId: string): Promise<boolean>;
+  /** Fresh clock read, taken right before cancelling (after async loads). */
+  nowMs?(): number;
+  /** Durable intent record so a cancel-then-save failure can be recovered. */
+  journal?: SuppressionJournal;
+}
+
+export interface SuppressionIntent {
+  cycleId: string;
+  alarmId: string;
+  mainAlarmId: string;
+  checkInNotificationId?: string;
+  armedAtMs: number;
+  dueAtMs: number;
+  /** 'cancelled' only after the OS cancellation was positively confirmed. */
+  stage: 'cancelling' | 'cancelled';
+  /** The state to persist once suppression is confirmed. */
+  suppressed: StoredAlarm;
+}
+
+export interface SuppressionJournal {
+  record(intent: SuppressionIntent): Promise<void>;
+  load(): Promise<SuppressionIntent[]>;
+  clear(cycleId: string): Promise<void>;
+  /**
+   * Runs one stop or recovery to completion before the next begins. The lock
+   * is in-process only; the persisted entries are what survives a restart.
+   */
+  exclusive<T>(run: () => Promise<T>): Promise<T>;
+}
+
+export class SuppressionSaveError extends Error {
+  readonly cycleId: string;
+  constructor(cycleId: string, readonly originalError: unknown) {
+    super(
+      '起床を確認し通知を取り消しましたが、状態を保存できませんでした。次回起動時に復旧します。',
+    );
+    this.name = 'SuppressionSaveError';
+    this.cycleId = cycleId;
+  }
+}
+
+/**
+ * The cancellation call threw after the intent was recorded: the main
+ * notification may or may not still be scheduled. The intent stays in the
+ * journal as 'cancelling' and the app must not claim either outcome.
+ */
+export class SuppressionCancelUnknownError extends Error {
+  readonly cycleId: string;
+  constructor(cycleId: string, readonly originalError: unknown) {
+    super(
+      'アラームの取り消し結果を確認できませんでした。予約状態は未確認です。',
+    );
+    this.name = 'SuppressionCancelUnknownError';
+    this.cycleId = cycleId;
+  }
 }
 
 export type AwakeResponseResult =
@@ -98,7 +157,211 @@ export interface StepThresholdInput {
   countedFromMs: number;
 }
 
-export async function processAwakeResponseFailSafe(
+async function cancelAndPersistSuppression(
+  dependencies: AwakeResponseDependencies,
+  activeAlarm: StoredAlarm,
+  decision: SuppressionDecision,
+  suppressed: StoredAlarm,
+): Promise<AwakeResponseResult> {
+  // The async load above may have been slow; never rely on the evidence time.
+  const nowMs = (dependencies.nowMs ?? Date.now)();
+  if (!Number.isFinite(nowMs) || nowMs >= activeAlarm.dueAtMs) {
+    return { status: 'alarm_remains', reason: 'ALARM_DUE_OR_PAST' };
+  }
+
+  const journal = dependencies.journal;
+  const intent: SuppressionIntent = {
+    cycleId: activeAlarm.cycleId,
+    alarmId: activeAlarm.alarmId,
+    mainAlarmId: activeAlarm.mainAlarmId,
+    checkInNotificationId: activeAlarm.checkInNotificationId,
+    armedAtMs: activeAlarm.armedAtMs,
+    dueAtMs: activeAlarm.dueAtMs,
+    stage: 'cancelling',
+    suppressed,
+  };
+  if (journal) {
+    try {
+      // An earlier attempt for this cycle may be half done. Recording again
+      // would overwrite its stage and lose the evidence recovery relies on.
+      const existing = await journal.load();
+      if (existing.some((entry) => entry.cycleId === intent.cycleId)) {
+        return { status: 'alarm_remains', reason: 'SUPPRESSION_PENDING' };
+      }
+      await journal.record(intent);
+    } catch {
+      return { status: 'alarm_remains', reason: 'JOURNAL_NOT_WRITTEN' };
+    }
+
+    // The journal write awaited storage; look at the clock again so a slow
+    // write can never cancel an alarm that has come due in the meantime.
+    const freshNowMs = (dependencies.nowMs ?? Date.now)();
+    if (!Number.isFinite(freshNowMs) || freshNowMs >= activeAlarm.dueAtMs) {
+      await journal.clear(activeAlarm.cycleId).catch(() => undefined);
+      return { status: 'alarm_remains', reason: 'ALARM_DUE_OR_PAST' };
+    }
+  }
+
+  let cancellationSucceeded: boolean;
+  try {
+    cancellationSucceeded = await dependencies.cancelScheduled(
+      activeAlarm.mainAlarmId,
+    );
+  } catch (error) {
+    // The intent stays recorded as 'cancelling': the outcome is unknown.
+    throw journal
+      ? new SuppressionCancelUnknownError(activeAlarm.cycleId, error)
+      : error;
+  }
+  if (
+    finalizeSuppression(decision, cancellationSucceeded) !== 'SUPPRESSED'
+  ) {
+    await journal?.clear(activeAlarm.cycleId).catch(() => undefined);
+    return { status: 'alarm_remains', reason: 'CANCEL_NOT_VERIFIED' };
+  }
+
+  await journal
+    ?.record({ ...intent, stage: 'cancelled' })
+    .catch(() => undefined);
+
+  let saveError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await dependencies.saveAlarm(suppressed);
+      await journal?.clear(activeAlarm.cycleId).catch(() => undefined);
+      return { status: 'suppressed', alarm: suppressed };
+    } catch (error) {
+      saveError = error;
+    }
+  }
+  throw new SuppressionSaveError(activeAlarm.cycleId, saveError);
+}
+
+export interface SuppressionRecoveryDependencies {
+  saveAlarm(alarm: StoredAlarm): Promise<void>;
+  journal: SuppressionJournal;
+  /** Identifiers of notifications currently scheduled with the OS. */
+  listScheduledIds(): Promise<ReadonlySet<string>>;
+  nowMs?(): number;
+}
+
+export interface SuppressionRecoveryOutcome {
+  /** Cycles restored to 'suppressed' from a confirmed cancellation. */
+  recovered: SuppressionIntent[];
+  /**
+   * Cancellations whose result is unknown: the main notification is no longer
+   * scheduled but was never confirmed cancelled. Kept in the journal; the app
+   * must not claim the alarm is armed or stopped.
+   */
+  unresolved: SuppressionIntent[];
+  /** Confirmed cancellations that could not be saved yet. Kept for retry. */
+  saveFailed: SuppressionIntent[];
+}
+
+function matchesIntent(
+  current: StoredAlarm | null,
+  intent: SuppressionIntent,
+): current is StoredAlarm {
+  return (
+    !!current &&
+    (current.phase === 'armed' || current.phase === 'step_candidate') &&
+    current.alarmId === intent.alarmId &&
+    current.mainAlarmId === intent.mainAlarmId &&
+    current.checkInNotificationId === intent.checkInNotificationId &&
+    current.dueAtMs === intent.dueAtMs &&
+    current.armedAtMs === intent.armedAtMs
+  );
+}
+
+/**
+ * Settles suppressions left over from a crash or a failed save. Only exact
+ * id/due matches are touched and nothing is ever cancelled here.
+ *  - 'cancelled' (cancellation confirmed): the suppressed state is saved.
+ *  - 'cancelling' (result unknown): the record is kept. If the OS still has
+ *    the main notification the cancel never happened and the alarm is simply
+ *    armed; if it is gone we cannot tell cancelled from fired, so the intent
+ *    is reported as unresolved. Absence from the OS never implies suppressed.
+ */
+export function recoverSuppressionJournal(
+  dependencies: SuppressionRecoveryDependencies,
+  loadByCycleId: (cycleId: string) => Promise<StoredAlarm | null>,
+): Promise<SuppressionRecoveryOutcome> {
+  // Waits for any live stop so it cannot clear or misjudge its record.
+  return dependencies.journal.exclusive(() =>
+    recoverUnderLock(dependencies, loadByCycleId),
+  );
+}
+
+async function recoverUnderLock(
+  dependencies: SuppressionRecoveryDependencies,
+  loadByCycleId: (cycleId: string) => Promise<StoredAlarm | null>,
+): Promise<SuppressionRecoveryOutcome> {
+  const outcome: SuppressionRecoveryOutcome = {
+    recovered: [],
+    unresolved: [],
+    saveFailed: [],
+  };
+  const { journal } = dependencies;
+
+  for (const intent of await journal.load()) {
+    try {
+      const current = await loadByCycleId(intent.cycleId);
+      if (!matchesIntent(current, intent)) {
+        // The cycle has moved on (suppressed, dismissed, replaced, gone).
+        await journal.clear(intent.cycleId);
+        continue;
+      }
+
+      if (intent.stage === 'cancelled') {
+        try {
+          await dependencies.saveAlarm(intent.suppressed);
+        } catch {
+          outcome.saveFailed.push(intent);
+          continue;
+        }
+        await journal.clear(intent.cycleId);
+        outcome.recovered.push(intent);
+        continue;
+      }
+
+      const nowMs = (dependencies.nowMs ?? Date.now)();
+      if (!Number.isFinite(nowMs) || nowMs >= intent.dueAtMs) {
+        // Due time passed: the ring path (or the OS) now decides.
+        await journal.clear(intent.cycleId);
+        continue;
+      }
+
+      const scheduled = await dependencies.listScheduledIds();
+      if (scheduled.has(intent.mainAlarmId)) {
+        // Still scheduled: the cancel never took effect.
+        await journal.clear(intent.cycleId);
+        continue;
+      }
+      outcome.unresolved.push(intent);
+    } catch {
+      // Could not inspect it: keep the record and say so.
+      outcome.unresolved.push(intent);
+    }
+  }
+  return outcome;
+}
+
+function exclusively<T>(
+  dependencies: AwakeResponseDependencies,
+  run: () => Promise<T>,
+): Promise<T> {
+  // Load, journal and cancel form one critical section per process.
+  return dependencies.journal ? dependencies.journal.exclusive(run) : run();
+}
+
+export function processAwakeResponseFailSafe(
+  dependencies: AwakeResponseDependencies,
+  input: AwakeResponseInput,
+): Promise<AwakeResponseResult> {
+  return exclusively(dependencies, () => awakeResponse(dependencies, input));
+}
+
+async function awakeResponse(
   dependencies: AwakeResponseDependencies,
   input: AwakeResponseInput,
 ): Promise<AwakeResponseResult> {
@@ -146,25 +409,27 @@ export async function processAwakeResponseFailSafe(
     return { status: 'alarm_remains', reason: decision.reason };
   }
 
-  const cancellationSucceeded = await dependencies.cancelScheduled(
-    activeAlarm.mainAlarmId,
-  );
-  if (
-    finalizeSuppression(decision, cancellationSucceeded) !== 'SUPPRESSED'
-  ) {
-    return { status: 'alarm_remains', reason: 'CANCEL_NOT_VERIFIED' };
-  }
-
   const suppressed: StoredAlarm = {
     ...activeAlarm,
     phase: 'suppressed',
     confirmedAtMs: input.confirmedAtMs,
   };
-  await dependencies.saveAlarm(suppressed);
-  return { status: 'suppressed', alarm: suppressed };
+  return cancelAndPersistSuppression(
+    dependencies,
+    activeAlarm,
+    decision,
+    suppressed,
+  );
 }
 
-export async function processStepThresholdFailSafe(
+export function processStepThresholdFailSafe(
+  dependencies: AwakeResponseDependencies,
+  input: StepThresholdInput,
+): Promise<AwakeResponseResult> {
+  return exclusively(dependencies, () => stepThreshold(dependencies, input));
+}
+
+async function stepThreshold(
   dependencies: AwakeResponseDependencies,
   input: StepThresholdInput,
 ): Promise<AwakeResponseResult> {
@@ -200,15 +465,6 @@ export async function processStepThresholdFailSafe(
     return { status: 'alarm_remains', reason: decision.reason };
   }
 
-  const cancellationSucceeded = await dependencies.cancelScheduled(
-    activeAlarm.mainAlarmId,
-  );
-  if (
-    finalizeSuppression(decision, cancellationSucceeded) !== 'SUPPRESSED'
-  ) {
-    return { status: 'alarm_remains', reason: 'CANCEL_NOT_VERIFIED' };
-  }
-
   const suppressed: StoredAlarm = {
     ...activeAlarm,
     phase: 'suppressed',
@@ -217,6 +473,10 @@ export async function processStepThresholdFailSafe(
     stepCandidateAtMs: input.observedAtMs,
     confirmedAtMs: input.observedAtMs,
   };
-  await dependencies.saveAlarm(suppressed);
-  return { status: 'suppressed', alarm: suppressed };
+  return cancelAndPersistSuppression(
+    dependencies,
+    activeAlarm,
+    decision,
+    suppressed,
+  );
 }

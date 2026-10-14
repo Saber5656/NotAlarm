@@ -193,6 +193,17 @@ export async function scheduleCheckInNotification(input: {
   });
 }
 
+/** Read-only: identifiers the OS currently has scheduled. */
+export async function listScheduledNotificationIds(): Promise<
+  ReadonlySet<string>
+> {
+  if (Platform.OS === 'web') {
+    return new Set();
+  }
+  const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+  return new Set(scheduled.map((request) => request.identifier));
+}
+
 export async function cancelScheduledNotification(
   notificationId: string | undefined,
 ): Promise<boolean> {
