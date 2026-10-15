@@ -21,6 +21,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { RepeatKind, Weekday } from '../alarmSchedule';
+import { toggleSemantics } from './choiceSemantics';
 import { parseAlarmTimeInput } from '../alarmTime';
 import type { BedsideGuidance } from '../bedsideMode';
 import type { NewAlarmSummary } from '../homeStatus';
@@ -623,8 +624,7 @@ export function AlarmComposerModal({
                           return (
                             <Pressable
                               accessibilityLabel={formatter.weekdayLong(value)}
-                              accessibilityRole="button"
-                              accessibilityState={{ disabled: isBusy, selected }}
+                              {...toggleSemantics(selected, isBusy)}
                               disabled={isBusy}
                               hitSlop={2}
                               key={value}
@@ -640,6 +640,15 @@ export function AlarmComposerModal({
                                 pressed && styles.buttonPressed,
                               ]}
                             >
+                              {selected ? (
+                                <Text
+                                  accessibilityElementsHidden
+                                  importantForAccessibility="no"
+                                  style={styles.weekdayCheck}
+                                >
+                                  ✓
+                                </Text>
+                              ) : null}
                               <Text
                                 style={[
                                   styles.weekdayButtonText,
@@ -1128,6 +1137,12 @@ const styles = StyleSheet.create({
   },
   weekdayButtonDisabled: {
     opacity: 0.48,
+  },
+  weekdayCheck: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+    lineHeight: 11,
   },
   weekdayButtonText: {
     color: UI_COLORS.textMuted,

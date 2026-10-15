@@ -9,6 +9,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 
+import { tabSemantics } from './choiceSemantics';
 import { GlassSurface } from './GlassSurface';
 import { useText } from './I18nContext';
 import { UI_COLORS } from './tokens';
@@ -76,6 +77,7 @@ export function LiquidComposerTabs({
   return (
     <View
       accessibilityLabel={messages.composer.tabsLabel}
+      accessibilityRole="tablist"
       onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
       style={[styles.track, style]}
       testID="composer-section-tabs"
@@ -115,8 +117,7 @@ export function LiquidComposerTabs({
                 : undefined
             }
             accessibilityLabel={option.label}
-            accessibilityRole="button"
-            accessibilityState={{ disabled: optionDisabled, selected }}
+            {...tabSemantics(selected, optionDisabled)}
             disabled={optionDisabled}
             key={option.section}
             onPress={() => onChange(option.section)}
