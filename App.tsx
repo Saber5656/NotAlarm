@@ -57,6 +57,13 @@ import {
   cancelAlarmDefinitionWithCheckpoints,
 } from './src/alarmCancellation';
 import {
+  AlarmEditError,
+  editAlarmDefinition,
+  recoverPendingAlarmEdit,
+  resolveEditedRepeat,
+  type AlarmEditJournal,
+} from './src/alarmEdit';
+import {
   type AlarmScheduleIssue,
   getNextMonitoringCycle,
   getRingingCycle,
@@ -84,6 +91,7 @@ import {
   formatRepeatLabel,
   getNextAlarmTime,
   makeAlarmRepeat,
+  type AlarmRepeat,
   type RepeatKind,
   type Weekday,
 } from './src/alarmSchedule';
@@ -114,12 +122,15 @@ import {
   type StoredAlarmDefinition,
   loadAlarmDefinitions,
   loadPendingAlarmCancellations,
+  loadPendingAlarmEdits,
   loadStoredAlarmByCycleId,
   markDueCyclesRinging,
   mutateAlarmDefinitions,
   removePendingAlarmCancellation,
   runExclusiveAlarmStorage,
+  removePendingAlarmEdit,
   saveMonitoringCycleStepCount,
+  savePendingAlarmEdit,
   saveStoredAlarm,
   transactAlarmDefinitions,
   upsertPendingAlarmCancellation,
@@ -288,6 +299,90 @@ async function cancelAlarmDefinitionPersistently(
   return next;
 }
 
+const alarmEditJournal: AlarmEditJournal = {
+  load: loadPendingAlarmEdits,
+  save: savePendingAlarmEdit,
+  remove: removePendingAlarmEdit,
+};
+
+const PENDING_EDIT_COPY =
+  '前回のアラーム編集が完了していません。アプリを開き直すと続きを処理します。';
+
+async function hasPendingAlarmEdit(alarmId: string): Promise<boolean> {
+  return (await loadPendingAlarmEdits()).some(
+    (entry) => entry.alarmId === alarmId,
+  );
+}
+
+const alarmEditGateway = {
+  ...schedulingGateway,
+  cancelScheduled: cancelNotificationIfPresent,
+  listScheduledIds: listScheduledNotificationIds,
+};
+
+/**
+ * Replaces one alarm's schedule. Runs under the same lock as stop
+ * confirmations so an old cycle cannot be suppressed while it is being
+ * replaced. Only the ids journaled for this alarm are ever cancelled.
+ */
+async function editAlarmPersistently(input: {
+  alarmId: string;
+  hour: number;
+  minute: number;
+  repeat: AlarmRepeat;
+}) {
+  return suppressionJournal.exclusive(async () => {
+    // An unfinished reset owns the notification queue; nothing is scheduled.
+    await assertNoPendingReset();
+    let result: Awaited<ReturnType<typeof editAlarmDefinition>> | null = null;
+    await transactAlarmDefinitions(async (current, checkpoint) => {
+      result = await editAlarmDefinition({
+        ...input,
+        // Read after the locks are held and before each destructive step.
+        now: Date.now,
+        alarms: current,
+        gateway: alarmEditGateway,
+        journal: alarmEditJournal,
+        checkpoint,
+        hasUnsettledWork: async (alarmId, cycleIds) => {
+          if (
+            (await loadPendingAlarmCancellations()).some(
+              (pending) => pending.alarmId === alarmId,
+            )
+          ) {
+            return true;
+          }
+          return (await suppressionJournal.load()).some((intent) =>
+            cycleIds.includes(intent.cycleId),
+          );
+        },
+      });
+      return result.alarms;
+    });
+    if (!result) {
+      throw new Error('アラームを編集できませんでした。');
+    }
+    return result as Awaited<ReturnType<typeof editAlarmDefinition>>;
+  });
+}
+
+async function recoverPendingAlarmEdits(): Promise<void> {
+  // Same order as an edit: suppression lock first, then the storage queue.
+  await suppressionJournal.exclusive(async () => {
+    for (const entry of await loadPendingAlarmEdits()) {
+      await transactAlarmDefinitions((current, checkpoint) =>
+        recoverPendingAlarmEdit({
+          alarms: current,
+          entry,
+          gateway: alarmEditGateway,
+          journal: alarmEditJournal,
+          checkpoint,
+        }),
+      );
+    }
+  });
+}
+
 async function recoverPendingAlarmCancellations(): Promise<void> {
   const pendingEntries = await loadPendingAlarmCancellations();
   for (const pending of pendingEntries) {
@@ -420,6 +515,11 @@ async function reconcileScheduleWithQueueOnce(
             ),
           );
           for (const pending of await suppressionJournal.load()) {
+            excludedAlarmIds.add(pending.alarmId);
+          }
+          // An unsettled edit owns its alarm: the old reservation must not be
+          // rebuilt and the new one must not be judged until recovery ends.
+          for (const pending of await loadPendingAlarmEdits()) {
             excludedAlarmIds.add(pending.alarmId);
           }
           outcome = await reconcileAlarmSchedules({
@@ -648,6 +748,10 @@ async function refillEnabledSchedulesOnce(
     for (const pending of await suppressionJournal.load()) {
       pendingAlarmIds.add(pending.alarmId);
     }
+    // An unfinished edit owns its alarm's schedule until startup settles it.
+    for (const pending of await loadPendingAlarmEdits()) {
+      pendingAlarmIds.add(pending.alarmId);
+    }
     const fillIssues: AlarmScheduleIssue[] = [];
     let attemptedAlarmIds: string[] = [];
     const alarms = await withScheduledNotificationRollback(
@@ -748,6 +852,8 @@ function AlarmApp() {
   const [isLoaded, setIsLoaded] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [isComposerOpen, setIsComposerOpen] = useState(false);
+  // The alarm the open composer is editing; null while adding a new one.
+  const [editingAlarmId, setEditingAlarmId] = useState<string | null>(null);
   const [selectedTime, setSelectedTime] = useState(defaultWakeTime);
   const [repeatKind, setRepeatKind] = useState<RepeatKind>('weekdays');
   const [customWeekdays, setCustomWeekdays] = useState<Weekday[]>([1, 2, 3, 4, 5]);
@@ -1019,6 +1125,18 @@ function AlarmApp() {
             });
           }
         }
+        let editRecoveryFailed = false;
+        try {
+          await recoverPendingAlarmEdits();
+        } catch {
+          editRecoveryFailed = true;
+          if (mounted) {
+            setNotice({
+              tone: 'danger',
+              text: '前回のアラーム編集を完了できませんでした。端末の通知一覧を確認してください。',
+            });
+          }
+        }
         // Finish or report half-done stops before anything is marked due.
         const reconciled = await reconcileSuppressions();
         if (mounted) {
@@ -1045,7 +1163,8 @@ function AlarmApp() {
           Platform.OS !== 'web' &&
           restored.some((definition) => definition.enabled)
         ) {
-          if (!safeToRefill) {
+          if (!safeToRefill || editRecoveryFailed) {
+            // Startup does not refill until the stop and edit are finished.
             recordRefill(getSkippedRefillAttempt(restored));
           } else {
             restored =
@@ -1217,6 +1336,7 @@ function AlarmApp() {
   useEffect(() => {
     if (ringingCycle) {
       setIsComposerOpen(false);
+      setEditingAlarmId(null);
     }
   }, [ringingCycle?.cycleId]);
 
@@ -1867,6 +1987,10 @@ function AlarmApp() {
       setIsBusy(true);
       setNotice(null);
       try {
+        if (await hasPendingAlarmEdit(definition.id)) {
+          setNotice({ tone: 'warning', text: PENDING_EDIT_COPY });
+          return;
+        }
         if (!enabled) {
           const next = await cancelAlarmDefinitionPersistently(
             definition.id,
@@ -1975,6 +2099,10 @@ function AlarmApp() {
 
       setIsBusy(true);
       try {
+        if (await hasPendingAlarmEdit(definition.id)) {
+          setNotice({ tone: 'warning', text: PENDING_EDIT_COPY });
+          return;
+        }
         const next = await cancelAlarmDefinitionPersistently(
           definition.id,
           'delete',
@@ -2001,10 +2129,114 @@ function AlarmApp() {
     [isBusy, reportResetPending, setCurrentAlarms],
   );
 
+  const performEditAlarm = useCallback(
+    async (alarmId: string) => {
+      if (isBusy) {
+        return;
+      }
+
+      setIsBusy(true);
+      setNotice(null);
+      try {
+        const target = alarmsRef.current.find((alarm) => alarm.id === alarmId);
+        if (!target) {
+          throw new Error('対象のアラームが見つかりません。');
+        }
+        const hour = selectedTime.getHours();
+        const minute = selectedTime.getMinutes();
+        if (target.enabled) {
+          // The permission prompt can take any amount of time: read the clock
+          // only after it, and let the edit read its own fresh clock later.
+          await prepareNotifications();
+        }
+        const editedAtMs = Date.now();
+        const repeat = resolveEditedRepeat(
+          target.repeat,
+          repeatKind,
+          customWeekdays,
+          editedAtMs,
+        );
+        const result = await editAlarmPersistently({
+          alarmId,
+          hour,
+          minute,
+          repeat,
+        });
+        recordRefill({ attemptedAlarmIds: [alarmId], issues: result.issues });
+        setCurrentAlarms(result.alarms);
+        setIsComposerOpen(false);
+        setEditingAlarmId(null);
+
+        const edited = result.alarms.find((alarm) => alarm.id === alarmId);
+        const nextDueAtMs = edited
+          ? nextCycleForDefinition(edited, editedAtMs)?.dueAtMs
+          : undefined;
+        const clockLabel = formatAlarmTime(hour, minute);
+        const severity = getAlarmScheduleIssueSeverity(result.issues);
+        if (result.cleanupPending) {
+          setNotice({
+            tone: 'warning',
+            text: `${clockLabel}に変更しましたが、古い通知の一部を解除できていません。旧い時刻の通知が鳴る可能性があります。アプリを開き直すと再試行します。`,
+          });
+        } else if (severity !== 'none') {
+          setNotice({
+            tone: 'warning',
+            text: `${clockLabel}に変更しましたが、一部の起床確認通知を予約できませんでした。`,
+          });
+        } else {
+          setNotice({
+            tone: 'success',
+            text: !target.enabled
+              ? `${clockLabel}に変更しました。アラームはオフのままです。`
+              : nextDueAtMs !== undefined
+                ? `${clockLabel}のアラームに変更しました。次回は${formatNextDate(
+                    nextDueAtMs,
+                  )} ${clockLabel}に鳴ります。`
+                : `${clockLabel}のアラームに変更しました。`,
+          });
+        }
+      } catch (error) {
+        if (reportResetPending(error)) {
+          return;
+        }
+        try {
+          setCurrentAlarms(await loadAlarmDefinitions());
+        } catch {
+          // Keep the last in-memory snapshot if storage cannot be read either.
+        }
+        if (error instanceof AlarmEditError && !error.rolledBack) {
+          // The edit is half done and journaled; the form has nothing to fix.
+          setIsComposerOpen(false);
+          setEditingAlarmId(null);
+        }
+        setNotice({
+          tone: 'danger',
+          text:
+            error instanceof Error
+              ? error.message
+              : 'アラームを編集できませんでした。',
+        });
+      } finally {
+        setIsBusy(false);
+        void refreshNotificationDelivery();
+      }
+    },
+    [
+      customWeekdays,
+      isBusy,
+      recordRefill,
+      refreshNotificationDelivery,
+      reportResetPending,
+      repeatKind,
+      selectedTime,
+      setCurrentAlarms,
+    ],
+  );
+
   const notifyListLocked = useCallback(() => {
     setNotice({
       tone: 'warning',
-      text: `アラームが鳴っている間は、オン・オフや削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`,
+      text: `アラームが鳴っている間は、オン・オフ、編集、削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`,
     });
   }, []);
 
@@ -2030,6 +2262,39 @@ function AlarmApp() {
         run: () => performDeleteAlarm(definition),
       }),
     [notifyListLocked, performDeleteAlarm],
+  );
+
+  const openEditComposer = useCallback(
+    (definition: StoredAlarmDefinition) =>
+      runUnlessAlarmListLocked({
+        getAlarms: () => alarmsRef.current,
+        nowMs: Date.now,
+        onBlocked: notifyListLocked,
+        run: async () => {
+          const time = new Date();
+          time.setHours(definition.hour, definition.minute, 0, 0);
+          setSelectedTime(time);
+          setRepeatKind(definition.repeat.kind);
+          if (definition.repeat.kind === 'custom') {
+            setCustomWeekdays([...definition.repeat.weekdays]);
+          }
+          setEditingAlarmId(definition.id);
+          setNotice(null);
+          setIsComposerOpen(true);
+        },
+      }),
+    [notifyListLocked],
+  );
+
+  const editAlarm = useCallback(
+    (alarmId: string) =>
+      runUnlessAlarmListLocked({
+        getAlarms: () => alarmsRef.current,
+        nowMs: Date.now,
+        onBlocked: notifyListLocked,
+        run: () => performEditAlarm(alarmId),
+      }),
+    [notifyListLocked, performEditAlarm],
   );
 
   const confirmDeleteAlarm = useCallback(
@@ -2356,7 +2621,13 @@ function AlarmApp() {
     isBusy,
     isLoaded,
   });
+  const editingDefinition = editingAlarmId
+    ? alarms.find((alarm) => alarm.id === editingAlarmId)
+    : undefined;
+  const isEditing = editingDefinition !== undefined;
   const newAlarmSummary = summarizeNewAlarm({
+    existingRepeat: editingDefinition?.repeat,
+    enabled: editingDefinition?.enabled,
     nowMs,
     hour: selectedTime.getHours(),
     minute: selectedTime.getMinutes(),
@@ -2364,9 +2635,12 @@ function AlarmApp() {
     customWeekdays,
     formatDate: formatNextDate,
   });
+  // Editing does not add an alarm, so a full list must not block it.
   const canSubmitAlarm =
     Platform.OS !== 'web' &&
-    canOpenComposer &&
+    (isEditing
+      ? !ringingCycle && !loadFailed && !isBusy
+      : canOpenComposer) &&
     newAlarmSummary.canAdd;
   const composerNotice =
     isComposerOpen &&
@@ -2493,6 +2767,13 @@ function AlarmApp() {
                 disabled={!canOpenComposer}
                 onPress={() => {
                   setNotice(null);
+                  if (editingAlarmId !== null) {
+                    // Leaving an edit: do not carry its values into a new alarm.
+                    setEditingAlarmId(null);
+                    setSelectedTime(defaultWakeTime());
+                    setRepeatKind('weekdays');
+                    setCustomWeekdays([1, 2, 3, 4, 5]);
+                  }
                   setIsComposerOpen(true);
                 }}
                 style={({ pressed }) => [
@@ -2999,6 +3280,23 @@ function AlarmApp() {
                           ? deliveryWarningCopy.scheduleLine
                           : coverageLine.text}
                     </Text>
+                    <View style={styles.alarmCardActions}>
+                    <Pressable
+                      accessibilityHint="時刻と繰り返しを変更します。オンのアラームは通知を予約し直します"
+                      accessibilityLabel={`${formatAlarmTime(
+                        definition.hour,
+                        definition.minute,
+                      )}、${formatRepeatLabel(definition.repeat)}のアラームを編集`}
+                      accessibilityRole="button"
+                      accessibilityState={{
+                        disabled: isBusy || listLocked || Platform.OS === 'web',
+                      }}
+                      disabled={isBusy || listLocked || Platform.OS === 'web'}
+                      onPress={() => void openEditComposer(definition)}
+                      style={styles.editButton}
+                    >
+                      <Text style={styles.editText}>編集</Text>
+                    </Pressable>
                     <Pressable
                       accessibilityLabel={`${formatAlarmTime(
                         definition.hour,
@@ -3011,6 +3309,7 @@ function AlarmApp() {
                     >
                       <Text style={styles.deleteText}>削除</Text>
                     </Pressable>
+                    </View>
                   </View>
                 </View>
               );
@@ -3121,14 +3420,18 @@ function AlarmApp() {
         customWeekdays={customWeekdays}
         formNotice={composerNotice}
         isBusy={isBusy}
+        mode={isEditing ? 'edit' : 'add'}
         onClose={() => {
           setIsComposerOpen(false);
+          setEditingAlarmId(null);
           if (notice?.tone === 'danger' || notice?.tone === 'warning') {
             setNotice(null);
           }
         }}
         onRepeatKindChange={setRepeatKind}
-        onSubmit={() => void addAlarm()}
+        onSubmit={() =>
+          void (editingDefinition ? editAlarm(editingDefinition.id) : addAlarm())
+        }
         onTimeChange={setSelectedTime}
         summary={newAlarmSummary}
         onToggleWeekday={toggleCustomWeekday}
@@ -3693,6 +3996,22 @@ const styles = StyleSheet.create({
   scheduleSummaryWarning: {
     color: HOME_COLORS.listText.warning,
     fontWeight: '700',
+  },
+  alarmCardActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  editButton: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  editText: {
+    color: HOME_COLORS.listText.repeat,
+    fontSize: 12,
+    fontWeight: '500',
   },
   deleteButton: {
     minWidth: 44,

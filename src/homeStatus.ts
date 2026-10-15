@@ -1,9 +1,12 @@
 import {
+  type AlarmRepeat,
   type RepeatKind,
   type Weekday,
   formatRepeatLabel,
   getNextAlarmTime,
+  localDateKey,
   makeAlarmRepeat,
+  resolveEditedRepeat,
 } from './alarmSchedule';
 import {
   SuppressionCancelUnknownError,
@@ -312,6 +315,10 @@ export interface NewAlarmSummary {
 /** One line for the composer: the repeat rule and when it first rings. */
 export function summarizeNewAlarm(input: {
   nowMs: number;
+  /** Editing: the alarm's current repeat, so a today-only date is kept. */
+  existingRepeat?: AlarmRepeat;
+  /** Editing: false for an off alarm, which is saved without scheduling. */
+  enabled?: boolean;
   hour: number;
   minute: number;
   repeatKind: RepeatKind;
@@ -331,13 +338,29 @@ export function summarizeNewAlarm(input: {
     };
   }
 
-  const repeat = makeAlarmRepeat(repeatKind, nowMs, input.customWeekdays);
+  const repeat = input.existingRepeat
+    ? resolveEditedRepeat(
+        input.existingRepeat,
+        repeatKind,
+        input.customWeekdays,
+        nowMs,
+      )
+    : makeAlarmRepeat(repeatKind, nowMs, input.customWeekdays);
+  if (input.enabled === false) {
+    return {
+      text: `${formatRepeatLabel(repeat)}・オフのまま保存します（オンにすると通知を予約します）`,
+      isDistant: false,
+      canAdd: true,
+    };
+  }
   const nextAtMs = getNextAlarmTime(nowMs, hour, minute, repeat);
   if (!nextAtMs) {
+    const keptOriginalDate =
+      repeatKind === 'today' && repeat.dateKey !== localDateKey(nowMs);
     return {
       text:
         repeatKind === 'today'
-          ? `今日の${clock}はすでに過ぎています。時刻を選び直してください`
+          ? `${keptOriginalDate ? 'この日' : '今日'}の${clock}はすでに過ぎています。時刻を選び直してください`
           : '初回の日時を計算できません',
       isDistant: false,
       canAdd: false,

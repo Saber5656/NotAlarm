@@ -184,8 +184,10 @@ export async function scheduleMainAlarmNotification(input: {
   cycleId: string;
   dueAtMs: number;
   repeats: boolean;
+  identifier?: string;
 }): Promise<string> {
   return Notifications.scheduleNotificationAsync({
+    ...(input.identifier ? { identifier: input.identifier } : {}),
     content: {
       title: '⏰ 起きる時間です',
       body: getMainAlarmNotificationBody({ repeats: input.repeats }),
@@ -208,8 +210,10 @@ export async function scheduleCheckInNotification(input: {
   cycleId: string;
   mainAlarmId: string;
   checkInAtMs: number;
+  identifier?: string;
 }): Promise<string> {
   return Notifications.scheduleNotificationAsync({
+    ...(input.identifier ? { identifier: input.identifier } : {}),
     content: checkInContent(input.alarmId, input.cycleId, input.mainAlarmId),
     trigger: dateTrigger(input.checkInAtMs, CHECK_IN_CHANNEL_ID),
   });

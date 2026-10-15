@@ -478,3 +478,53 @@ describe('describeTodayOnlyExpiry', () => {
     assert.equal(describeTodayOnlyExpiry(def('daily'), created + 9e8, fmt), null);
   });
 });
+
+describe('summarizeNewAlarm when editing an existing alarm', () => {
+  const formatDate = () => '10/3';
+
+  test('keeps the original date of a today-only alarm instead of moving it to today', () => {
+    const original = makeAlarmRepeat('today', NOW - 3 * 24 * HOUR);
+    const summary = summarizeNewAlarm({
+      nowMs: NOW,
+      hour: 23,
+      minute: 30,
+      repeatKind: 'today',
+      customWeekdays: [],
+      existingRepeat: original,
+      formatDate,
+    });
+    assert.equal(summary.canAdd, false);
+    assert.match(summary.text, /この日の23:30はすでに過ぎています/);
+  });
+
+  test('saves an off alarm without scheduling and says so', () => {
+    const summary = summarizeNewAlarm({
+      nowMs: NOW,
+      hour: 7,
+      minute: 0,
+      repeatKind: 'weekdays',
+      customWeekdays: [],
+      enabled: false,
+      formatDate,
+    });
+    assert.equal(summary.canAdd, true);
+    assert.equal(summary.isDistant, false);
+    assert.equal(
+      summary.text,
+      '平日・オフのまま保存します（オンにすると通知を予約します）',
+    );
+  });
+
+  test('an off custom alarm still needs a weekday', () => {
+    const summary = summarizeNewAlarm({
+      nowMs: NOW,
+      hour: 7,
+      minute: 0,
+      repeatKind: 'custom',
+      customWeekdays: [],
+      enabled: false,
+      formatDate,
+    });
+    assert.equal(summary.canAdd, false);
+  });
+});

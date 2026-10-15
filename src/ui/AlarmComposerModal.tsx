@@ -47,6 +47,8 @@ interface AlarmComposerModalProps {
     tone: 'danger' | 'warning';
   };
   isBusy: boolean;
+  /** 'edit' reuses this form prefilled for an existing alarm. */
+  mode?: 'add' | 'edit';
   onClose: () => void;
   /** iOS: the modal finished closing (used to hand over screen-reader focus). */
   onDismissed?: () => void;
@@ -93,6 +95,7 @@ export function AlarmComposerModal({
   customWeekdays,
   formNotice,
   isBusy,
+  mode = 'add',
   onClose,
   onRepeatKindChange,
   onSubmit,
@@ -258,6 +261,7 @@ export function AlarmComposerModal({
     }
   };
 
+  const isEdit = mode === 'edit';
   const submitEnabled = canSubmit && !isTimeEditing;
   const weekdaySelectionError =
     repeatKind === 'custom' && customWeekdays.length === 0
@@ -306,7 +310,7 @@ export function AlarmComposerModal({
             ]}
           >
           <View
-            accessibilityLabel="アラームを追加"
+            accessibilityLabel={isEdit ? 'アラームを編集' : 'アラームを追加'}
             accessibilityViewIsModal
             testID="alarm-composer-sheet"
             style={[
@@ -316,9 +320,13 @@ export function AlarmComposerModal({
           >
             <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleCopy}>
-                <Text style={styles.sheetTitle}>アラームを追加</Text>
+                <Text style={styles.sheetTitle}>
+                  {isEdit ? 'アラームを編集' : 'アラームを追加'}
+                </Text>
                 <Text style={styles.sheetSubtitle}>
-                  時刻と繰り返しを選んでください
+                  {isEdit
+                    ? '保存すると、このアラームの通知だけを予約し直します'
+                    : '時刻と繰り返しを選んでください'}
                 </Text>
               </View>
               <GlassSurface
@@ -644,7 +652,7 @@ export function AlarmComposerModal({
 
             {!isTimeEditing ? <View style={styles.sheetFooter}>
               <Text
-                accessibilityLabel={`追加する内容。${summary.text}`}
+                accessibilityLabel={`${isEdit ? '保存する内容' : '追加する内容'}。${summary.text}`}
                 accessibilityLiveRegion="polite"
                 style={[
                   styles.summaryText,
@@ -722,7 +730,7 @@ export function AlarmComposerModal({
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
                     <Text style={styles.primaryButtonText}>
-                      この内容で追加
+                      {isEdit ? 'この内容で保存' : 'この内容で追加'}
                     </Text>
                   )}
                 </Pressable>

@@ -7,7 +7,9 @@ import {
   ACTIVE_ALARM_STORAGE_KEY,
   ALARM_CANCELLATION_JOURNAL_KEY,
   ALARM_DEFINITIONS_STORAGE_KEY,
+  ALARM_EDIT_JOURNAL_KEY,
   readValidAlarmDefinitions,
+  readValidAlarmEditJournal,
   readValidLegacyAlarm,
 } from './alarmStorage';
 import { SUN_PREFERENCE_KEY } from './sunPreference';
@@ -37,6 +39,7 @@ const ALARM_STORAGE_KEYS = [
   ALARM_DEFINITIONS_STORAGE_KEY,
   ACTIVE_ALARM_STORAGE_KEY,
   ALARM_CANCELLATION_JOURNAL_KEY,
+  ALARM_EDIT_JOURNAL_KEY,
   SUPPRESSION_JOURNAL_KEY,
   // Marked orphans are cancelled with the other owned requests above; the
   // journal is dropped only with the rest, after cancellation is confirmed.
@@ -142,6 +145,17 @@ async function readOwnedIds(store: KeyValueStore): Promise<string[]> {
   if (legacyAlarm) {
     add(legacyAlarm.mainAlarmId);
     add(legacyAlarm.checkInNotificationId);
+  }
+
+  // Ids an edit preallocated before asking the OS; only a valid journal counts.
+  const edits = await store.getItem(ALARM_EDIT_JOURNAL_KEY);
+  for (const entry of (edits && readValidAlarmEditJournal(edits)) || []) {
+    entry.oldNotificationIds.forEach(add);
+    entry.newNotificationIds.forEach(add);
+    for (const cycle of entry.newCycles) {
+      add(cycle.mainAlarmId);
+      add(cycle.checkInNotificationId);
+    }
   }
 
   const suppression = await store.getItem(SUPPRESSION_JOURNAL_KEY);
