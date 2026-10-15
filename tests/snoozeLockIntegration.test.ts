@@ -36,6 +36,7 @@ import {
 } from '../src/scheduleReconciliation';
 import {
   createSnoozeService,
+  getSnoozeIds,
   markDeliveredCycleRinging,
 } from '../src/snooze';
 import { createSnoozeTransaction } from '../src/snoozeTransaction';
@@ -47,12 +48,21 @@ import * as journals from '../src/suppressionJournal';
 // run together here; only the device (AsyncStorage's web backend and the
 // notification queue) is replaced by in-memory fakes.
 const data = new Map<string, string>();
-const failures = { removeKey: null as string | null };
+const failures = {
+  removeKey: null as string | null,
+  /** Makes a real alarm-definitions write fail, decided on the stored JSON. */
+  setWhen: null as ((key: string, value: string) => boolean) | null,
+};
 Object.assign(globalThis, {
   window: {
     localStorage: {
       getItem: (key: string) => data.get(key) ?? null,
-      setItem: (key: string, value: string) => void data.set(key, value),
+      setItem: (key: string, value: string) => {
+        if (failures.setWhen?.(key, value)) {
+          throw new Error('disk write failed');
+        }
+        data.set(key, value);
+      },
       removeItem: (key: string) => {
         if (failures.removeKey === key) {
           failures.removeKey = null;
@@ -102,6 +112,9 @@ class FakeQueue {
   cancelCalls: string[] = [];
   holdSchedule: Promise<void> | null = null;
   holdCancel: Promise<void> | null = null;
+  /** The OS answers a schedule with this id instead of the requested one. */
+  returnId: string | null = null;
+  cancelFailIds = new Set<string>();
   scheduleEntered = deferred();
   cancelEntered = deferred();
 
@@ -111,6 +124,8 @@ class FakeQueue {
     this.cancelCalls = [];
     this.holdSchedule = null;
     this.holdCancel = null;
+    this.returnId = null;
+    this.cancelFailIds = new Set();
     this.scheduleEntered = deferred();
     this.cancelEntered = deferred();
   }
@@ -143,7 +158,13 @@ const resetService = createStorageResetService({
   exclusive: (run) =>
     journal.exclusive(() => storage.runExclusiveAlarmStorage(run)),
   nowMs: () => NOW,
-  onCompleted: gateModule.advanceStorageEpoch,
+  // Same wiring as App: ids only the snooze service remembers are cancelled
+  // by a deletion and forgotten once it has finished.
+  extraKnownIds: () => snoozeService.unsettledIds(),
+  onCompleted: () => {
+    gateModule.advanceStorageEpoch();
+    snoozeService.forgetUnsettled();
+  },
 });
 gateModule.installStorageResetGate(() => resetService.hasPendingReset());
 
@@ -155,13 +176,17 @@ const snoozeService = createSnoozeService({
       queue.scheduleCalls += 1;
       queue.scheduleEntered.resolve();
       await queue.holdSchedule;
-      queue.ids.add(input.identifier);
-      return input.identifier;
+      const used = queue.returnId ?? input.identifier;
+      queue.ids.add(used);
+      return used;
     },
     cancelScheduled: async (id) => {
       queue.cancelCalls.push(id);
       queue.cancelEntered.resolve();
       await queue.holdCancel;
+      if (queue.cancelFailIds.has(id)) {
+        throw new Error('cancel failed');
+      }
       queue.ids.delete(id);
     },
     dismissDelivered: async () => undefined,
@@ -186,6 +211,7 @@ const snoozeService = createSnoozeService({
 function seed(alarms: StoredAlarmDefinition[]): void {
   data.clear();
   failures.removeKey = null;
+  failures.setWhen = null;
   queue.reset();
   idCounter = 0;
   data.set(
@@ -767,4 +793,218 @@ test('the snooze limit is three per occurrence and the original deadline never m
   assert.deepEqual(fourth, { status: 'rejected', reason: 'LIMIT_REACHED' });
   assert.equal(stored()[0].cycles[0].dueAtMs, DUE);
   assert.equal(stored()[0].cycles[0].snooze?.count, 3);
+});
+
+// ---------------------------------------------------------------------------
+// PR44 late findings: real storage writes, real transaction, real reset
+// ---------------------------------------------------------------------------
+
+function ringingSnoozeSeed(): void {
+  seed([definition([cycle()])]);
+  queue.ids.add('main-1');
+}
+
+function dismissedWrite(value: string, withPending: boolean): boolean {
+  const cycles = JSON.parse(value).alarms?.[0]?.cycles ?? [];
+  return cycles.some(
+    (entry: StoredAlarm) =>
+      entry.phase === 'dismissed' && (entry.snooze?.pending !== undefined) === withPending,
+  );
+}
+
+test('late 2: a stop whose first real write fails cancels nothing and the snooze stays armed', async () => {
+  ringingSnoozeSeed();
+  assert.equal((await snoozeService.snooze('c1')).status, 'snoozed');
+  const snoozeId = stored()[0].cycles[0].snooze!.notificationId!;
+  failures.setWhen = (key) => key === storage.ALARM_DEFINITIONS_STORAGE_KEY;
+
+  const result = await settled(snoozeService.stop('c1'), 'stop');
+  failures.setWhen = null;
+  assert.deepEqual(result, { status: 'failed', reason: 'SAVE_FAILED' });
+  assert.equal(queue.ids.has(snoozeId), true);
+  assert.equal(stored()[0].cycles[0].phase, 'snoozed');
+  assert.deepEqual(queue.cancelCalls.filter((id) => id === snoozeId), []);
+});
+
+test('late 2: a real final-write failure after cancelling leaves a recoverable stop and no live alarm', async () => {
+  ringingSnoozeSeed();
+  await snoozeService.snooze('c1');
+  const snoozeId = stored()[0].cycles[0].snooze!.notificationId!;
+  failures.setWhen = (key, value) =>
+    key === storage.ALARM_DEFINITIONS_STORAGE_KEY && dismissedWrite(value, false);
+
+  const result = await settled(snoozeService.stop('c1'), 'stop');
+  failures.setWhen = null;
+  assert.equal(result.status, 'stopped');
+  assert.equal(queue.ids.has(snoozeId), false);
+  // Durable truth: dismissed, with the cleanup record recovery can finish.
+  assert.equal(stored()[0].cycles[0].phase, 'dismissed');
+  const outcome = await settled(snoozeService.recover(), 'recover');
+  assert.deepEqual(outcome.cleaned, ['c1']);
+  assert.equal(stored()[0].cycles[0].snooze, undefined);
+});
+
+test('late 2: a stop whose cancel fails keeps the stop and the id for recovery before classification', async () => {
+  ringingSnoozeSeed();
+  await snoozeService.snooze('c1');
+  const snoozeId = stored()[0].cycles[0].snooze!.notificationId!;
+  queue.cancelFailIds.add(snoozeId);
+
+  const result = await settled(snoozeService.stop('c1'), 'stop');
+  assert.equal(result.status, 'stopped');
+  assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+  assert.equal(stored()[0].cycles[0].phase, 'dismissed');
+  // Write ahead covers every owned id (main, check-in, snooze), not only the snooze.
+  assert.deepEqual(storedIds(), ['main-1', 'check-1', snoozeId]);
+
+  // A restart: recovery runs before overdue cycles are classified.
+  queue.cancelFailIds.clear();
+  const outcome = await settled(snoozeService.recover(), 'recover');
+  assert.deepEqual(outcome.cleaned, ['c1']);
+  assert.equal(queue.ids.has(snoozeId), false);
+  const after = await storage.markDueCyclesRinging(NOW + MINUTE, 'resume');
+  assert.equal(after[0].cycles[0].phase, 'dismissed');
+});
+
+test('stop on a just-ringing cycle writes ahead and cancels the still-pending main and check-in', async () => {
+  ringingSnoozeSeed();
+  queue.ids.add('check-1');
+  failures.setWhen = (key, value) =>
+    key === storage.ALARM_DEFINITIONS_STORAGE_KEY && dismissedWrite(value, false);
+  const result = await settled(snoozeService.stop('c1'), 'stop');
+  failures.setWhen = null;
+  assert.equal(result.status, 'stopped');
+  assert.equal(queue.ids.has('main-1'), false);
+  assert.equal(queue.ids.has('check-1'), false);
+  // The final clearing write was refused: the durable record still names both.
+  assert.equal(stored()[0].cycles[0].phase, 'dismissed');
+  assert.deepEqual(storedIds(), ['main-1', 'check-1']);
+  const outcome = await settled(snoozeService.recover(), 'recover');
+  assert.deepEqual(outcome.cleaned, ['c1']);
+  assert.equal(stored()[0].cycles[0].snooze, undefined);
+});
+
+function storedIds(): string[] {
+  return getSnoozeIds(stored()[0].cycles[0]);
+}
+
+test('late 3: the committed snapshot of a snooze equals storage and is epoch-fresh', async () => {
+  ringingSnoozeSeed();
+  const result = await settled(snoozeService.snooze('c1'), 'snooze');
+  assert.equal(result.status, 'snoozed');
+  const snapshot = (result as { alarms?: StoredAlarmDefinition[] }).alarms;
+  assert.ok(snapshot, 'the transaction exposes what it committed');
+  assert.deepEqual(snapshot, stored());
+  assert.equal(snapshot[0].cycles[0].phase, 'snoozed');
+  assert.equal(gateModule.isStaleStorageResult(snapshot), false);
+
+  // A deletion that finishes afterwards makes the very same snapshot stale,
+  // so the screen can never bring the deleted alarm back from it.
+  await resetService.reset();
+  assert.equal(gateModule.isStaleStorageResult(snapshot), true);
+});
+
+test('late 3: the committed snapshot of a stop equals storage and is epoch-fresh', async () => {
+  ringingSnoozeSeed();
+  await snoozeService.snooze('c1');
+  const result = await settled(snoozeService.stop('c1'), 'stop');
+  assert.equal(result.status, 'stopped');
+  const snapshot = (result as { alarms?: StoredAlarmDefinition[] }).alarms;
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot, stored());
+  assert.equal(snapshot[0].cycles[0].phase, 'dismissed');
+  assert.equal(gateModule.isStaleStorageResult(snapshot), false);
+  await resetService.reset();
+  assert.equal(gateModule.isStaleStorageResult(snapshot), true);
+});
+
+test('late 3: the snapshot needs no readback, so a failing read cannot hide a persisted stop', async () => {
+  ringingSnoozeSeed();
+  await snoozeService.snooze('c1');
+  const result = await settled(snoozeService.stop('c1'), 'stop');
+  // Reading storage now fails, as it can right after a successful stop.
+  const realGet = (globalThis as { window: { localStorage: { getItem: unknown } } }).window.localStorage.getItem;
+  (globalThis as { window: { localStorage: { getItem: unknown } } }).window.localStorage.getItem = () => {
+    throw new Error('read failed');
+  };
+  try {
+    await assert.rejects(storage.loadAlarmDefinitions());
+    const snapshot = (result as { alarms?: StoredAlarmDefinition[] }).alarms;
+    assert.equal(snapshot?.[0].cycles[0].phase, 'dismissed');
+  } finally {
+    (globalThis as { window: { localStorage: { getItem: unknown } } }).window.localStorage.getItem = realGet;
+  }
+});
+
+test('late 4: an unexpected id whose tracking writes all really fail is cancelled by a deletion', async () => {
+  seed([definition([cycle()])]);
+  queue.returnId = 'stray-os-id';
+  queue.cancelFailIds.add('stray-os-id');
+  failures.setWhen = (key, value) =>
+    key === storage.ALARM_DEFINITIONS_STORAGE_KEY && value.includes('stray-os-id');
+
+  const result = await settled(snoozeService.snooze('c1'), 'snooze');
+  failures.setWhen = null;
+  assert.equal(result.status, 'rejected');
+  assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+  assert.equal((result as { tracking?: string }).tracking, 'memory_only');
+  assert.equal(queue.ids.has('stray-os-id'), true);
+  // Nothing durable names it; only the service's memory does.
+  assert.equal(JSON.stringify([...data]).includes('stray-os-id'), false);
+  assert.deepEqual(snoozeService.unsettledIds(), ['stray-os-id']);
+
+  queue.cancelFailIds.clear();
+  queue.returnId = null;
+  await settled(resetService.reset(), 'reset');
+  assert.equal(queue.ids.has('stray-os-id'), false);
+  assert.deepEqual(snoozeService.unsettledIds(), []);
+});
+
+test('late 5: the pending main notification is cancelled by a real snooze and survives no tick race', async () => {
+  ringingSnoozeSeed();
+  assert.equal(queue.ids.has('main-1'), true);
+  const result = await settled(snoozeService.snooze('c1'), 'snooze');
+  assert.equal(result.status, 'snoozed');
+  assert.equal(queue.ids.has('main-1'), false);
+  assert.equal(queue.ids.has(stored()[0].cycles[0].snooze!.notificationId!), true);
+});
+
+test('late 5: an uncancellable earlier delivery is tracked durably and recovery keeps the accepted snooze', async () => {
+  ringingSnoozeSeed();
+  queue.cancelFailIds.add('main-1');
+  const result = await settled(snoozeService.snooze('c1'), 'snooze');
+  assert.equal(result.status, 'snoozed');
+  assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+  const accepted = stored()[0].cycles[0].snooze!.notificationId!;
+  assert.ok(storedIds().includes('main-1'));
+
+  queue.cancelFailIds.clear();
+  const outcome = await settled(snoozeService.recover(), 'recover');
+  assert.deepEqual(outcome.cleaned, ['c1']);
+  assert.equal(queue.ids.has('main-1'), false);
+  assert.equal(queue.ids.has(accepted), true);
+  assert.equal(stored()[0].cycles[0].snooze!.notificationId, accepted);
+});
+
+test('late 1: recovery after a cleaned pending re-arms a still-missing accepted snooze in the same pass', async () => {
+  seed([
+    definition([
+      cycle({
+        phase: 'snoozed',
+        snooze: {
+          count: 1,
+          notificationId: 'snooze-keep',
+          dueAtMs: NOW + 3 * MINUTE,
+          pending: { requestedId: 'half', dueAtMs: NOW + 3 * MINUTE, strayIds: ['stray'] },
+        },
+      }),
+    ]),
+  ]);
+  queue.ids.add('half');
+  queue.ids.add('stray');
+  const outcome = await settled(snoozeService.recover(), 'recover');
+  assert.deepEqual(outcome.cleaned, ['c1']);
+  assert.deepEqual(outcome.rearmed, ['c1']);
+  assert.deepEqual([...queue.ids], ['snooze-keep']);
+  assert.equal(stored()[0].cycles[0].snooze!.pending, undefined);
 });

@@ -1,6 +1,7 @@
 import { replaceStoredCycle } from './alarmDefinitionMutations';
 import type { StoredAlarmDefinition } from './alarmStorage';
 import type { SnoozeStore } from './snooze';
+import { stampStorageResult } from './storageResetGate';
 
 type TransactAlarmDefinitions = (
   transaction: (
@@ -23,6 +24,12 @@ export interface SnoozeTransactionDependencies {
  * checkpoint (which re-checks a pending reset), so nothing inside waits on the
  * queue it already holds. The snapshot only advances after a checkpoint
  * succeeded, so a refused write is never mistaken for a stored one.
+ *
+ * A snooze or stop that took effect carries the definitions it committed as
+ * `alarms`, stamped with the storage epoch under the same lock. The screen
+ * applies that exact snapshot before any fallible reload or refill; a reset
+ * that finishes afterwards makes it stale, so it can never bring deleted data
+ * back, and nothing here copies older alarms forward.
  */
 export function createSnoozeTransaction({
   exclusive,
@@ -34,7 +41,7 @@ export function createSnoozeTransaction({
     return exclusive(async () => {
       let result: T | undefined;
       let finished = false;
-      await transact(async (current, checkpoint) => {
+      const committed = await transact(async (current, checkpoint) => {
         let snapshot = current;
         const store: SnoozeStore = {
           load: async (cycleId) =>
@@ -55,7 +62,19 @@ export function createSnoozeTransaction({
       if (!finished) {
         throw new Error('スヌーズの処理が完了しませんでした。');
       }
-      return result as T;
+      return withCommittedSnapshot(result as T, committed);
     });
   };
+}
+
+/** Only a result that changed the screen's truth carries the snapshot. */
+function withCommittedSnapshot<T>(
+  result: T,
+  committed: StoredAlarmDefinition[],
+): T {
+  const status = (result as { status?: unknown } | null)?.status;
+  if (status !== 'snoozed' && status !== 'stopped') {
+    return result;
+  }
+  return { ...result, alarms: stampStorageResult(committed) };
 }

@@ -57,6 +57,9 @@ interface Harness {
     scheduleReturns?: string;
     load?: boolean;
     cancelIds?: string[];
+    /** Resolves without removing the id: a promise that lies about cancelling. */
+    cancelSilentIds?: string[];
+    afterCancel?: () => void;
   };
   foreignCount: number;
 }
@@ -111,7 +114,11 @@ function harness(
       if (fail.cancel || fail.cancelIds?.includes(id)) {
         throw new Error('cancel failed');
       }
+      if (fail.cancelSilentIds?.includes(id)) {
+        return;
+      }
       scheduled.delete(id);
+      fail.afterCancel?.();
     },
     async dismissDelivered(id) {
       log.push(`dismiss:${id}`);
@@ -191,10 +198,11 @@ describe('snooze acceptance', () => {
   test('records the requested id durably before the notification is scheduled', async () => {
     const h = harness(ringing());
     await h.service.snooze('cycle-1');
-    assert.deepEqual(h.log.slice(0, 4), [
+    assert.deepEqual(h.log.slice(0, 5), [
       'save:ringing+pending',
       'schedule:snooze-id-1',
       'save:snoozed',
+      'cancel:main-1',
       'dismiss:main-1',
     ]);
     assert.equal(h.saved[0].snooze?.pending?.requestedId, 'snooze-id-1');
@@ -358,7 +366,8 @@ describe('snooze failures keep the alarm ringing', () => {
     const result = await h.service.snooze('cycle-1');
     assert.equal(result.status, 'snoozed');
     assert.equal(h.current().phase, 'snoozed');
-    assert.equal(h.cancelled.length, 0);
+    // Only the earlier main is cancelled; the new snooze never is.
+    assert.equal(h.cancelled.includes('snooze-id-1'), false);
   });
 
   test('when the final save keeps failing the snooze is cancelled and the alarm stays ringing', async () => {
@@ -484,9 +493,12 @@ describe('stopping cancels the snooze notification', () => {
     await h.service.snooze('cycle-1');
     h.fail.cancel = true;
     const result = await h.service.stop('cycle-1');
-    assert.equal(result.status, 'failed');
-    assert.equal(h.current().phase, 'snoozed');
-    assert.equal(h.current().snooze?.notificationId, 'snooze-id-1');
+    // The stop is written ahead, so the user's stop holds and the id that
+    // could not be cancelled stays recorded for recovery (late finding 2).
+    assert.equal(result.status, 'stopped');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.equal(h.current().phase, 'dismissed');
+    assert.ok(getSnoozeIds(h.current()).includes('snooze-id-1'));
   });
 
   test('a stop queued behind a snooze in progress ends with everything cancelled', async () => {
@@ -878,5 +890,370 @@ describe('snooze helpers', () => {
     assert.equal(isSnoozeRecord({ count: 1, notificationId: '' }), false);
     assert.equal(isSnoozeRecord({ count: 1, pending: { requestedId: 'a' } }), false);
     assert.equal(isSnoozeRecord(null), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR44 late review findings
+// ---------------------------------------------------------------------------
+
+function lateDef(...cycles: StoredAlarm[]): StoredAlarmDefinition {
+  return {
+    id: 'alarm-1',
+    hour: 7,
+    minute: 0,
+    repeat: { kind: 'daily', weekdays: [] },
+    enabled: true,
+    createdAtMs: 1,
+    cycles,
+  };
+}
+
+function waitingWithPending(): StoredAlarm {
+  return ringing({
+    phase: 'snoozed',
+    snooze: {
+      count: 1,
+      notificationId: 'snooze-keep',
+      dueAtMs: NOW + 3 * MINUTE,
+      pending: {
+        requestedId: 'half',
+        dueAtMs: NOW + 3 * MINUTE,
+        strayIds: ['stray'],
+      },
+    },
+  });
+}
+
+describe('late finding 1: recovery re-arms a snooze right after cleaning its pending ids', () => {
+  test('cleans the stray ids and re-arms the accepted id in the same pass', async () => {
+    const cycle = waitingWithPending();
+    const h = harness(cycle, { scheduledIds: ['half', 'stray'] });
+    const outcome = await h.service.recover([lateDef(cycle)]);
+    assert.deepEqual(outcome.cleaned, ['cycle-1']);
+    assert.deepEqual(outcome.rearmed, ['cycle-1']);
+    assert.equal(h.scheduled.has('snooze-keep'), true);
+    assert.equal(h.current().snooze?.pending, undefined);
+    assert.equal(h.current().snooze?.notificationId, 'snooze-keep');
+    assert.equal(h.scheduleCalls.length, 1);
+    assert.equal(h.scheduleCalls[0].identifier, 'snooze-keep');
+  });
+
+  test('judges the re-arm on a fresh queue read taken after the cleanup', async () => {
+    const cycle = waitingWithPending();
+    const h = harness(cycle, { scheduledIds: ['half', 'stray'], foreign: 62 });
+    // Other apps fill the queue while the cleanup runs.
+    h.fail.afterCancel = () => {
+      h.scheduled.add('late-1');
+      h.scheduled.add('late-2');
+    };
+    const outcome = await h.service.recover([lateDef(cycle)]);
+    assert.deepEqual(outcome.cleaned, ['cycle-1']);
+    assert.deepEqual(outcome.rearmed, []);
+    assert.deepEqual(outcome.rearmFailed, ['cycle-1']);
+    assert.equal(h.scheduleCalls.length, 0);
+  });
+
+  test('judges the re-arm against the clock after the cleanup', async () => {
+    const cycle = waitingWithPending();
+    const h = harness(cycle, { scheduledIds: ['half', 'stray'] });
+    h.fail.afterCancel = () => {
+      h.clock.now = NOW + 4 * MINUTE;
+    };
+    const outcome = await h.service.recover([lateDef(cycle)]);
+    assert.deepEqual(outcome.rearmed, []);
+    assert.equal(h.scheduleCalls.length, 0);
+  });
+
+  test('a cleanup whose cancel resolves but leaves the id queued is unresolved and keeps pending', async () => {
+    const cycle = waitingWithPending();
+    const h = harness(cycle, { scheduledIds: ['half', 'stray'] });
+    h.fail.cancelSilentIds = ['stray'];
+    const outcome = await h.service.recover([lateDef(cycle)]);
+    assert.deepEqual(outcome.cleaned, []);
+    assert.deepEqual(outcome.unresolved, ['cycle-1']);
+    assert.ok(getSnoozeIds(h.current()).includes('stray'));
+  });
+});
+
+describe('late finding 2: stopping a waiting snooze never leaves a record without an OS alarm', () => {
+  async function waitingHarness() {
+    const h = harness(ringing());
+    await h.service.snooze('cycle-1');
+    assert.equal(h.current().phase, 'snoozed');
+    return h;
+  }
+
+  test('a failed write-ahead stop cancels nothing and keeps the snooze armed', async () => {
+    const h = await waitingHarness();
+    h.fail.saveWhen = () => true;
+    const result = await h.service.stop('cycle-1');
+    assert.deepEqual(result, { status: 'failed', reason: 'SAVE_FAILED' });
+    assert.equal(h.scheduled.has('snooze-id-1'), true);
+    assert.equal(h.current().phase, 'snoozed');
+    assert.equal(h.cancelled.includes('snooze-id-1'), false);
+  });
+
+  test('the stop is saved before the snooze is cancelled', async () => {
+    const h = await waitingHarness();
+    h.log.length = 0;
+    await h.service.stop('cycle-1');
+    const firstSave = h.log.findIndex((entry) => entry.startsWith('save:dismissed'));
+    const cancel = h.log.indexOf('cancel:snooze-id-1');
+    assert.ok(firstSave >= 0 && cancel > firstSave, h.log.join(','));
+  });
+
+  test('a failed final save after cancelling still reports the stop and keeps no live alarm', async () => {
+    const h = await waitingHarness();
+    h.fail.saveWhen = (cycle) =>
+      cycle.phase === 'dismissed' && cycle.snooze?.pending === undefined;
+    const result = await h.service.stop('cycle-1');
+    assert.equal(result.status, 'stopped');
+    assert.equal(h.current().phase, 'dismissed');
+    assert.equal(h.scheduled.has('snooze-id-1'), false);
+  });
+
+  test('a cancel that resolves but leaves the id queued is not a confirmed stop of the notification', async () => {
+    const h = await waitingHarness();
+    h.fail.cancelSilentIds = ['snooze-id-1'];
+    const result = await h.service.stop('cycle-1');
+    assert.equal(result.status, 'stopped');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.ok(getSnoozeIds(h.current()).includes('snooze-id-1'));
+  });
+
+  test('recovery finishes an unconfirmed stop cleanup and clears it', async () => {
+    const h = await waitingHarness();
+    h.fail.cancel = true;
+    await h.service.stop('cycle-1');
+    h.fail.cancel = false;
+    const outcome = await h.service.recover([lateDef(h.current())]);
+    assert.deepEqual(outcome.cleaned, ['cycle-1']);
+    assert.equal(h.scheduled.has('snooze-id-1'), false);
+    assert.equal(h.current().snooze, undefined);
+    assert.equal(h.current().phase, 'dismissed');
+  });
+
+  test('a stop retried after an unconfirmed cleanup can still finish it', async () => {
+    const h = await waitingHarness();
+    h.fail.cancel = true;
+    await h.service.stop('cycle-1');
+    h.fail.cancel = false;
+    // The cycle is already dismissed, so the retry path is recovery/reset.
+    assert.deepEqual(await h.service.stop('cycle-1'), { status: 'ignored' });
+    assert.ok(getSnoozeIds(h.current()).includes('snooze-id-1'));
+  });
+});
+
+describe('late finding 4: an unexpected returned id is never forgotten', () => {
+  test('a failed first tracking write is retried after the failed cancel and ends durable', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    let failedOnce = false;
+    h.fail.saveWhen = (cycle) => {
+      if (cycle.snooze?.pending?.strayIds && !failedOnce) {
+        failedOnce = true;
+        return true;
+      }
+      return false;
+    };
+    const result = await h.service.snooze('cycle-1');
+    assert.equal(result.status, 'rejected');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.ok(getSnoozeIds(h.current()).includes('stray'));
+    assert.deepEqual(h.service.unsettledIds(), []);
+    assert.equal((result as { tracking?: string }).tracking, undefined);
+  });
+
+  test('when every write fails the id is held in memory and reported as such', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = (cycle) => cycle.snooze?.pending?.strayIds !== undefined;
+    const result = await h.service.snooze('cycle-1');
+    assert.equal(result.status, 'rejected');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.equal((result as { tracking?: string }).tracking, 'memory_only');
+    assert.deepEqual(h.service.unsettledIds(), ['stray']);
+  });
+
+  test('a later press refuses to schedule while a remembered id cannot be cancelled', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = (cycle) => cycle.snooze?.pending?.strayIds !== undefined;
+    await h.service.snooze('cycle-1');
+    h.fail.scheduleReturns = undefined;
+    h.scheduleCalls.length = 0;
+    const again = await h.service.snooze('cycle-1');
+    assert.equal(again.status, 'rejected');
+    assert.equal(h.scheduleCalls.length, 0);
+    assert.deepEqual(h.service.unsettledIds(), ['stray']);
+  });
+
+  test('recovery flushes a remembered id once cancelling works again', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = (cycle) => cycle.snooze?.pending?.strayIds !== undefined;
+    await h.service.snooze('cycle-1');
+    h.fail.cancelIds = [];
+    await h.service.recover([lateDef(h.current())]);
+    assert.deepEqual(h.service.unsettledIds(), []);
+    assert.equal(h.scheduled.has('stray'), false);
+  });
+
+  test('recovery moves a remembered id into durable storage once writing works again', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = (cycle) => cycle.snooze?.pending?.strayIds !== undefined;
+    await h.service.snooze('cycle-1');
+    h.fail.saveWhen = undefined;
+    const outcome = await h.service.recover([lateDef(h.current())]);
+    assert.deepEqual(h.service.unsettledIds(), []);
+    assert.ok(getSnoozeIds(h.current()).includes('stray'));
+    assert.deepEqual(outcome.unresolved, ['cycle-1']);
+  });
+
+  test('a stop carries a remembered id into its durable write-ahead record', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = (cycle) => cycle.snooze?.pending?.strayIds !== undefined;
+    await h.service.snooze('cycle-1');
+    h.fail.saveWhen = undefined;
+    const result = await h.service.stop('cycle-1');
+    assert.equal(result.status, 'stopped');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.ok(getSnoozeIds(h.current()).includes('stray'));
+    assert.deepEqual(h.service.unsettledIds(), []);
+  });
+
+  test('clearing the remembered ids after a confirmed reset empties the memory', async () => {
+    const h = harness(ringing());
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = (cycle) => cycle.snooze?.pending?.strayIds !== undefined;
+    await h.service.snooze('cycle-1');
+    h.service.forgetUnsettled();
+    assert.deepEqual(h.service.unsettledIds(), []);
+  });
+
+  test('the recovery re-arm path remembers a stray whose tracking write also failed', async () => {
+    const a: StoredAlarm = ringing({
+      phase: 'snoozed',
+      snooze: { count: 1, notificationId: 'snooze-a', dueAtMs: NOW + 2 * MINUTE },
+    });
+    const h = harness(a);
+    h.fail.scheduleReturns = 'stray';
+    h.fail.cancelIds = ['stray'];
+    h.fail.saveWhen = () => true;
+    const outcome = await h.service.recover([lateDef(a)]);
+    assert.deepEqual(outcome.unresolved, ['cycle-1']);
+    assert.deepEqual(h.service.unsettledIds(), ['stray']);
+  });
+});
+
+describe('late finding 5: earlier pending deliveries are cancelled, not only dismissed', () => {
+  test('the pending main notification is cancelled and confirmed after the replacement is saved', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1'] });
+    const result = await h.service.snooze('cycle-1');
+    assert.equal(result.status, 'snoozed');
+    assert.equal(h.scheduled.has('main-1'), false);
+    assert.equal(h.scheduled.has('snooze-id-1'), true);
+    const savedSnoozed = h.log.indexOf('save:snoozed');
+    assert.ok(h.log.indexOf('cancel:main-1') > savedSnoozed, h.log.join(','));
+    assert.equal((result as { cleanup?: string }).cleanup, undefined);
+  });
+
+  test('the previous snooze notification is cancelled by the next snooze', async () => {
+    // A snooze delivered late is still pending when the user presses again.
+    const second = harness(
+      ringing({
+        snooze: { count: 1, notificationId: 'snooze-prev', dueAtMs: NOW },
+      }),
+      { scheduledIds: ['snooze-prev', 'main-1'] },
+    );
+    const result = await second.service.snooze('cycle-1');
+    assert.equal(result.status, 'snoozed');
+    assert.equal(second.scheduled.has('snooze-prev'), false);
+    assert.equal(second.scheduled.has('main-1'), false);
+  });
+
+  test('a cancel that fails is tracked on the snoozed cycle and reported, never called complete', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1'] });
+    h.fail.cancelIds = ['main-1'];
+    const result = await h.service.snooze('cycle-1');
+    assert.equal(result.status, 'snoozed');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.equal(h.current().phase, 'snoozed');
+    assert.equal(h.current().snooze?.notificationId, 'snooze-id-1');
+    assert.ok(getSnoozeIds(h.current()).includes('main-1'));
+  });
+
+  test('a cancel that resolves without removing the id is also unconfirmed', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1'] });
+    h.fail.cancelSilentIds = ['main-1'];
+    const result = await h.service.snooze('cycle-1');
+    assert.equal(result.status, 'snoozed');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.ok(getSnoozeIds(h.current()).includes('main-1'));
+  });
+
+  test('recovery cancels the tracked earlier delivery and keeps the accepted snooze armed', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1'] });
+    h.fail.cancelIds = ['main-1'];
+    await h.service.snooze('cycle-1');
+    h.fail.cancelIds = [];
+    const outcome = await h.service.recover([lateDef(h.current())]);
+    assert.deepEqual(outcome.cleaned, ['cycle-1']);
+    assert.equal(h.scheduled.has('main-1'), false);
+    assert.equal(h.scheduled.has('snooze-id-1'), true);
+    assert.equal(h.current().snooze?.notificationId, 'snooze-id-1');
+    assert.equal(h.current().snooze?.pending, undefined);
+  });
+
+  test('when the tracking write fails too the earlier id is held in memory and reported', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1'] });
+    h.fail.cancelIds = ['main-1'];
+    h.fail.saveWhen = (cycle) => cycle.phase === 'snoozed' && !!cycle.snooze?.pending;
+    const result = await h.service.snooze('cycle-1');
+    assert.equal(result.status, 'snoozed');
+    assert.equal((result as { cleanup?: string }).cleanup, 'unconfirmed');
+    assert.equal((result as { tracking?: string }).tracking, 'memory_only');
+    assert.deepEqual(h.service.unsettledIds(), ['main-1']);
+  });
+});
+
+
+describe('stop before the main OS delivery catches up with the foreground tick', () => {
+  test('stopping a just-ringing alarm cancels the still-pending main and check-in', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1', 'check-1'] });
+    assert.equal((await h.service.stop('cycle-1')).status, 'stopped');
+    assert.equal(h.scheduled.has('main-1'), false);
+    assert.equal(h.scheduled.has('check-1'), false);
+  });
+
+  test('a refused stop checkpoint leaves every pending notification unchanged', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1', 'check-1'] });
+    h.fail.saveWhen = () => true;
+    assert.deepEqual(await h.service.stop('cycle-1'), { status: 'failed', reason: 'SAVE_FAILED' });
+    assert.deepEqual([...h.scheduled].sort(), ['check-1', 'main-1']);
+    assert.deepEqual(h.cancelled, []);
+  });
+
+  test('an unconfirmed main cancel remains durable for recovery', async () => {
+    const h = harness(ringing(), { scheduledIds: ['main-1'] });
+    h.fail.cancelSilentIds = ['main-1'];
+    const stopped = await h.service.stop('cycle-1');
+    assert.equal(stopped.status, 'stopped');
+    assert.equal('cleanup' in stopped && stopped.cleanup, 'unconfirmed');
+    assert.ok(getSnoozeIds(h.current()).includes('main-1'));
+    h.fail.cancelSilentIds = [];
+    await h.service.recover([lateDef(h.current())]);
+    assert.equal(h.scheduled.has('main-1'), false);
+    assert.equal(h.current().phase, 'dismissed');
   });
 });
