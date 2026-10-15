@@ -12,6 +12,7 @@ import {
   type AlarmRepeat,
 } from './alarmSchedule';
 import { type ClassificationSource, classifyOverdueCycles } from './missedAlarms';
+import { assertNoPendingReset, stampStorageResult } from './storageResetGate';
 
 export const ACTIVE_ALARM_STORAGE_KEY = 'already-up/active-alarm/v1';
 export const ALARM_DEFINITIONS_STORAGE_KEY = 'already-up/alarm-definitions/v2';
@@ -95,11 +96,11 @@ export async function loadAlarmDefinitions(): Promise<StoredAlarmDefinition[]> {
     if (!isAlarmStoreV2(parsed)) {
       throw new Error('保存済みのアラーム設定を読み取れません。');
     }
-    return parsed.alarms;
+    return stampStorageResult(parsed.alarms);
   }
 
   const migrated = await migrateLegacyAlarm();
-  return migrated ? [migrated] : [];
+  return stampStorageResult(migrated ? [migrated] : []);
 }
 
 export async function saveAlarmDefinitions(
@@ -109,6 +110,8 @@ export async function saveAlarmDefinitions(
   if (!isAlarmStoreV2(store)) {
     throw new Error('アラーム設定を保存できません。');
   }
+  // Fresh check at the write itself, including the legacy migration path.
+  await assertNoPendingReset();
   await AsyncStorage.setItem(ALARM_DEFINITIONS_STORAGE_KEY, JSON.stringify(store));
 }
 
@@ -132,6 +135,7 @@ function mutatePendingAlarmCancellations(
   ) => PendingAlarmCancellation[],
 ): Promise<PendingAlarmCancellation[]> {
   const operation = cancellationJournalQueue.then(async () => {
+    await assertNoPendingReset();
     const current = await loadPendingAlarmCancellations();
     const entries = mutator(current);
     const journal: AlarmCancellationJournalV1 = { version: 1, entries };
@@ -177,10 +181,12 @@ export function mutateAlarmDefinitions(
   mutator: AlarmDefinitionsMutator,
 ): Promise<StoredAlarmDefinition[]> {
   const operation = mutationQueue.then(async () => {
+    // Before the mutator, which may reserve notifications.
+    await assertNoPendingReset();
     const current = await loadAlarmDefinitions();
     const next = await mutator(current);
     await saveAlarmDefinitions(next);
-    return next;
+    return stampStorageResult(next);
   });
 
   mutationQueue = operation.then(
@@ -194,6 +200,7 @@ export function transactAlarmDefinitions(
   transaction: AlarmDefinitionsTransaction,
 ): Promise<StoredAlarmDefinition[]> {
   const operation = mutationQueue.then(async () => {
+    await assertNoPendingReset();
     const current = await loadAlarmDefinitions();
     let lastCheckpoint: StoredAlarmDefinition[] | null = null;
     const checkpoint: AlarmDefinitionsCheckpoint = async (next) => {
@@ -204,7 +211,7 @@ export function transactAlarmDefinitions(
     if (next !== lastCheckpoint && next !== current) {
       await saveAlarmDefinitions(next);
     }
-    return next;
+    return stampStorageResult(next);
   });
 
   mutationQueue = operation.then(

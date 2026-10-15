@@ -38,6 +38,7 @@ import {
 
 import { getCircadianTheme } from './src/circadianTheme';
 import { AlarmComposerModal } from './src/ui/AlarmComposerModal';
+import { SettingsModal } from './src/ui/SettingsModal';
 import { CircadianBackground } from './src/ui/CircadianBackground';
 import { GlassSurface } from './src/ui/GlassSurface';
 import {
@@ -169,7 +170,18 @@ import {
   runUnlessAlarmListLocked,
   summarizeNewAlarm,
 } from './src/homeStatus';
+import {
+  LOCAL_DATA_COPY,
+  deleteAllLocalData,
+  getLocalDataDeletionAvailability,
+} from './src/localDataDeletion';
 import { createStorageResetService } from './src/storageReset';
+import {
+  advanceStorageEpoch,
+  installStorageResetGate,
+  isStaleStorageResult,
+  isStorageResetPendingError,
+} from './src/storageResetGate';
 import { suppressionJournal } from './src/suppressionJournalStorage';
 import {
   describeScheduleCoverage,
@@ -186,7 +198,8 @@ const schedulingGateway = {
 };
 
 // Order matches the stop path: the suppression journal lock, then the
-// definition/cancellation queues. Only the recovery card calls reset().
+// definition/cancellation queues. Only the recovery card and the settings sheet call reset(), each after an
+// explicit two-step confirmation.
 const storageReset = createStorageResetService({
   store: AsyncStorage,
   gateway: {
@@ -196,7 +209,10 @@ const storageReset = createStorageResetService({
   exclusive: (run) =>
     suppressionJournal.exclusive(() => runExclusiveAlarmStorage(run)),
   nowMs: Date.now,
+  onCompleted: advanceStorageEpoch,
 });
+// Every alarm write and reservation re-checks this inside the storage locks.
+installStorageResetGate(() => storageReset.hasPendingReset());
 
 const cancellationGateway = {
   cancelScheduled: cancelNotificationIfPresent,
@@ -464,6 +480,10 @@ async function refillEnabledSchedulesOnce(
     const alarms = await withScheduledNotificationRollback(
       (track) =>
         mutateAlarmDefinitions(async (current) => {
+          // An unfinished deletion must not get fresh reservations.
+          if (await storageReset.hasPendingReset()) {
+            return current;
+          }
           attemptedAlarmIds = current.map((alarm) => alarm.id);
           const filled = await fillEnabledSchedules(
             current,
@@ -569,6 +589,9 @@ function AlarmApp() {
   >(() => new Set());
   // Saved alarms could not be read: this is not the same as having none.
   const [loadFailed, setLoadFailed] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [deletionPending, setDeletionPending] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [pedometerState, setPedometerState] = useState<PedometerState>(
     Platform.OS === 'web' ? 'unavailable' : 'preparing',
   );
@@ -589,6 +612,8 @@ function AlarmApp() {
   const dueTransitionInFlightRef = useRef(false);
   const deliveryCheckRef = useRef(0);
   const refillInFlightRef = useRef(false);
+  // isBusy in a closure can be stale between the two Alert steps.
+  const deletionInFlightRef = useRef(false);
   const reportedScheduleProblemsRef = useRef<ReadonlySet<string>>(new Set());
   const localMinuteKey = Math.floor(nowMs / 60_000);
   const circadianTheme = useMemo(
@@ -597,8 +622,24 @@ function AlarmApp() {
   );
 
   const setCurrentAlarms = useCallback((next: StoredAlarmDefinition[]) => {
+    // A result read before a finished deletion would bring deleted alarms
+    // back on screen (stale Alert closure, in-flight refill or tick).
+    if (isStaleStorageResult(next)) {
+      return;
+    }
     alarmsRef.current = next;
     setAlarms(next);
+  }, []);
+
+  // An alarm write was refused because a deletion is unfinished: keep the
+  // list as it is (never reload stale or half-removed data) and say why.
+  const reportResetPending = useCallback((error: unknown): boolean => {
+    if (!isStorageResetPendingError(error)) {
+      return false;
+    }
+    setDeletionPending(true);
+    setNotice({ tone: 'danger', text: error.message });
+    return true;
   }, []);
 
   const recordRefill = useCallback((attempt: RefillAttempt) => {
@@ -632,7 +673,7 @@ function AlarmApp() {
       refillInFlightRef.current = true;
       try {
         const result = await refillEnabledSchedulesOnce(trigger, knownAlarms);
-        if (!result) {
+        if (!result || (result.alarms && isStaleStorageResult(result.alarms))) {
           return null;
         }
         recordRefill(result.attempt);
@@ -1142,7 +1183,14 @@ function AlarmApp() {
       dueTransitionInFlightRef.current = true;
       void markDueCyclesRinging(tick)
         .then(setCurrentAlarms)
-        .catch(() => {
+        .catch((error: unknown) => {
+          if (isStorageResetPendingError(error)) {
+            // The record is not updated while a deletion is unfinished; the
+            // notification itself still rings.
+            setDeletionPending(true);
+            setNotice({ tone: 'danger', text: error.message });
+            return;
+          }
           setNotice({
             tone: 'danger',
             text: 'アラーム時刻になりましたが、状態更新に失敗しました。',
@@ -1434,6 +1482,9 @@ function AlarmApp() {
               : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。初回は${firstRingLabel}に鳴ります。`,
       });
     } catch (error) {
+      if (reportResetPending(error)) {
+        return;
+      }
       setNotice({
         tone: 'danger',
         text:
@@ -1451,6 +1502,7 @@ function AlarmApp() {
     isBusy,
     recordRefill,
     refreshNotificationDelivery,
+    reportResetPending,
     repeatKind,
     selectedTime,
     setCurrentAlarms,
@@ -1531,6 +1583,9 @@ function AlarmApp() {
           });
         }
       } catch (error) {
+        if (reportResetPending(error)) {
+          return;
+        }
         try {
           setCurrentAlarms(await loadAlarmDefinitions());
         } catch {
@@ -1551,7 +1606,13 @@ function AlarmApp() {
         void refreshNotificationDelivery();
       }
     },
-    [isBusy, recordRefill, refreshNotificationDelivery, setCurrentAlarms],
+    [
+      isBusy,
+      recordRefill,
+      refreshNotificationDelivery,
+      reportResetPending,
+      setCurrentAlarms,
+    ],
   );
 
   const performDeleteAlarm = useCallback(
@@ -1568,7 +1629,10 @@ function AlarmApp() {
         );
         setCurrentAlarms(next);
         setNotice({ tone: 'neutral', text: 'アラームを削除しました。' });
-      } catch {
+      } catch (error) {
+        if (reportResetPending(error)) {
+          return;
+        }
         try {
           setCurrentAlarms(await loadAlarmDefinitions());
         } catch {
@@ -1582,7 +1646,7 @@ function AlarmApp() {
         setIsBusy(false);
       }
     },
-    [isBusy, setCurrentAlarms],
+    [isBusy, reportResetPending, setCurrentAlarms],
   );
 
   const notifyListLocked = useCallback(() => {
@@ -1636,6 +1700,16 @@ function AlarmApp() {
     [deleteAlarm],
   );
 
+  const applyLocalDataDeleted = useCallback(() => {
+    // Warnings remembered for the deleted alarms must not mute new ones.
+    reportedScheduleProblemsRef.current = new Set();
+    setCurrentAlarms([]);
+    setRefillFailedAlarmIds(new Set());
+    setSuppressionWarning(null);
+    setLoadFailed(false);
+    setDeletionPending(false);
+  }, [setCurrentAlarms]);
+
   const performStorageReset = useCallback(async () => {
     if (!loadFailed || isBusy) {
       return;
@@ -1643,22 +1717,95 @@ function AlarmApp() {
     setIsBusy(true);
     try {
       const { ambiguousCount } = await storageReset.reset();
-      setCurrentAlarms([]);
-      setRefillFailedAlarmIds(new Set());
-      setSuppressionWarning(null);
-      setLoadFailed(false);
+      applyLocalDataDeleted();
       setNotice(
         ambiguousCount > 0
           ? { tone: 'danger', text: STORAGE_RESET_COPY.ambiguousWarning }
           : { tone: 'neutral', text: STORAGE_RESET_COPY.done },
       );
     } catch {
-      // The failure card stays; nothing was erased unless cancellation held.
+      // The failure card stays; part of the data may already be gone and a
+      // retry resumes from the saved intent.
       setNotice({ tone: 'danger', text: STORAGE_RESET_COPY.failed });
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, loadFailed, setCurrentAlarms]);
+  }, [applyLocalDataDeleted, isBusy, loadFailed]);
+
+  const performLocalDataDeletion = useCallback(async () => {
+    // Re-checked when the dialog is confirmed: an alarm may have started.
+    const availability = getLocalDataDeletionAvailability({
+      isRinging: getRingingCycle(alarmsRef.current) !== null,
+      isBusy,
+      isLoaded,
+    });
+    if (!availability.allowed) {
+      setSettingsNotice(availability.reason);
+      return;
+    }
+    if (deletionInFlightRef.current) {
+      return;
+    }
+    deletionInFlightRef.current = true;
+    setIsBusy(true);
+    setSettingsNotice(null);
+    try {
+      const outcome = await deleteAllLocalData(storageReset);
+      if (outcome.kind === 'failed') {
+        // The in-memory list is not rewritten; storage may be partly removed,
+        // and alarm writes are refused until a retry finishes.
+        setDeletionPending(true);
+        setSettingsNotice(LOCAL_DATA_COPY.failed);
+        return;
+      }
+      applyLocalDataDeleted();
+      setIsSettingsOpen(false);
+      setNotice(
+        outcome.ambiguousCount > 0
+          ? { tone: 'danger', text: LOCAL_DATA_COPY.doneAmbiguous }
+          : { tone: 'neutral', text: LOCAL_DATA_COPY.done },
+      );
+    } finally {
+      deletionInFlightRef.current = false;
+      setIsBusy(false);
+    }
+  }, [applyLocalDataDeleted, isBusy, isLoaded]);
+
+  const confirmLocalDataDeletion = useCallback(() => {
+    const availability = getLocalDataDeletionAvailability({
+      isRinging: getRingingCycle(alarmsRef.current) !== null,
+      isBusy,
+      isLoaded,
+    });
+    if (!availability.allowed) {
+      setSettingsNotice(availability.reason);
+      return;
+    }
+    Alert.alert(
+      LOCAL_DATA_COPY.firstConfirmTitle,
+      LOCAL_DATA_COPY.firstConfirmBody,
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: '次へ',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert(
+              LOCAL_DATA_COPY.finalConfirmTitle,
+              LOCAL_DATA_COPY.finalConfirmBody,
+              [
+                { text: 'キャンセル', style: 'cancel' },
+                {
+                  text: LOCAL_DATA_COPY.confirmAction,
+                  style: 'destructive',
+                  onPress: () => void performLocalDataDeletion(),
+                },
+              ],
+            ),
+        },
+      ],
+    );
+  }, [isBusy, isLoaded, performLocalDataDeletion]);
 
   const confirmStorageReset = useCallback(() => {
     if (!loadFailed || isBusy) {
@@ -1753,11 +1900,22 @@ function AlarmApp() {
       await saveStoredAlarm(dismissed);
       await refreshAfterCycleCompletion(dismissed);
       setNotice({ tone: 'neutral', text: 'アラームを停止しました。' });
-    } catch {
-      setNotice({
-        tone: 'danger',
-        text: '停止処理に失敗しました。端末の通知から停止してください。',
-      });
+    } catch (error) {
+      if (isStorageResetPendingError(error)) {
+        // Fail-safe: the sound and the delivered notification are already
+        // stopped above, but the stop is not written while a deletion is
+        // unfinished, so no old alarm record is brought back.
+        setDeletionPending(true);
+        setNotice({
+          tone: 'danger',
+          text: `音と通知は止めましたが、データの削除が途中のため停止の記録は保存していません。${error.message}`,
+        });
+      } else {
+        setNotice({
+          tone: 'danger',
+          text: '停止処理に失敗しました。端末の通知から停止してください。',
+        });
+      }
     } finally {
       setIsBusy(false);
     }
@@ -1819,8 +1977,24 @@ function AlarmApp() {
     formatNextDate,
   );
   const stepGuidance = getStepGuidance(pedometerState);
+  useEffect(() => {
+    // A ringing alarm takes the screen; the sheet must not reappear after stop.
+    if (ringingCycle) {
+      setIsSettingsOpen(false);
+    }
+  }, [ringingCycle]);
+
   const canOpenComposer =
-    !ringingCycle && !loadFailed && alarms.length < MAX_ALARM_COUNT && !isBusy;
+    !ringingCycle &&
+    !loadFailed &&
+    !deletionPending &&
+    alarms.length < MAX_ALARM_COUNT &&
+    !isBusy;
+  const deletionAvailability = getLocalDataDeletionAvailability({
+    isRinging: ringingCycle !== null,
+    isBusy,
+    isLoaded,
+  });
   const newAlarmSummary = summarizeNewAlarm({
     nowMs,
     hour: selectedTime.getHours(),
@@ -1897,46 +2071,86 @@ function AlarmApp() {
               目覚めた朝に、静けさを。
             </Text>
           </View>
-          <GlassSurface
-            blurTint="systemUltraThinMaterialDark"
-            fallbackColor="rgba(20, 30, 45, 0.32)"
-            glassEffectStyle="regular"
-            intensity={76}
-            isInteractive
-            reducedTransparencyColor="#263544"
-            style={styles.addButtonShell}
-            tintColor="#FFFFFF18"
-          >
-            <Pressable
-              accessibilityLabel="アラームを追加"
-              accessibilityRole="button"
-              accessibilityHint={
-                loadFailed
-                  ? STORAGE_LOAD_FAILED_COPY.addDisabledReason
-                  : undefined
-              }
-              accessibilityState={{ disabled: !canOpenComposer }}
-              disabled={!canOpenComposer}
-              onPress={() => {
-                setNotice(null);
-                setIsComposerOpen(true);
-              }}
-              style={({ pressed }) => [
-                styles.addButton,
-                pressed && styles.buttonPressed,
-              ]}
+          <View style={styles.headerActions}>
+            <GlassSurface
+              blurTint="systemUltraThinMaterialDark"
+              fallbackColor="rgba(20, 30, 45, 0.32)"
+              glassEffectStyle="regular"
+              intensity={76}
+              isInteractive
+              reducedTransparencyColor="#263544"
+              style={styles.settingsShell}
+              tintColor="#FFFFFF18"
             >
-              <Text
-                allowFontScaling={false}
-                style={[
-                  styles.addButtonText,
-                  !canOpenComposer && styles.addButtonTextDisabled,
+              <Pressable
+                accessibilityHint={LOCAL_DATA_COPY.settingsHint}
+                accessibilityLabel={LOCAL_DATA_COPY.settingsLabel}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: !!ringingCycle }}
+                disabled={!!ringingCycle}
+                onPress={() => {
+                  setNotice(null);
+                  setSettingsNotice(null);
+                  setIsSettingsOpen(true);
+                }}
+                style={({ pressed }) => [
+                  styles.addButton,
+                  pressed && styles.buttonPressed,
+                ]}
+                testID="settings-button"
+              >
+                <Text
+                  allowFontScaling={false}
+                  style={[
+                    styles.settingsGlyph,
+                    !!ringingCycle && styles.addButtonTextDisabled,
+                  ]}
+                >
+                  ⋯
+                </Text>
+              </Pressable>
+            </GlassSurface>
+            <GlassSurface
+              blurTint="systemUltraThinMaterialDark"
+              fallbackColor="rgba(20, 30, 45, 0.32)"
+              glassEffectStyle="regular"
+              intensity={76}
+              isInteractive
+              reducedTransparencyColor="#263544"
+              style={styles.addButtonShell}
+              tintColor="#FFFFFF18"
+            >
+              <Pressable
+                accessibilityLabel="アラームを追加"
+                accessibilityRole="button"
+                accessibilityHint={
+                  loadFailed
+                    ? STORAGE_LOAD_FAILED_COPY.addDisabledReason
+                    : undefined
+                }
+                accessibilityState={{ disabled: !canOpenComposer }}
+                disabled={!canOpenComposer}
+                onPress={() => {
+                  setNotice(null);
+                  setIsComposerOpen(true);
+                }}
+                style={({ pressed }) => [
+                  styles.addButton,
+                  pressed && styles.buttonPressed,
                 ]}
               >
-                ＋
-              </Text>
-            </Pressable>
-          </GlassSurface>
+                <Text
+                  allowFontScaling={false}
+                  style={[
+                    styles.addButtonText,
+                    !canOpenComposer && styles.addButtonTextDisabled,
+                  ]}
+                >
+                  ＋
+                </Text>
+              </Pressable>
+            </GlassSurface>
+          </View>
         </View>
 
         {suppressionWarning && !ringingCycle ? (
@@ -2368,6 +2582,7 @@ function AlarmApp() {
                       disabled={
                         isBusy ||
                         listLocked ||
+                        deletionPending ||
                         Platform.OS === 'web' ||
                         (todayExpiry !== null && !definition.enabled)
                       }
@@ -2404,7 +2619,7 @@ function AlarmApp() {
                         definition.minute,
                       )}、${repeatA11y}のアラームを削除`}
                       accessibilityRole="button"
-                      disabled={isBusy || listLocked}
+                      disabled={isBusy || listLocked || deletionPending}
                       onPress={() => confirmDeleteAlarm(definition)}
                       style={styles.deleteButton}
                     >
@@ -2462,6 +2677,55 @@ function AlarmApp() {
         notice={isComposerOpen ? null : notice}
         onDismiss={() => setNotice(null)}
       />
+
+      <SettingsModal
+        closeLabel={LOCAL_DATA_COPY.close}
+        onClose={() => setIsSettingsOpen(false)}
+        subtitle={LOCAL_DATA_COPY.subtitle}
+        title={LOCAL_DATA_COPY.title}
+        visible={isSettingsOpen && !ringingCycle}
+      >
+        <Text accessibilityRole="header" style={styles.settingsHeading}>
+          {LOCAL_DATA_COPY.summaryHeading}
+        </Text>
+        {LOCAL_DATA_COPY.summary.map((line) => (
+          <Text key={line} style={styles.settingsBody}>
+            {line}
+          </Text>
+        ))}
+        <Text accessibilityRole="header" style={styles.settingsHeading}>
+          {LOCAL_DATA_COPY.deleteHeading}
+        </Text>
+        <Text style={styles.settingsBody}>{LOCAL_DATA_COPY.deleteBody}</Text>
+        {settingsNotice ? (
+          <Text
+            accessibilityLiveRegion="polite"
+            accessibilityRole="alert"
+            style={styles.settingsNotice}
+            testID="settings-notice"
+          >
+            {settingsNotice}
+          </Text>
+        ) : null}
+        <Pressable
+          accessibilityHint={LOCAL_DATA_COPY.deleteHint}
+          accessibilityLabel={LOCAL_DATA_COPY.deleteAction}
+          accessibilityRole="button"
+          accessibilityState={{
+            busy: isBusy,
+            disabled: !deletionAvailability.allowed,
+          }}
+          disabled={!deletionAvailability.allowed}
+          onPress={confirmLocalDataDeletion}
+          style={({ pressed }) => [
+            styles.deleteDataButton,
+            (!deletionAvailability.allowed || pressed) && styles.buttonDimmed,
+          ]}
+          testID="delete-data-button"
+        >
+          <Text style={styles.deleteDataText}>{LOCAL_DATA_COPY.deleteAction}</Text>
+        </Pressable>
+      </SettingsModal>
 
       <AlarmComposerModal
         bedsideGuidance={bedsideGuidance}
@@ -2584,6 +2848,58 @@ const styles = StyleSheet.create({
     color: 'rgba(255, 255, 255, 0.76)',
     fontSize: 12,
     lineHeight: 17,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  settingsShell: {
+    width: 44,
+    height: 44,
+    borderWidth: 0,
+    borderRadius: 22,
+    backgroundColor: 'transparent',
+  },
+  settingsGlyph: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '600',
+    lineHeight: 24,
+  },
+  settingsHeading: {
+    color: '#0B1A33',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  settingsBody: {
+    color: '#44536C',
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  settingsNotice: {
+    color: '#B42318',
+    fontSize: 14,
+    lineHeight: 21,
+    fontWeight: '600',
+  },
+  deleteDataButton: {
+    minHeight: 48,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(180, 35, 24, 0.4)',
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  deleteDataText: {
+    color: '#B42318',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   addButtonShell: {
     width: 52,

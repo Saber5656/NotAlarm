@@ -21,7 +21,12 @@ export const STORAGE_RESET_INTENT_KEY = 'already-up/storage-reset-intent/v1';
 export const STORAGE_RESET_LIMITATION_KEY =
   'already-up/storage-reset-limitation/v1';
 
-/** Every key that holds alarm state; the intent key is removed after them. */
+/**
+ * Every key that holds alarm state; the intent key is removed after them.
+ * Any new persisted store (e.g. the edit journal, the orphan journal) must be
+ * added here and have its notification ids read in readOwnedIds, otherwise
+ * "delete all data" leaves it behind. See docs/PRIVACY.md.
+ */
 const ALARM_STORAGE_KEYS = [
   ALARM_DEFINITIONS_STORAGE_KEY,
   ACTIVE_ALARM_STORAGE_KEY,
@@ -43,6 +48,8 @@ export interface StorageResetDependencies {
   /** Serialises the reset against stops, adds and recovery in this process. */
   exclusive<T>(run: () => Promise<T>): Promise<T>;
   nowMs(): number;
+  /** Runs under the lock once every key and the intent are gone. */
+  onCompleted?(): void;
 }
 
 export interface StorageResetService {
@@ -65,7 +72,7 @@ export interface StorageResetResult {
 export class StorageResetIncompleteError extends Error {
   constructor() {
     super(
-      'アラーム通知の解除を確認できなかったため、保存データは消していません。',
+      '削除を最後まで完了できませんでした。一部の通知やデータはすでに消えている場合があります。もう一度実行すると続きから再開します。',
     );
     this.name = 'StorageResetIncompleteError';
   }
@@ -141,6 +148,7 @@ export function createStorageResetService({
   gateway,
   exclusive,
   nowMs,
+  onCompleted,
 }: StorageResetDependencies): StorageResetService {
   async function ownedScheduledIds(
     knownIds: ReadonlySet<string>,
@@ -203,6 +211,7 @@ export function createStorageResetService({
       await store.removeItem(key);
     }
     await store.removeItem(STORAGE_RESET_INTENT_KEY);
+    onCompleted?.();
     return { ambiguousCount };
   }
 

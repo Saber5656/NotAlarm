@@ -114,3 +114,70 @@ test('startup keeps the failure card while an earlier reset is unfinished', () =
   assert.match(startup, /storageReset\.hasPendingReset\(\)/);
   assert.match(startup, /throw /);
 });
+
+test('settings deletion confirms twice, reuses the reset service and never runs while ringing', () => {
+  const confirm = block(
+    'const confirmLocalDataDeletion = useCallback',
+    'const confirmStorageReset',
+  );
+  assert.equal(confirm.match(/Alert\.alert\(/g)?.length, 2);
+  assert.match(confirm, /getLocalDataDeletionAvailability/);
+  assert.match(confirm, /void performLocalDataDeletion\(\)/);
+
+  const perform = block(
+    'const performLocalDataDeletion = useCallback',
+    'const confirmLocalDataDeletion',
+  );
+  // Availability is re-read from the latest alarms when the dialog confirms.
+  assert.match(perform, /getRingingCycle\(alarmsRef\.current\)/);
+  assert.match(perform, /deleteAllLocalData\(storageReset\)/);
+  // A failure must not touch the in-memory alarm list.
+  const failure = block("outcome.kind === 'failed'", 'applyLocalDataDeleted();');
+  assert.doesNotMatch(failure, /setCurrentAlarms/);
+
+  assert.match(app, /visible=\{isSettingsOpen && !ringingCycle\}/);
+  assert.match(app, /accessibilityLabel=\{LOCAL_DATA_COPY\.settingsLabel\}/);
+});
+
+test('an unfinished deletion blocks refill reservations and new alarms', () => {
+  const refill = block(
+    'mutateAlarmDefinitions(async (current) => {\n          // An unfinished deletion',
+    'fillEnabledSchedules(',
+  );
+  assert.match(refill, /storageReset\.hasPendingReset\(\)/);
+  assert.match(refill, /return current;/);
+  assert.match(app, /!deletionPending &&\n\s+alarms\.length < MAX_ALARM_COUNT/);
+});
+
+test('startup treats an unfinished reset as a recovery state before any refill', () => {
+  const startup = block(
+    'await storageReset.hasPendingReset()',
+    'await recoverPendingAlarmCancellations()',
+  );
+  assert.match(startup, /throw new Error/);
+});
+
+test('the reset gate is installed at the storage layer and completion advances the epoch', () => {
+  assert.match(app, /installStorageResetGate\(\(\) => storageReset\.hasPendingReset\(\)\)/);
+  assert.match(app, /onCompleted: advanceStorageEpoch/);
+});
+
+test('results read before a finished deletion never reach the screen', () => {
+  const setter = block('const setCurrentAlarms', 'alarmsRef.current = next;');
+  assert.match(setter, /isStaleStorageResult\(next\)/);
+  const refill = block('await refillEnabledSchedulesOnce(trigger', 'recordRefill(result.attempt)');
+  assert.match(refill, /isStaleStorageResult\(result\.alarms\)/);
+});
+
+test('a finished deletion clears warning memory owned by the deleted alarms', () => {
+  const applied = block('const applyLocalDataDeleted', 'setCurrentAlarms([])');
+  assert.match(applied, /reportedScheduleProblemsRef\.current = new Set\(\)/);
+});
+
+test('a refused stop stops sound first and never rewrites the alarm list', () => {
+  const stop = block('const stopRinging', 'const orderedAlarms');
+  assert.ok(stop.indexOf('stopForegroundAlarmSound()') < stop.indexOf('saveStoredAlarm(dismissed)'));
+  const refused = block('if (isStorageResetPendingError(error)) {\n        // Fail-safe', '} else {');
+  assert.doesNotMatch(refused, /setCurrentAlarms/);
+  assert.match(refused, /音と通知は止めました/);
+});
