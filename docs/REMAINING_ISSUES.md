@@ -306,9 +306,9 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
   - Issue #16（スヌーズ）: 結果型を `AwakeResponseResult` と同じく reason→`getAlarmRemainsCode` に対応づけ、未知の reason は `ACTION_STALE`（維持）に落ちることを確認する。
   - Issue #30（今回だけ抑止）: 抑止結果の `alarm_remains` 理由を `getAlarmRemainsCode` に追加し、保存失敗は `SUPPRESSION_SAVE_FAILED` を再利用する。
   - Issue #22（i18n）: `messageKey` / `recoveryKey` を翻訳キーとして使う。`homeStatus.ts` の `STORAGE_*_COPY` / `SUPPRESSION_WARNING_COPY` など、カタログ未移行の固定文言が残る。
-  - Issue #22（i18n）: 見逃し告知は `homeStatus.ts` の `planMissedAnnouncement`（告知済み cycleId 集合を保持し、鳴動中は保留、確認済み・削除済み ID は prune）と `MISSED_CARD_ANNOUNCEMENT` を使う。最終 API は #22 で翻訳キー化する。
+  - Issue #22（i18n）: 見逃し告知は `homeStatus.ts` の `planMissedAnnouncement`（告知済み cycleId 集合を保持し、鳴動中は保留、確認済み・削除済み ID は prune）を使い、告知文は `messages.missed.cardAnnouncement`（日英）。#22 で翻訳キー化済み。
   - ネイティブ移行（#26〜#28）: 新コードはネイティブ API に依存しない。通知・センサーの gateway 実装だけを差し替える。
-- 未実行: 実機での表示（docs/DEVICE_TEST.md 項目17）。
+- 未実行: 実機での表示（docs/DEVICE_TEST.md 項目18）。
 
 ### Issue #19 の状況（保存データを読めない場合のリセット）
 

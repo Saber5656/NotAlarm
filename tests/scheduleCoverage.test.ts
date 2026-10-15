@@ -13,6 +13,7 @@ import {
   describeScheduleCoverage,
   getScheduleCoverageLine,
 } from '../src/scheduleCoverage';
+import { JA_TEXT, withFormatter } from './support/text';
 
 const NOW = new Date(2026, 9, 5, 6, 0, 0).getTime();
 const MONDAY_7 = new Date(2026, 9, 5, 7, 0, 0).getTime();
@@ -178,8 +179,10 @@ describe('describeScheduleCoverage', () => {
 });
 
 describe('getScheduleCoverageLine', () => {
-  const formatDate = (timestampMs: number) =>
-    timestampMs === WEDNESDAY_7 ? '10/7(水)' : 'unexpected';
+  const formatDate = withFormatter(JA_TEXT, {
+    day: (timestampMs) =>
+      timestampMs === WEDNESDAY_7 ? '10/7(水)' : 'unexpected',
+  });
 
   test('off keeps the existing copy without a warning', () => {
     assert.deepEqual(getScheduleCoverageLine({ kind: 'off' }, formatDate), {
@@ -301,7 +304,9 @@ describe('getScheduleCoverageLine with OS queue verification', () => {
     definition([cycle(MONDAY_7), cycle(TUESDAY_7), cycle(WEDNESDAY_7)]),
     NOW,
   );
-  const fmt = (ms: number) => `D${new Date(ms).getDate()}`;
+  const fmt = withFormatter(JA_TEXT, {
+    day: (ms) => `D${new Date(ms).getDate()}`,
+  });
 
   test('an unverifiable queue is never shown as reserved', () => {
     const line = getScheduleCoverageLine(scheduled, fmt, {

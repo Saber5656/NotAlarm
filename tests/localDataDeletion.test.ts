@@ -10,7 +10,6 @@ import {
   ALARM_DEFINITIONS_STORAGE_KEY,
 } from "../src/alarmStorage";
 import {
-  LOCAL_DATA_COPY,
   deleteAllLocalData,
   getLocalDataDeletionAvailability,
 } from "../src/localDataDeletion";
@@ -21,6 +20,7 @@ import {
   type StorageResetGateway,
 } from "../src/storageReset";
 import { SUPPRESSION_JOURNAL_KEY } from "../src/suppressionJournal";
+import { ja } from './support/text';
 
 const ALARM_KEYS = [
   ALARM_DEFINITIONS_STORAGE_KEY,
@@ -279,11 +279,14 @@ test("deletion serialises with an in-flight mutation instead of interleaving", a
 
 test("deletion is unavailable while ringing, busy or not loaded, and says why", () => {
   assert.deepEqual(
-    getLocalDataDeletionAvailability({
-      isRinging: false,
-      isBusy: false,
-      isLoaded: true,
-    }),
+    getLocalDataDeletionAvailability(
+      {
+        isRinging: false,
+        isBusy: false,
+        isLoaded: true,
+      },
+      ja,
+    ),
     { allowed: true },
   );
   for (const state of [
@@ -291,7 +294,7 @@ test("deletion is unavailable while ringing, busy or not loaded, and says why", 
     { isRinging: false, isBusy: true, isLoaded: true },
     { isRinging: false, isBusy: false, isLoaded: false },
   ]) {
-    const result = getLocalDataDeletionAvailability(state);
+    const result = getLocalDataDeletionAvailability(state, ja);
     assert.equal(result.allowed, false);
     assert.ok("reason" in result && result.reason.length > 0);
   }
@@ -299,13 +302,13 @@ test("deletion is unavailable while ringing, busy or not loaded, and says why", 
 
 test("confirmation copy is two steps and states the limits honestly", () => {
   assert.notEqual(
-    LOCAL_DATA_COPY.firstConfirmTitle,
-    LOCAL_DATA_COPY.finalConfirmTitle,
+    ja.settings.firstConfirmTitle,
+    ja.settings.finalConfirmTitle,
   );
-  assert.match(LOCAL_DATA_COPY.finalConfirmBody, /元に戻せません/);
-  assert.match(LOCAL_DATA_COPY.firstConfirmBody, /他のアプリ/);
+  assert.match(ja.settings.finalConfirmBody, /元に戻せません/);
+  assert.match(ja.settings.firstConfirmBody, /他のアプリ/);
   assert.doesNotMatch(
-    LOCAL_DATA_COPY.summary.join(""),
+    ja.settings.summary.join(""),
     /(一切|絶対|完全に安全|ネットワークに接続しません)/,
   );
 });
@@ -313,14 +316,14 @@ test("confirmation copy is two steps and states the limits honestly", () => {
 test("failure wording does not claim that nothing was deleted", () => {
   const claims = /何も消(さ|し)ない|何も消しません|消していません|変更(され)?ません/;
   for (const text of [
-    LOCAL_DATA_COPY.failed,
-    LOCAL_DATA_COPY.deleteHint,
+    ja.settings.failed,
+    ja.settings.deleteHint,
     new StorageResetIncompleteError().message,
   ]) {
     assert.doesNotMatch(text, claims);
   }
   // It must tell the user that part of the data may already be gone and
   // that running the deletion again continues it.
-  assert.match(LOCAL_DATA_COPY.failed, /一部/);
-  assert.match(LOCAL_DATA_COPY.failed, /もう一度/);
+  assert.match(ja.settings.failed, /一部/);
+  assert.match(ja.settings.failed, /もう一度/);
 });

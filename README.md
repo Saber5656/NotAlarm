@@ -21,6 +21,8 @@
 - 上部summaryと操作層へ絞ったLiquid Glassと、追加フォーム／繰り返しの選択に追従してspring移動するglass lens
 - iOS 26のnative Liquid Glass、旧iOS / WebのBlur、Androidの安定したfallback、Reduce Transparency / Reduce Motion対応
 - 端末のローカル時刻に合わせ、同じ湖畔景観の実写寄りな朝・昼・夕・夜写真を連続cross-fadeする背景
+- 日本語・英語の表示。端末の言語（日本語が既定、端末が英語なら英語、対応外の言語は日本語）と12/24時間設定に追従し、アプリ内に言語設定は置かない。アプリが前面へ戻るたびに読み直す。通知の文面は予約した時点の言語で固定される（[docs/DESIGN.md](docs/DESIGN.md) 11.6）
+- VoiceOver / TalkBack 向けのラベル・ヒント・状態表現と、最大文字サイズ・小さい画面で主要操作へ届くレイアウト（構造はテストで確認。実機の読み上げは未確認）
 
 ## 時間帯に合わせた背景
 
@@ -165,6 +167,8 @@ npx expo export --platform all
 ```
 
 Web export は UI と bundle の smoke test です。通知、Pedometer、Apple Watch 転送は実機で確認する必要があります。
+
+言語・時刻表記の自動テストは `npm test` に含まれます（`tests/i18n.test.ts`、`tests/accessibility.test.ts`）。実機での英語表示、端末の言語・12/24時間の切替、VoiceOver の読み上げは未確認で、[docs/DEVICE_TEST.md](docs/DEVICE_TEST.md) の項目 19 に手順があります。
 
 ### 画面スリープ防止（keep-awake）の実機確認
 

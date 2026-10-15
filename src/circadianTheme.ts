@@ -18,7 +18,6 @@ export interface CircadianPhotoWeights {
 
 export interface CircadianTheme {
   phase: CircadianPhase;
-  phaseLabel: string;
   photoWeights: CircadianPhotoWeights;
 }
 
@@ -155,24 +154,24 @@ function phaseForMinute(
   sunset = LOCAL_SUNSET_MINUTE,
 ): Pick<
   CircadianTheme,
-  'phase' | 'phaseLabel'
+  'phase'
 > {
   if (minute < sunrise - 60 || minute >= sunset + 180) {
-    return { phase: 'night', phaseLabel: '夜' };
+    return { phase: 'night' };
   }
   if (minute < sunrise + 60) {
-    return { phase: 'dawn', phaseLabel: '夜明け' };
+    return { phase: 'dawn' };
   }
   if (minute < Math.min(sunrise + 300, sunset - 120)) {
-    return { phase: 'morning', phaseLabel: '朝' };
+    return { phase: 'morning' };
   }
   if (minute < sunset - 120) {
-    return { phase: 'day', phaseLabel: '昼' };
+    return { phase: 'day' };
   }
   if (minute < sunset) {
-    return { phase: 'golden-hour', phaseLabel: '夕方' };
+    return { phase: 'golden-hour' };
   }
-  return { phase: 'dusk', phaseLabel: '日暮れ' };
+  return { phase: 'dusk' };
 }
 
 function photoWeightsForMinute(

@@ -1,3 +1,4 @@
+import type { TextContext } from './i18n/context';
 import type { StoredAlarmDefinition } from './alarmStorage';
 import type { AlarmQueueStatus } from './scheduleReconciliation';
 
@@ -67,50 +68,39 @@ export interface ScheduleCoverageLineOptions {
 
 export function getScheduleCoverageLine(
   coverage: ScheduleCoverage,
-  formatDate: (timestampMs: number) => string,
+  { messages, formatter }: TextContext,
   options: ScheduleCoverageLineOptions = {},
 ): ScheduleCoverageLine {
+  const text = messages.coverage;
   switch (coverage.kind) {
     case 'off':
-      return { text: '通知は予約されていません', isWarning: false };
+      return { text: text.off, isWarning: false };
     case 'none':
-      return { text: '予約がありません', isWarning: true };
+      return { text: text.none, isWarning: true };
     case 'scheduled': {
       if (options.queueStatus === 'unverified') {
-        return { text: '通知の予約状況を確認できません', isWarning: true };
+        return { text: text.unverified, isWarning: true };
       }
       if (options.queueStatus === 'missing') {
-        return {
-          text: '通知が端末に見つかりません・再予約できませんでした',
-          isWarning: true,
-        };
+        return { text: text.missing, isWarning: true };
       }
       if (options.queueStatus === 'capacity_full') {
-        return {
-          text: '通知の上限に達しており、再予約できませんでした',
-          isWarning: true,
-        };
+        return { text: text.capacityFull, isWarning: true };
       }
       if (options.queueStatus === 'duplicated') {
-        return {
-          text: '古い時刻の予約が残っており、2回鳴る可能性があります',
-          isWarning: true,
-        };
+        return { text: text.duplicated, isWarning: true };
       }
-      const until = `${formatDate(coverage.lastDueAtMs)}まで予約済み`;
+      const until = text.reservedUntil(formatter.day(coverage.lastDueAtMs));
       if (options.queueStatus === 'check_in_missing') {
-        return {
-          text: `${until}・起床確認通知が予約されていません`,
-          isWarning: true,
-        };
+        return { text: text.checkInMissing(until), isWarning: true };
       }
       if (!coverage.isRunningLow) {
         return { text: until, isWarning: false };
       }
       return {
         text: options.refillFailed
-          ? `${until}・先の分を予約できませんでした`
-          : `${until}・アプリを開くと先の分を予約します`,
+          ? text.refillFailed(until)
+          : text.refillOnOpen(until),
         isWarning: true,
       };
     }

@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { en, ja } from '../src/i18n';
+import { JA_TEXT, withFormatter } from './support/text';
+
 import {
   type AwakeResponseDependencies,
   processUserSkipFailSafe,
@@ -206,7 +209,10 @@ test('repeat definition and next days are untouched', async () => {
 });
 
 test('confirmation copy names exact date/time and unchanged repeats', () => {
-  const copy = describeUserSkipConfirmation(cycle, () => '10/16(金)', () => '07:00');
+  const copy = describeUserSkipConfirmation(
+    cycle,
+    withFormatter(JA_TEXT, { day: () => '10/16(金)', clockAt: () => '07:00' }),
+  );
   assert.match(copy.title, /今回分だけ止めますか/);
   assert.match(copy.body, /10\/16\(金\) 07:00/);
   assert.match(copy.body, /繰り返し/);
@@ -227,7 +233,7 @@ test('skipped occurrence is described as manual stop', () => {
       },
     ],
     START,
-    () => '10/16',
+    withFormatter(JA_TEXT, { day: () => '10/16', clockAt: () => '07:00' }),
   );
   assert.match(text!.text, /今回分だけ止めた/);
 });
@@ -237,6 +243,11 @@ test('App wires the button, confirmation and whole-series distinction', () => {
   assert.match(app, /processUserSkipFailSafe/);
   assert.match(app, /getUserSkipOffer/);
   assert.match(app, /testID="skip-this-occurrence"/);
-  assert.match(app, /すべての回/);
+  assert.match(app, /messages\.alarmList\.rowSpoken\(/);
+  assert.match(ja.alarmList.rowSpoken('7:00', '毎日'), /すべての回/);
+  assert.match(en.alarmList.rowSpoken('7:00', 'Daily'), /all occurrences/);
+  for (const catalog of [ja, en]) {
+    assert.ok(catalog.alarmList.toggleHintOn.length > 0);
+  }
   assert.equal(app.match(/journal: suppressionJournal,/g)?.length, 4);
 });

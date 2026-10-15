@@ -12,6 +12,7 @@ import {
   getNotificationDeliveryWarningCopy,
   shouldWarnNotificationDelivery,
 } from '../src/notificationDelivery';
+import { ja } from './support/text';
 
 // iOS UNAuthorizationStatus values as reported by expo-notifications.
 const NOT_DETERMINED = 0;
@@ -156,7 +157,7 @@ describe('getNotificationDeliveryWarningCopy', () => {
   const nextAlarm = '10/3(土) 07:00';
 
   test('off names the next alarm and says it rings only while the app stays on screen', () => {
-    assert.deepEqual(getNotificationDeliveryWarningCopy('off', nextAlarm), {
+    assert.deepEqual(getNotificationDeliveryWarningCopy('off', nextAlarm, ja), {
       title: '通知がオフです',
       body: '通知がオフのため、次のアラーム 10/3(土) 07:00 は、アプリを画面に表示したままにしていないと鳴りません。',
       scheduleLine: '通知オフ・アプリ表示中のみ鳴ります',
@@ -164,7 +165,7 @@ describe('getNotificationDeliveryWarningCopy', () => {
   });
 
   test('silent says the next alarm makes a sound only while the app stays on screen', () => {
-    assert.deepEqual(getNotificationDeliveryWarningCopy('silent', nextAlarm), {
+    assert.deepEqual(getNotificationDeliveryWarningCopy('silent', nextAlarm, ja), {
       title: '通知の音がオフです',
       body: '通知の音がオフのため、次のアラーム 10/3(土) 07:00 は、アプリを画面に表示したままにしていないと音が出ません。',
       scheduleLine: '通知音オフ・アプリ表示中のみ音が出ます',
@@ -172,7 +173,7 @@ describe('getNotificationDeliveryWarningCopy', () => {
   });
 
   test('unknown says it cannot confirm the next alarm will ring', () => {
-    assert.deepEqual(getNotificationDeliveryWarningCopy('unknown', nextAlarm), {
+    assert.deepEqual(getNotificationDeliveryWarningCopy('unknown', nextAlarm, ja), {
       title: '通知の状態を確認できません',
       body: '次のアラーム 10/3(土) 07:00 は、鳴るか確認できません。',
       scheduleLine: '通知の状態を確認できません',
@@ -191,7 +192,7 @@ describe('getNotificationDeliveryWarningCopy', () => {
     };
     for (const state of ['off', 'silent', 'unknown'] as const) {
       assert.equal(
-        getNotificationDeliveryWarningCopy(state, null).body,
+        getNotificationDeliveryWarningCopy(state, null, ja).body,
         expected[state],
         state,
       );
@@ -204,7 +205,7 @@ describe('getNotificationDeliveryWarningCopy', () => {
     // must name staying on screen rather than only closing the app.
     for (const state of ['off', 'silent'] as const) {
       for (const label of [nextAlarm, null]) {
-        const copy = getNotificationDeliveryWarningCopy(state, label);
+        const copy = getNotificationDeliveryWarningCopy(state, label, ja);
         assert.match(copy.body, /アプリを画面に表示したまま/, `${state}: ${copy.body}`);
         assert.match(copy.scheduleLine, /アプリ表示中のみ/, `${state}: ${copy.scheduleLine}`);
         for (const text of [copy.body, copy.scheduleLine]) {

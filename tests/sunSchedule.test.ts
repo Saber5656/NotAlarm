@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { en, ja } from "../src/i18n";
 import { SUN_REGIONS, findSunRegion } from "../src/sunRegions";
 import {
   computeSunSchedule,
@@ -167,7 +168,8 @@ test("built-in regions are small, unique and have valid zones", () => {
   assert.ok(SUN_REGIONS.length >= 8 && SUN_REGIONS.length <= 20);
   assert.equal(new Set(SUN_REGIONS.map((r) => r.id)).size, SUN_REGIONS.length);
   for (const region of SUN_REGIONS) {
-    assert.ok(region.label.length > 0);
+    assert.ok(ja.sun.regions[region.id as keyof typeof ja.sun.regions].length > 0);
+    assert.ok(en.sun.regions[region.id as keyof typeof en.sun.regions].length > 0);
     assert.ok(Math.abs(region.latitude) <= 90);
     assert.ok(Math.abs(region.longitude) <= 180);
     assert.doesNotThrow(

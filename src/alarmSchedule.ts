@@ -1,4 +1,6 @@
 import { AppError } from './errorCatalog';
+import type { Formatter } from './i18n/format';
+import type { Messages } from './i18n/messages';
 
 export const MAX_ALARM_COUNT = 10;
 export const SCHEDULED_OCCURRENCES_PER_ALARM = 3;
@@ -13,16 +15,6 @@ export interface AlarmRepeat {
   weekdays: Weekday[];
   dateKey?: string;
 }
-
-const WEEKDAY_LABELS: Record<Weekday, string> = {
-  0: '日',
-  1: '月',
-  2: '火',
-  3: '水',
-  4: '木',
-  5: '金',
-  6: '土',
-};
 
 const EVERY_DAY = [...WEEKDAYS];
 const WEEKDAYS_ONLY: Weekday[] = [1, 2, 3, 4, 5];
@@ -146,16 +138,22 @@ export function isValidDateKey(dateKey: string): boolean {
   );
 }
 
-export function formatRepeatLabel(repeat: AlarmRepeat): string {
+export function formatRepeatLabel(
+  repeat: AlarmRepeat,
+  messages: Messages,
+  formatter: Formatter,
+): string {
   switch (repeat.kind) {
     case 'today':
-      return '今日だけ';
+      return messages.repeat.today;
     case 'daily':
-      return '毎日';
+      return messages.repeat.daily;
     case 'weekdays':
-      return '平日';
+      return messages.repeat.weekdays;
     case 'custom':
-      return repeat.weekdays.map((weekday) => WEEKDAY_LABELS[weekday]).join('・');
+      return repeat.weekdays
+        .map((weekday) => formatter.weekdayShort(weekday))
+        .join(messages.repeat.weekdayJoin);
   }
 }
 

@@ -30,6 +30,7 @@ import {
   type OrphanStore,
   type ReconcileGateway,
 } from '../src/scheduleReconciliation';
+import { ja } from './support/text';
 
 const NOW = new Date(2026, 9, 15, 6, 0, 0).getTime();
 const at = (day: number, hour = 7, minute = 0) =>
@@ -1049,10 +1050,13 @@ describe('reconcileAlarmSchedules with clock and time-zone changes', () => {
   });
 });
 
+const summarize = (input: Parameters<typeof summarizeReconciliation>[0]) =>
+  summarizeReconciliation(input, ja);
+
 describe('summarizeReconciliation', () => {
 
   test('warns persistently when the orphan journal is unreadable, even with no alarms', () => {
-    const summary = summarizeReconciliation({
+    const summary = summarize({
       ...base,
       statuses: {},
       orphansUnreadable: true,
@@ -1066,13 +1070,13 @@ describe('summarizeReconciliation', () => {
       ...base,
       statuses: { a: 'verified' },
       pendingOrphanIds: ['orphan-1'],
-    });
+    }, ja);
     assert.equal(summary.notice?.tone, 'danger');
     assert.deepEqual(summary.problemKeys, ['queue_orphans_pending']);
   });
 
   test('does not report a clean pass when the queue could not be verified', () => {
-    const summary = summarizeReconciliation({
+    const summary = summarize({
       ...base,
       statuses: {},
       queueVerified: false,
@@ -1084,20 +1088,20 @@ describe('summarizeReconciliation', () => {
 
   test('a clean pass says nothing', () => {
     assert.deepEqual(
-      summarizeReconciliation({ ...base, statuses: { a: 'verified' } }),
+      summarize({ ...base, statuses: { a: 'verified' } }),
       { notice: null, problemKeys: [] },
     );
   });
 
   test('a repair is announced, a replan names the clock change', () => {
-    const repaired = summarizeReconciliation({
+    const repaired = summarize({
       ...base,
       repaired: 1,
       statuses: { a: 'repaired' },
     });
     assert.equal(repaired.notice?.tone, 'warning');
     assert.match(repaired.notice!.text, /再予約/);
-    const replanned = summarizeReconciliation({
+    const replanned = summarize({
       ...base,
       replanned: 2,
       zoneChanged: true,
@@ -1107,14 +1111,14 @@ describe('summarizeReconciliation', () => {
   });
 
   test('capacity and duplicated each get their own honest wording', () => {
-    const capacity = summarizeReconciliation({
+    const capacity = summarize({
       ...base,
       statuses: { a: 'capacity_full' },
     });
     assert.equal(capacity.notice?.tone, 'danger');
     assert.match(capacity.notice!.text, /上限/);
     assert.deepEqual(capacity.problemKeys, ['queue_capacity_full:a']);
-    const duplicated = summarizeReconciliation({
+    const duplicated = summarize({
       ...base,
       statuses: { a: 'duplicated' },
     });
@@ -1123,7 +1127,7 @@ describe('summarizeReconciliation', () => {
   });
 
   test('missing is danger, unverified is a warning, and both key the alarm', () => {
-    const missing = summarizeReconciliation({
+    const missing = summarize({
       ...base,
       statuses: { a: 'missing', b: 'unverified' },
     });
@@ -1132,7 +1136,7 @@ describe('summarizeReconciliation', () => {
       'queue_missing:a',
       'queue_unverified:b',
     ]);
-    const unverified = summarizeReconciliation({
+    const unverified = summarize({
       ...base,
       statuses: { b: 'unverified' },
     });
@@ -1175,7 +1179,7 @@ describe('recoverAbortedReconciliation', () => {
   });
 
   test('summary names unrecovered notifications', () => {
-    const summary = summarizeReconciliation({
+    const summary = summarize({
       statuses: {},
       repaired: 0,
       replanned: 0,
@@ -2088,7 +2092,7 @@ describe('every unresolved cancellation blocks refill in the same pass', () => {
       zoneChanged: false,
       pendingOrphanIds: out.pendingOrphanIds,
       queueVerified: out.queueKnown,
-    });
+    }, ja);
     assert.deepEqual(summary.problemKeys.includes('queue_orphans_pending'), true);
     assert.equal(summary.notice?.tone, 'danger');
   });

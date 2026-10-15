@@ -662,6 +662,25 @@ export type ErrorCode = keyof typeof CATALOG;
 
 export const ERROR_CODES = Object.keys(CATALOG) as ErrorCode[];
 
+/** The sentences of one catalog entry in one language. */
+export interface ErrorText {
+  message: string;
+  recovery: string;
+}
+
+export type ErrorTexts = Record<ErrorCode, ErrorText>;
+
+/**
+ * The Japanese sentences, which this table owns. Other languages live in
+ * `src/i18n/errors.*.ts` and must provide the same codes.
+ */
+export const JA_ERROR_TEXTS = Object.fromEntries(
+  ERROR_CODES.map((code) => [
+    code,
+    { message: CATALOG[code].message, recovery: CATALOG[code].recovery },
+  ]),
+) as ErrorTexts;
+
 export interface ErrorDescriptor extends CatalogEntry {
   code: ErrorCode;
   /** Translation keys for the message and recovery sentences. */

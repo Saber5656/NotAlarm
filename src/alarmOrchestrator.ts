@@ -7,7 +7,7 @@ import {
   finalizeSuppression,
   type SuppressionDecision,
 } from './alarmPolicy';
-import type { ErrorCode } from './errorCatalog';
+import { describeErrorCode, type ErrorCode } from './errorCatalog';
 import type { StoredAlarm } from './alarmStorage';
 import { mergeWindowStepCount } from './stepWindow';
 
@@ -126,9 +126,7 @@ export class SuppressionSaveError extends Error {
   readonly code = 'SUPPRESSION_SAVE_FAILED' as const;
   readonly cycleId: string;
   constructor(cycleId: string, readonly originalError: unknown) {
-    super(
-      '起床を確認し通知を取り消しましたが、状態を保存できませんでした。次回起動時に復旧します。',
-    );
+    super(describeErrorCode('SUPPRESSION_SAVE_FAILED').message);
     this.name = 'SuppressionSaveError';
     this.cycleId = cycleId;
   }
@@ -143,9 +141,7 @@ export class SuppressionCancelUnknownError extends Error {
   readonly code = 'CANCEL_UNKNOWN' as const;
   readonly cycleId: string;
   constructor(cycleId: string, readonly originalError: unknown) {
-    super(
-      'アラームの取り消し結果を確認できませんでした。予約状態は未確認です。',
-    );
+    super(describeErrorCode('CANCEL_UNKNOWN').message);
     this.name = 'SuppressionCancelUnknownError';
     this.cycleId = cycleId;
   }

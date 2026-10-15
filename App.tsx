@@ -37,6 +37,17 @@ import {
 } from 'react-native-safe-area-context';
 
 import { getCircadianTheme } from './src/circadianTheme';
+import {
+  createTextContext,
+  describeErrorIn,
+  noticeFromCodeIn,
+  noticeFromCodesIn,
+  sameLocaleSettings,
+  type Messages,
+  type TextContext,
+} from './src/i18n';
+import { readDeviceLocaleSettings } from './src/i18n/deviceLocale';
+import { I18nProvider } from './src/ui/I18nContext';
 import { AlarmComposerModal } from './src/ui/AlarmComposerModal';
 import { SettingsModal } from './src/ui/SettingsModal';
 import { SunriseSettings } from './src/ui/SunriseSettings';
@@ -163,6 +174,7 @@ import {
   scheduleCheckInNotification,
   scheduleMainAlarmNotification,
   scheduleSnoozeNotification,
+  setNotificationMessages,
 } from './src/notificationService';
 import {
   type NotificationDeliveryState,
@@ -174,11 +186,8 @@ import {
   readMainDeliveryIdentity,
 } from './src/alarmContracts';
 import {
-  RINGING_STOP_HINT,
-  RINGING_STOP_LABEL,
-  STORAGE_LOAD_FAILED_COPY,
-  STORAGE_RESET_COPY,
-  SUPPRESSION_WARNING_COPY,
+  formatLeadTime,
+  getSuppressionWarningCopy,
   type PedometerState,
   type SuppressionWarningKind,
   classifySuppressionFailure,
@@ -188,7 +197,6 @@ import {
   getRingingStopA11yLabel,
   getRingingDisplay,
   planMissedAnnouncement,
-  MISSED_CARD_ANNOUNCEMENT,
   canEditAlarm,
   canSubmitComposer,
   getStepGuidance,
@@ -200,7 +208,6 @@ import {
   withoutQueueStatus,
 } from './src/homeStatus';
 import {
-  LOCAL_DATA_COPY,
   canCloseSettings,
   deleteAllLocalData,
   getLocalDataDeletionAvailability,
@@ -211,9 +218,6 @@ import {
   type SuppressionCleanup,
 } from './src/suppressionFollowUp';
 import {
-  USER_SKIP_DONE_NOTICE,
-  USER_SKIP_HINT,
-  USER_SKIP_LABEL,
   captureUserSkipTarget,
   describeUserSkipConfirmation,
   getUserSkipOffer,
@@ -265,10 +269,7 @@ import {
 import {
   AppError,
   type ErrorCode,
-  describeError,
-  describeErrorCode,
   errorCodeOf,
-  noticeFromCode,
 } from './src/errorCatalog';
 import { withMainVerification } from './src/mainAlarmVerification';
 import { resolvePedometerAccess } from './src/pedometerAccess';
@@ -415,6 +416,7 @@ async function hasPendingAlarmEdit(alarmId: string): Promise<boolean> {
  * only used when that resume record is really stored (and readable).
  */
 async function cancellationFailureNotice(
+  messages: Messages,
   alarmId: string,
   error: unknown,
   incomplete: 'DISABLE_CANCEL_INCOMPLETE' | 'DELETE_CANCEL_INCOMPLETE',
@@ -425,12 +427,12 @@ async function cancellationFailureNotice(
         (pending) => pending.alarmId === alarmId,
       )
     ) {
-      return noticeFromCode(incomplete);
+      return noticeFromCodeIn(messages, incomplete);
     }
   } catch {
     // Unreadable record: nothing can be promised.
   }
-  return describeError(error);
+  return describeErrorIn(messages, error);
 }
 
 const alarmEditGateway = {
@@ -762,39 +764,6 @@ function defaultWakeTime(): Date {
   return wakeTime;
 }
 
-function formatAlarmTime(hour: number, minute: number): string {
-  return `${hour.toString().padStart(2, '0')}:${minute
-    .toString()
-    .padStart(2, '0')}`;
-}
-
-function formatNextDate(timestampMs: number): string {
-  return new Intl.DateTimeFormat('ja-JP', {
-    month: 'numeric',
-    day: 'numeric',
-    weekday: 'short',
-  }).format(new Date(timestampMs));
-}
-
-function formatCountdown(milliseconds: number): string {
-  if (milliseconds <= 0) {
-    return 'まもなく鳴ります';
-  }
-
-  const totalMinutes = Math.max(1, Math.ceil(milliseconds / 60_000));
-  const days = Math.floor(totalMinutes / (24 * 60));
-  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
-  const minutes = totalMinutes % 60;
-
-  if (days > 0) {
-    return `${days}日${hours}時間後`;
-  }
-  if (hours > 0) {
-    return `${hours}時間${minutes > 0 ? `${minutes}分` : ''}後`;
-  }
-  return `${minutes}分後`;
-}
-
 function isMonitoring(cycle: StoredAlarm): boolean {
   return cycle.phase === 'armed' || cycle.phase === 'step_candidate';
 }
@@ -884,6 +853,7 @@ interface ScheduleRefillResult {
 async function refillEnabledSchedulesOnce(
   trigger: ScheduleRefillTrigger,
   knownAlarms: readonly StoredAlarmDefinition[],
+  messages: Messages,
 ): Promise<ScheduleRefillResult | null> {
   try {
     if (trigger === 'startup') {
@@ -944,7 +914,7 @@ async function refillEnabledSchedulesOnce(
         skippedAlarmIds: [...pendingAlarmIds, ...unverifiedAlarmIds],
       },
       problemKeys: fillIssues.map(getAlarmScheduleIssueKey),
-      notice: describeScheduleIssues(fillIssues, ''),
+      notice: describeScheduleIssues(fillIssues, '', messages),
     };
   } catch (error) {
     const code = errorCodeOf(error, 'REFILL_FAILED');
@@ -952,7 +922,7 @@ async function refillEnabledSchedulesOnce(
       alarms: null,
       attempt: getSkippedRefillAttempt(knownAlarms),
       problemKeys: [`refill_failed:${code}`],
-      notice: noticeFromCode(code),
+      notice: noticeFromCodeIn(messages, code),
     };
   }
 }
@@ -994,6 +964,20 @@ function ScreenFrame({
 
 function AlarmApp() {
   const { fontScale, height: viewportHeight } = useWindowDimensions();
+  // Device language and clock preference. Read again every time the app
+  // returns to the foreground (Android can change them while the app runs).
+  const [localeSettings, setLocaleSettings] = useState(readDeviceLocaleSettings);
+  const text = useMemo(
+    () => createTextContext(localeSettings),
+    [localeSettings],
+  );
+  const { messages, formatter } = text;
+  // Callbacks and long-lived listeners read the latest language from here, so
+  // they never speak a stale one.
+  const textRef = useRef<TextContext>(text);
+  const localeSettingsRef = useRef(localeSettings);
+  textRef.current = text;
+  const messagesNow = (): Messages => textRef.current.messages;
   const [alarms, setAlarms] = useState<StoredAlarmDefinition[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
@@ -1077,7 +1061,7 @@ function AlarmApp() {
       return false;
     }
     setDeletionPending(true);
-    setNotice(noticeFromCode('STORAGE_RESET_PENDING'));
+    setNotice(noticeFromCodeIn(messagesNow(), 'STORAGE_RESET_PENDING'));
     return true;
   }, []);
 
@@ -1111,7 +1095,11 @@ function AlarmApp() {
 
       refillInFlightRef.current = true;
       try {
-        const result = await refillEnabledSchedulesOnce(trigger, knownAlarms);
+        const result = await refillEnabledSchedulesOnce(
+          trigger,
+          knownAlarms,
+          messagesNow(),
+        );
         if (!result || (result.alarms && isStaleStorageResult(result.alarms))) {
           return null;
         }
@@ -1136,7 +1124,7 @@ function AlarmApp() {
 
   const openNotificationSettings = useCallback(() => {
     void Linking.openSettings().catch(() => {
-      setNotice(noticeFromCode('SETTINGS_OPEN_FAILED'));
+      setNotice(noticeFromCodeIn(messagesNow(), 'SETTINGS_OPEN_FAILED'));
     });
   }, []);
 
@@ -1151,10 +1139,13 @@ function AlarmApp() {
         return state;
       }
       setQueueStatuses(result.statuses);
-      const summary = summarizeReconciliation({
-        ...result,
-        unrecoveredNotificationIds: result.unrecoveredNotificationIds,
-      });
+      const summary = summarizeReconciliation(
+        {
+          ...result,
+          unrecoveredNotificationIds: result.unrecoveredNotificationIds,
+        },
+        messagesNow(),
+      );
       const reconciled = reconcileReportedScheduleProblems(
         reportedQueueProblemsRef.current,
         summary.problemKeys,
@@ -1236,7 +1227,11 @@ function AlarmApp() {
         // The caller shows one notice for all refills together.
         collectedIssues.push(...issues);
       } else {
-        const issueNotice = describeScheduleIssues(issues, '次回分: ');
+        const issueNotice = describeScheduleIssues(
+          issues,
+          messagesNow().scheduleIssue.nextLead,
+          messagesNow(),
+        );
         if (issueNotice) {
           setNotice(issueNotice);
         }
@@ -1266,12 +1261,35 @@ function AlarmApp() {
       const outcome = await snoozeService.recover();
       const recoveryCode = getSnoozeCopy.recoveryCode(outcome);
       if (recoveryCode) {
-        setNotice(noticeFromCode(recoveryCode));
+        setNotice(noticeFromCodeIn(messagesNow(), recoveryCode));
       }
     } catch {
       // Overdue handling below still rings or marks the snooze as missed.
-      setNotice(noticeFromCode('SNOOZE_RECOVERY_FAILED'));
+      setNotice(noticeFromCodeIn(messagesNow(), 'SNOOZE_RECOVERY_FAILED'));
     }
+  }, []);
+
+  useEffect(() => {
+    const refreshLocale = () => {
+      const next = readDeviceLocaleSettings();
+      const nextText = createTextContext(next);
+      // Notification text is fixed when it is scheduled, so it follows the
+      // device language from the first pass on, changed or not.
+      setNotificationMessages(nextText.messages);
+      if (sameLocaleSettings(localeSettingsRef.current, next)) {
+        return;
+      }
+      localeSettingsRef.current = next;
+      textRef.current = nextText;
+      setLocaleSettings(next);
+    };
+    refreshLocale();
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        refreshLocale();
+      }
+    });
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
@@ -1289,7 +1307,7 @@ function AlarmApp() {
           if ((await storageReset.readAmbiguousCount()) > 0 && mounted) {
             setNotice({
               tone: 'danger',
-              text: STORAGE_RESET_COPY.ambiguousWarning,
+              text: messagesNow().settings.ambiguousWarning,
             });
           }
         } catch {
@@ -1300,7 +1318,7 @@ function AlarmApp() {
         } catch {
           cancellationRecoveryFailed = true;
           if (mounted) {
-            setNotice(noticeFromCode('CANCEL_RECOVERY_INCOMPLETE'));
+            setNotice(noticeFromCodeIn(messagesNow(), 'CANCEL_RECOVERY_INCOMPLETE'));
           }
         }
         let editRecoveryFailed = false;
@@ -1309,7 +1327,7 @@ function AlarmApp() {
         } catch (error) {
           editRecoveryFailed = true;
           if (mounted) {
-            setNotice(describeError(error, 'EDIT_CLEANUP_INCOMPLETE'));
+            setNotice(describeErrorIn(messagesNow(), error, 'EDIT_CLEANUP_INCOMPLETE'));
           }
         }
         // Finish or report half-done stops before anything is marked due.
@@ -1453,8 +1471,8 @@ function AlarmApp() {
   // The bedside copy must not promise a notification sound that the current
   // delivery state cannot make.
   const bedsideGuidance = useMemo(
-    () => getBedsideGuidance(notificationDelivery),
-    [notificationDelivery],
+    () => getBedsideGuidance(notificationDelivery, messages),
+    [notificationDelivery, messages],
   );
   // Read when activation fails, so the notice uses the latest delivery state
   // without re-running (and releasing) the keep-awake effect.
@@ -1593,11 +1611,11 @@ function AlarmApp() {
       if (Platform.OS === 'ios') {
         // Queue behind current VoiceOver speech instead of interrupting it.
         AccessibilityInfo.announceForAccessibilityWithOptions(
-          MISSED_CARD_ANNOUNCEMENT,
+          messagesNow().missed.cardAnnouncement,
           { queue: true },
         );
       } else {
-        AccessibilityInfo.announceForAccessibility(MISSED_CARD_ANNOUNCEMENT);
+        AccessibilityInfo.announceForAccessibility(messagesNow().missed.cardAnnouncement);
       }
     }
   }, [missedCycleIdsKey, ringingCycle !== null, isAppActive]);
@@ -1618,7 +1636,7 @@ function AlarmApp() {
     }
 
     void startForegroundAlarmSound().catch(() => {
-      setNotice(noticeFromCode('SOUND_START_FAILED'));
+      setNotice(noticeFromCodeIn(messagesNow(), 'SOUND_START_FAILED'));
     });
     return stopForegroundAlarmSound;
   }, [ringingCycle?.cycleId]);
@@ -1674,7 +1692,7 @@ function AlarmApp() {
             );
             return;
           }
-          setNotice(describeAlarmRemains(result.reason));
+          setNotice(describeAlarmRemains(result.reason, messagesNow()));
           return;
         }
 
@@ -1682,18 +1700,18 @@ function AlarmApp() {
         await finishSuppression(result.alarm, suppressionCleanup);
         setNotice({
           tone: 'success',
-          text: '起床を確認しました。この時刻のアラームだけ停止しました。',
+          text: messagesNow().checkIn.confirmed,
         });
       } catch (error) {
-        const failure = classifySuppressionFailure(error);
+        const failure = classifySuppressionFailure(error, messagesNow());
         if (failure) {
           setSuppressionWarning(failure.warning);
           setNotice(failure.notice);
         } else if (suppressedConfirmed) {
           // The stop itself succeeded; only the follow-up failed.
-          setNotice(noticeFromCode('SUPPRESSION_FOLLOWUP_FAILED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'SUPPRESSION_FOLLOWUP_FAILED'));
         } else {
-          setNotice(noticeFromCode('CHECKIN_PROCESS_FAILED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'CHECKIN_PROCESS_FAILED'));
         }
       } finally {
         responseInFlightRef.current = null;
@@ -1730,7 +1748,7 @@ function AlarmApp() {
             );
             return;
           }
-          setNotice(describeAlarmRemains(result.reason));
+          setNotice(describeAlarmRemains(result.reason, messagesNow()));
           return;
         }
         if (result.status !== 'suppressed') {
@@ -1740,22 +1758,22 @@ function AlarmApp() {
         await finishSuppression(result.alarm, suppressionCleanup);
         setNotice({
           tone: 'success',
-          text: USER_SKIP_DONE_NOTICE,
+          text: messagesNow().skip.done,
         });
       } catch (error) {
-        const failure = classifySuppressionFailure(error);
+        const failure = classifySuppressionFailure(error, messagesNow());
         if (failure) {
           setSuppressionWarning(failure.warning);
           setNotice(failure.notice);
         } else if (suppressedConfirmed) {
           setNotice({
             tone: 'warning',
-            text: 'この回のアラームは停止しました。次回分の予約更新に失敗したため、アラームの状態を確認してください。',
+            text: messagesNow().skip.stoppedRefillFailed,
           });
         } else {
           setNotice({
             tone: 'danger',
-            text: '今回分の停止に失敗しました。安全のためアラームは維持します。',
+            text: messagesNow().skip.failed,
           });
         }
       } finally {
@@ -1773,18 +1791,10 @@ function AlarmApp() {
       Date.now(),
     );
     if (!target) {
-      setNotice(describeAlarmRemains('SKIP_BEFORE_WINDOW'));
+      setNotice(describeAlarmRemains('SKIP_BEFORE_WINDOW', messagesNow()));
       return;
     }
-    const copy = describeUserSkipConfirmation(
-      target,
-      formatNextDate,
-      (timestampMs) =>
-        formatAlarmTime(
-          new Date(timestampMs).getHours(),
-          new Date(timestampMs).getMinutes(),
-        ),
-    );
+    const copy = describeUserSkipConfirmation(target, textRef.current);
     Alert.alert(copy.title, copy.body, [
       { text: copy.cancelLabel, style: 'cancel' },
       {
@@ -1834,7 +1844,7 @@ function AlarmApp() {
             }
             setNotice({
               tone: 'danger',
-              text: '鳴動中のアラーム状態を保存できませんでした。',
+              text: messagesNow().ringing.persistFailed,
             });
           });
       },
@@ -1878,10 +1888,10 @@ function AlarmApp() {
             // The record is not updated while a deletion is unfinished; the
             // notification itself still rings.
             setDeletionPending(true);
-            setNotice(noticeFromCode('STORAGE_RESET_PENDING'));
+            setNotice(noticeFromCodeIn(messagesNow(), 'STORAGE_RESET_PENDING'));
             return;
           }
-          setNotice(noticeFromCode('DUE_TRANSITION_FAILED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'DUE_TRANSITION_FAILED'));
         })
         .finally(() => {
           dueTransitionInFlightRef.current = false;
@@ -1975,7 +1985,7 @@ function AlarmApp() {
               setPedometerState('counting');
               setNotice({
                 tone: 'success',
-                text: '100歩を検知しました。この時刻のアラームだけ停止しました。',
+                text: messagesNow().checkIn.stepsDetected,
               });
               return;
             }
@@ -1991,19 +2001,19 @@ function AlarmApp() {
               return;
             }
             setNotice({
-              ...noticeFromCode('CANCEL_NOT_VERIFIED'),
-              text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
+              ...noticeFromCodeIn(messagesNow(), 'CANCEL_NOT_VERIFIED'),
+              text: messagesNow().checkIn.stepsCancelUnconfirmed,
             });
           })
           .catch((error: unknown) => {
-            const failure = classifySuppressionFailure(error);
+            const failure = classifySuppressionFailure(error, messagesNow());
             if (failure) {
               setSuppressionWarning(failure.warning);
               setNotice(failure.notice);
             } else if (suppressedConfirmed) {
-              setNotice(noticeFromCode('SUPPRESSION_FOLLOWUP_FAILED'));
+              setNotice(noticeFromCodeIn(messagesNow(), 'SUPPRESSION_FOLLOWUP_FAILED'));
             } else {
-              setNotice(noticeFromCode('STEP_PROCESS_FAILED'));
+              setNotice(noticeFromCodeIn(messagesNow(), 'STEP_PROCESS_FAILED'));
             }
           })
           .finally(() => {
@@ -2143,22 +2153,29 @@ function AlarmApp() {
       clearQueueStatus(definition.id);
       setCurrentAlarms(next);
       setIsComposerOpen(false);
-      const firstRingLabel = `${formatNextDate(nextAtMs)} ${formatAlarmTime(
+      const firstRingLabel = `${formatter.day(nextAtMs)} ${formatter.clock(
         definition.hour,
         definition.minute,
       )}`;
       // "Added ... rings at" is only said when nothing is missing or unverified.
       setNotice(
-        describeScheduleIssues(fillIssues, 'アラームは追加しました。') ?? {
+        describeScheduleIssues(
+          fillIssues,
+          messages.scheduleIssue.addedLead,
+          messages,
+        ) ?? {
           tone: 'success',
-          text: `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。初回は${firstRingLabel}に鳴ります。`,
+          text: messages.alarmList.added(
+            formatter.clock(definition.hour, definition.minute),
+            firstRingLabel,
+          ),
         },
       );
     } catch (error) {
       if (reportResetPending(error)) {
         return;
       }
-      setNotice(describeError(error));
+      setNotice(describeErrorIn(messagesNow(), error));
     } finally {
       setIsBusy(false);
       // The permission prompt or a failure may have changed what can ring.
@@ -2186,7 +2203,7 @@ function AlarmApp() {
       setNotice(null);
       try {
         if (await hasPendingAlarmEdit(definition.id)) {
-          setNotice(noticeFromCode('EDIT_UNSETTLED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'EDIT_UNSETTLED'));
           return;
         }
         if (!enabled) {
@@ -2253,7 +2270,8 @@ function AlarmApp() {
         setCurrentAlarms(next);
         const issueNotice = describeScheduleIssues(
           fillIssues,
-          'アラームはオンにしました。',
+          messagesNow().scheduleIssue.enabledLead,
+          messagesNow(),
         );
         if (issueNotice) {
           setNotice(issueNotice);
@@ -2269,8 +2287,9 @@ function AlarmApp() {
         }
         setNotice(
           enabled
-            ? describeError(error)
+            ? describeErrorIn(messagesNow(), error)
             : await cancellationFailureNotice(
+                messagesNow(),
                 definition.id,
                 error,
                 'DISABLE_CANCEL_INCOMPLETE',
@@ -2301,7 +2320,7 @@ function AlarmApp() {
       setIsBusy(true);
       try {
         if (await hasPendingAlarmEdit(definition.id)) {
-          setNotice(noticeFromCode('EDIT_UNSETTLED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'EDIT_UNSETTLED'));
           return;
         }
         const next = await cancelAlarmDefinitionPersistently(
@@ -2309,7 +2328,7 @@ function AlarmApp() {
           'delete',
         );
         setCurrentAlarms(next);
-        setNotice({ tone: 'neutral', text: 'アラームを削除しました。' });
+        setNotice({ tone: 'neutral', text: messagesNow().alarmList.deleted });
       } catch (error) {
         if (reportResetPending(error)) {
           return;
@@ -2321,6 +2340,7 @@ function AlarmApp() {
         }
         setNotice(
           await cancellationFailureNotice(
+                messagesNow(),
             definition.id,
             error,
             'DELETE_CANCEL_INCOMPLETE',
@@ -2377,25 +2397,28 @@ function AlarmApp() {
         const nextDueAtMs = edited
           ? nextCycleForDefinition(edited, editedAtMs)?.dueAtMs
           : undefined;
-        const clockLabel = formatAlarmTime(hour, minute);
+        const { messages: m, formatter: f } = textRef.current;
+        const clockLabel = f.clock(hour, minute);
         const severity = getAlarmScheduleIssueSeverity(result.issues);
         if (result.cleanupPending) {
-          setNotice(noticeFromCode('EDIT_CLEANUP_PENDING'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'EDIT_CLEANUP_PENDING'));
         } else if (severity !== 'none') {
           setNotice(
-            describeScheduleIssues(result.issues, `${clockLabel}に変更しました。`) ??
-              noticeFromCode('CHECKIN_PARTIAL'),
+            describeScheduleIssues(
+              result.issues,
+              m.scheduleIssue.changedLead(clockLabel),
+              m,
+            ) ??
+              noticeFromCodeIn(m, 'CHECKIN_PARTIAL'),
           );
         } else {
           setNotice({
             tone: 'success',
             text: !target.enabled
-              ? `${clockLabel}に変更しました。アラームはオフのままです。`
+              ? m.edit.savedOff(clockLabel)
               : nextDueAtMs !== undefined
-                ? `${clockLabel}のアラームに変更しました。次回は${formatNextDate(
-                    nextDueAtMs,
-                  )} ${clockLabel}に鳴ります。`
-                : `${clockLabel}のアラームに変更しました。`,
+                ? m.edit.savedNext(clockLabel, f.day(nextDueAtMs))
+                : m.edit.saved(clockLabel),
           });
         }
       } catch (error) {
@@ -2413,7 +2436,7 @@ function AlarmApp() {
           setIsComposerOpen(false);
           setEditingAlarmId(null);
         }
-        setNotice(describeError(error));
+        setNotice(describeErrorIn(messagesNow(), error));
       } finally {
         setIsBusy(false);
         void refreshNotificationDelivery();
@@ -2432,12 +2455,13 @@ function AlarmApp() {
   );
 
   const notifyListLocked = useCallback((reason?: AlarmListLockReason) => {
+    const { ringing } = messagesNow();
     setNotice({
       tone: 'warning',
       text:
         reason === 'snoozed'
-          ? `スヌーズ中は、オン・オフ、編集、削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`
-          : `アラームが鳴っている間は、オン・オフ、編集、削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`,
+          ? ringing.snoozedLockedNotice(ringing.stopLabel)
+          : ringing.lockedNotice(ringing.stopLabel),
     });
   }, []);
 
@@ -2504,21 +2528,22 @@ function AlarmApp() {
   const confirmDeleteAlarm = useCallback(
     (definition: StoredAlarmDefinition) => {
       Alert.alert(
-        'アラームを削除しますか？',
-        `${formatAlarmTime(definition.hour, definition.minute)}（${formatRepeatLabel(
-          definition.repeat,
-        )}）を削除します。`,
+        messages.alarmList.deleteTitle,
+        messages.alarmList.deleteBody(
+          formatter.clock(definition.hour, definition.minute),
+          formatRepeatLabel(definition.repeat, messages, formatter),
+        ),
         [
-          { text: 'キャンセル', style: 'cancel' },
+          { text: messages.common.cancel, style: 'cancel' },
           {
-            text: '削除',
+            text: messages.common.delete,
             style: 'destructive',
             onPress: () => void deleteAlarm(definition),
           },
         ],
       );
     },
-    [deleteAlarm],
+    [deleteAlarm, formatter, messages],
   );
 
   const applyLocalDataDeleted = useCallback(() => {
@@ -2547,14 +2572,17 @@ function AlarmApp() {
       sun.completeDeletion();
       setNotice(
         ambiguousCount > 0
-          ? { tone: 'danger', text: STORAGE_RESET_COPY.ambiguousWarning }
-          : { tone: 'neutral', text: STORAGE_RESET_COPY.done },
+          ? {
+              tone: 'danger',
+              text: messagesNow().storageLoadFailed.resetAmbiguous,
+            }
+          : { tone: 'neutral', text: messagesNow().storageLoadFailed.resetDone },
       );
     } catch {
       // The failure card stays; part of the data may already be gone and a
       // retry resumes from the saved intent.
       sun.failDeletion();
-      setNotice(noticeFromCode('STORAGE_RESET_INCOMPLETE'));
+      setNotice(noticeFromCodeIn(messagesNow(), 'STORAGE_RESET_INCOMPLETE'));
     } finally {
       setIsBusy(false);
     }
@@ -2562,11 +2590,14 @@ function AlarmApp() {
 
   const performLocalDataDeletion = useCallback(async () => {
     // Re-checked when the dialog is confirmed: an alarm may have started.
-    const availability = getLocalDataDeletionAvailability({
-      isRinging: getRingingCycle(alarmsRef.current) !== null,
-      isBusy,
-      isLoaded,
-    });
+    const availability = getLocalDataDeletionAvailability(
+      {
+        isRinging: getRingingCycle(alarmsRef.current) !== null,
+        isBusy,
+        isLoaded,
+      },
+      messagesNow(),
+    );
     if (!availability.allowed) {
       setSettingsNotice(availability.reason);
       return;
@@ -2585,9 +2616,9 @@ function AlarmApp() {
         // The in-memory list is not rewritten; storage may be partly removed,
         // and alarm writes are refused until a retry finishes.
         setDeletionPending(true);
-        setSettingsNotice(LOCAL_DATA_COPY.failed);
+        setSettingsNotice(messagesNow().settings.failed);
         // Also on home, so the failure and the retry steps outlive the sheet.
-        setNotice({ tone: 'danger', text: LOCAL_DATA_COPY.failedHome });
+        setNotice({ tone: 'danger', text: messagesNow().settings.failedHome });
         return;
       }
       applyLocalDataDeleted();
@@ -2595,8 +2626,8 @@ function AlarmApp() {
       setIsSettingsOpen(false);
       setNotice(
         outcome.ambiguousCount > 0
-          ? { tone: 'danger', text: LOCAL_DATA_COPY.doneAmbiguous }
-          : { tone: 'neutral', text: LOCAL_DATA_COPY.done },
+          ? { tone: 'danger', text: messagesNow().settings.ambiguousWarning }
+          : { tone: 'neutral', text: messagesNow().settings.done },
       );
     } finally {
       deletionInFlightRef.current = false;
@@ -2613,31 +2644,34 @@ function AlarmApp() {
   }, []);
 
   const confirmLocalDataDeletion = useCallback(() => {
-    const availability = getLocalDataDeletionAvailability({
-      isRinging: getRingingCycle(alarmsRef.current) !== null,
-      isBusy,
-      isLoaded,
-    });
+    const availability = getLocalDataDeletionAvailability(
+      {
+        isRinging: getRingingCycle(alarmsRef.current) !== null,
+        isBusy,
+        isLoaded,
+      },
+      messagesNow(),
+    );
     if (!availability.allowed) {
       setSettingsNotice(availability.reason);
       return;
     }
     Alert.alert(
-      LOCAL_DATA_COPY.firstConfirmTitle,
-      LOCAL_DATA_COPY.firstConfirmBody,
+      messages.settings.firstConfirmTitle,
+      messages.settings.firstConfirmBody,
       [
-        { text: 'キャンセル', style: 'cancel' },
+        { text: messages.common.cancel, style: 'cancel' },
         {
-          text: '次へ',
+          text: messages.common.next,
           style: 'destructive',
           onPress: () =>
             Alert.alert(
-              LOCAL_DATA_COPY.finalConfirmTitle,
-              LOCAL_DATA_COPY.finalConfirmBody,
+              messages.settings.finalConfirmTitle,
+              messages.settings.finalConfirmBody,
               [
-                { text: 'キャンセル', style: 'cancel' },
+                { text: messages.common.cancel, style: 'cancel' },
                 {
-                  text: LOCAL_DATA_COPY.confirmAction,
+                  text: messages.settings.confirmAction,
                   style: 'destructive',
                   onPress: () => void performLocalDataDeletion(),
                 },
@@ -2646,28 +2680,28 @@ function AlarmApp() {
         },
       ],
     );
-  }, [isBusy, isLoaded, performLocalDataDeletion]);
+  }, [isBusy, isLoaded, messages, performLocalDataDeletion]);
 
   const confirmStorageReset = useCallback(() => {
     if (!loadFailed || isBusy) {
       return;
     }
     Alert.alert(
-      STORAGE_RESET_COPY.firstConfirmTitle,
-      STORAGE_RESET_COPY.firstConfirmBody,
+      messages.storageLoadFailed.resetFirstTitle,
+      messages.storageLoadFailed.resetFirstBody,
       [
-        { text: 'キャンセル', style: 'cancel' },
+        { text: messages.common.cancel, style: 'cancel' },
         {
-          text: '次へ',
+          text: messages.common.next,
           style: 'destructive',
           onPress: () =>
             Alert.alert(
-              STORAGE_RESET_COPY.finalConfirmTitle,
-              STORAGE_RESET_COPY.finalConfirmBody,
+              messages.storageLoadFailed.resetFinalTitle,
+              messages.storageLoadFailed.resetFinalBody,
               [
-                { text: 'キャンセル', style: 'cancel' },
+                { text: messages.common.cancel, style: 'cancel' },
                 {
-                  text: STORAGE_RESET_COPY.action,
+                  text: messages.storageLoadFailed.resetAction,
                   style: 'destructive',
                   onPress: () => void performStorageReset(),
                 },
@@ -2676,7 +2710,7 @@ function AlarmApp() {
         },
       ],
     );
-  }, [isBusy, loadFailed, performStorageReset]);
+  }, [isBusy, loadFailed, messages, performStorageReset]);
   const acknowledgeMissed = useCallback(async () => {
     if (isBusy || missedCycles.length === 0) {
       return;
@@ -2702,12 +2736,16 @@ function AlarmApp() {
         dismissDelivered: dismissDeliveredNotification,
         refill: (completed) => refreshAfterCycleCompletion(completed, refillIssues),
       });
-      const ackNotice = getMissedAcknowledgementNotice(result, refillIssues);
+      const ackNotice = getMissedAcknowledgementNotice(
+        result,
+        refillIssues,
+        messagesNow(),
+      );
       if (ackNotice) {
         setNotice(ackNotice);
       }
     } catch {
-      setNotice(noticeFromCode('MISSED_ACK_FAILED'));
+      setNotice(noticeFromCodeIn(messagesNow(), 'MISSED_ACK_FAILED'));
     } finally {
       setIsBusy(false);
     }
@@ -2739,7 +2777,7 @@ function AlarmApp() {
         const result = await snoozeService.stop(cycle.cycleId);
         if (result.status !== 'stopped') {
           setNotice(
-            noticeFromCode(
+            noticeFromCodeIn(messagesNow(),
               result.status === 'failed'
                 ? getSnoozeCopy.stopFailureCode(result.reason)
                 : 'STOP_ALREADY_ENDED',
@@ -2750,10 +2788,14 @@ function AlarmApp() {
         stoppedCycle = result.cycle;
         // Sound, then the committed snapshot, then the fallible refill: a later
         // failure can neither leave the ringing card up nor hide a cleanup warning.
-        const presented = await presentStopped(result, {
-          ...outcomeEffects(),
-          refill: refreshAfterCycleCompletion,
-        });
+        const presented = await presentStopped(
+          result,
+          {
+            ...outcomeEffects(),
+            refill: refreshAfterCycleCompletion,
+          },
+          textRef.current,
+        );
         if (presented.deletionPending) {
           setDeletionPending(true);
         }
@@ -2769,15 +2811,15 @@ function AlarmApp() {
             () => undefined,
           );
           setDeletionPending(true);
-          setNotice(noticeFromCode('STOP_RESET_PENDING'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'STOP_RESET_PENDING'));
         } else if (stoppedCycle) {
           if (isStorageResetPendingError(error)) {
             setDeletionPending(true);
           }
           // The stop is saved; only reading back or refilling failed.
-          setNotice(noticeFromCode('STOP_FOLLOWUP_FAILED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'STOP_FOLLOWUP_FAILED'));
         } else {
-          setNotice(noticeFromCode('STOP_RINGING_FAILED'));
+          setNotice(noticeFromCodeIn(messagesNow(), 'STOP_RINGING_FAILED'));
         }
       } finally {
         setIsBusy(false);
@@ -2805,19 +2847,19 @@ function AlarmApp() {
       if (result.status === 'snoozed') {
         // Sound and the committed snapshot first: nothing fallible runs
         // between the accepted snooze and the screen showing it.
-        setNotice(await presentSnoozed(result, outcomeEffects()));
+        setNotice(await presentSnoozed(result, outcomeEffects(), textRef.current));
         return;
       }
       // Rejected: the alarm keeps ringing and stored state is the truth; reading
       // it is best effort and never turns the rejection into another failure.
-      setNotice(await presentSnoozeRejected(result, outcomeEffects()));
+      setNotice(await presentSnoozeRejected(result, outcomeEffects(), textRef.current));
     } catch (error) {
       if (isStorageResetPendingError(error)) {
         // Nothing was scheduled or written; the alarm keeps ringing.
         setDeletionPending(true);
-        setNotice(noticeFromCode('SNOOZE_RESET_PENDING'));
+        setNotice(noticeFromCodeIn(messagesNow(), 'SNOOZE_RESET_PENDING'));
       } else {
-        setNotice(noticeFromCode('SNOOZE_UNEXPECTED_FAILURE'));
+        setNotice(noticeFromCodeIn(messagesNow(), 'SNOOZE_UNEXPECTED_FAILURE'));
       }
     } finally {
       setIsBusy(false);
@@ -2851,10 +2893,7 @@ function AlarmApp() {
       ? getWindowStepCount(monitoringCycle, stepWindow)
       : 0;
   const stepWindowStartLabel = stepWindow
-    ? formatAlarmTime(
-        new Date(stepWindow.startMs).getHours(),
-        new Date(stepWindow.startMs).getMinutes(),
-      )
+    ? formatter.clockAt(stepWindow.startMs)
     : '';
   const deliveryWarning =
     notificationDelivery &&
@@ -2866,24 +2905,23 @@ function AlarmApp() {
     ? getNotificationDeliveryWarningCopy(
         deliveryWarning,
         monitoringCycle
-          ? `${formatNextDate(monitoringCycle.dueAtMs)} ${formatAlarmTime(
-              new Date(monitoringCycle.dueAtMs).getHours(),
-              new Date(monitoringCycle.dueAtMs).getMinutes(),
+          ? `${formatter.day(monitoringCycle.dueAtMs)} ${formatter.clockAt(
+              monitoringCycle.dueAtMs,
             )}`
           : null,
+        messages,
       )
     : null;
   // Independent of the delivery-warning card: the foreground loop still
   // runs with notifications off, so the user must keep this control.
   const skipAction = skipOffer ? (
     <Pressable
-      accessibilityHint={USER_SKIP_HINT}
-      accessibilityLabel={`${formatNextDate(
-        skipOffer.dueAtMs,
-      )} ${formatAlarmTime(
-        new Date(skipOffer.dueAtMs).getHours(),
-        new Date(skipOffer.dueAtMs).getMinutes(),
-      )}の回だけ止める`}
+      accessibilityHint={messages.skip.hint}
+      accessibilityLabel={messages.skip.spoken(
+        `${formatter.day(skipOffer.dueAtMs)} ${formatter.clockAt(
+          skipOffer.dueAtMs,
+        )}`,
+      )}
       accessibilityRole="button"
       disabled={isBusy}
       hitSlop={4}
@@ -2894,16 +2932,15 @@ function AlarmApp() {
       ]}
       testID="skip-this-occurrence"
     >
-      <Text style={styles.skipButtonText}>{USER_SKIP_LABEL}</Text>
+      <Text style={styles.skipButtonText}>{messages.skip.label}</Text>
     </Pressable>
   ) : null;
   const listLocked = isAlarmListLocked(ringingCycle ?? snoozedCycle);
-  const suppressedOccurrence = describeSuppressedOccurrence(
-    alarms,
-    nowMs,
-    formatNextDate,
-  );
-  const stepGuidance = getStepGuidance(pedometerState);
+  const suppressedOccurrence = describeSuppressedOccurrence(alarms, nowMs, text);
+  const suppressionCopy = suppressionWarning
+    ? getSuppressionWarningCopy(suppressionWarning, messages)
+    : null;
+  const stepGuidance = getStepGuidance(pedometerState, messages);
   useEffect(() => {
     // A ringing alarm takes the screen; the sheet must not reappear after stop.
     if (ringingCycle) {
@@ -2917,11 +2954,14 @@ function AlarmApp() {
     !deletionPending &&
     alarms.length < MAX_ALARM_COUNT &&
     !isBusy;
-  const deletionAvailability = getLocalDataDeletionAvailability({
-    isRinging: ringingCycle !== null,
-    isBusy,
-    isLoaded,
-  });
+  const deletionAvailability = getLocalDataDeletionAvailability(
+    {
+      isRinging: ringingCycle !== null,
+      isBusy,
+      isLoaded,
+    },
+    messages,
+  );
   const editingDefinition = editingAlarmId
     ? alarms.find((alarm) => alarm.id === editingAlarmId)
     : undefined;
@@ -2934,7 +2974,7 @@ function AlarmApp() {
     minute: selectedTime.getMinutes(),
     repeatKind,
     customWeekdays,
-    formatDate: formatNextDate,
+    text,
   });
   const editAvailable = canEditAlarm({
     isBusy,
@@ -2981,12 +3021,13 @@ function AlarmApp() {
         <StatusBar style="light" />
         <CircadianBackground theme={circadianTheme} />
         <ActivityIndicator color="#FFFFFF" size="large" />
-        <Text style={styles.loadingText}>アラームを確認しています…</Text>
+        <Text style={styles.loadingText}>{messages.alarmList.loading}</Text>
       </SafeAreaView>
     );
   }
 
   return (
+    <I18nProvider value={text}>
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
       <CircadianBackground theme={circadianTheme} />
@@ -3011,10 +3052,10 @@ function AlarmApp() {
               numberOfLines={1}
               style={styles.screenTitle}
             >
-              アラーム
+              {messages.alarmList.title}
             </Text>
             <Text style={styles.screenSubtitle}>
-              目覚めた朝に、静けさを。
+              {messages.alarmList.tagline}
             </Text>
           </View>
           <View style={styles.headerActions}>
@@ -3029,8 +3070,8 @@ function AlarmApp() {
               tintColor="#FFFFFF18"
             >
               <Pressable
-                accessibilityHint={LOCAL_DATA_COPY.settingsHint}
-                accessibilityLabel={LOCAL_DATA_COPY.settingsLabel}
+                accessibilityHint={messages.settings.openHint}
+                accessibilityLabel={messages.settings.openLabel}
                 accessibilityRole="button"
                 accessibilityState={{ disabled: !!ringingCycle }}
                 disabled={!!ringingCycle}
@@ -3067,11 +3108,11 @@ function AlarmApp() {
               tintColor="#FFFFFF18"
             >
               <Pressable
-                accessibilityLabel="アラームを追加"
+                accessibilityLabel={messages.alarmList.add}
                 accessibilityRole="button"
                 accessibilityHint={
                   loadFailed
-                    ? STORAGE_LOAD_FAILED_COPY.addDisabledReason
+                    ? messages.storageLoadFailed.addDisabledReason
                     : undefined
                 }
                 accessibilityState={{ disabled: !canOpenComposer }}
@@ -3116,10 +3157,10 @@ function AlarmApp() {
             testID="suppression-warning"
           >
             <Text accessibilityRole="header" style={styles.deliveryWarningTitle}>
-              {SUPPRESSION_WARNING_COPY[suppressionWarning].title}
+              {suppressionCopy?.title}
             </Text>
             <Text style={styles.deliveryWarningBody}>
-              {SUPPRESSION_WARNING_COPY[suppressionWarning].body}
+              {suppressionCopy?.body}
             </Text>
           </View>
         ) : null}
@@ -3127,11 +3168,14 @@ function AlarmApp() {
         {!ringingCycle && snoozedCycle ? (
           <View style={styles.ringingCard} testID="snoozed-alarm">
             {(() => {
-              const waiting = getSnoozeCopy({
-                phase: 'snoozed',
-                used: snoozedCycle.snooze?.count ?? 0,
-                nextAtMs: snoozedCycle.snooze?.dueAtMs ?? snoozedCycle.dueAtMs,
-              });
+              const waiting = getSnoozeCopy(
+                {
+                  phase: 'snoozed',
+                  used: snoozedCycle.snooze?.count ?? 0,
+                  nextAtMs: snoozedCycle.snooze?.dueAtMs ?? snoozedCycle.dueAtMs,
+                },
+                text,
+              );
               return (
                 <>
                   <Text accessibilityRole="header" style={styles.ringingLabel}>
@@ -3164,7 +3208,7 @@ function AlarmApp() {
         {ringingCycle ? (
           <View style={styles.ringingCard}>
             <Text accessibilityRole="header" style={styles.ringingLabel}>
-              鳴っています
+              {messages.ringing.badge}
             </Text>
             <Text
               adjustsFontSizeToFit
@@ -3172,21 +3216,19 @@ function AlarmApp() {
               numberOfLines={1}
               style={styles.ringingTime}
             >
-              {formatAlarmTime(
-                new Date(getRingingDisplay(ringingCycle).timeMs).getHours(),
-                new Date(getRingingDisplay(ringingCycle).timeMs).getMinutes(),
-              )}
+              {formatter.clockAt(getRingingDisplay(ringingCycle).timeMs)}
             </Text>
             <Text style={styles.ringingDate}>
-              {formatNextDate(getRingingDisplay(ringingCycle).dateMs)}
+              {formatter.day(getRingingDisplay(ringingCycle).dateMs)}
             </Text>
-            <Text style={styles.ringingTitle}>起きる時間です</Text>
+            <Text style={styles.ringingTitle}>{messages.ringing.title}</Text>
             <Pressable
-              accessibilityHint={RINGING_STOP_HINT}
+              accessibilityHint={messages.ringing.stopHint}
               accessibilityLabel={getRingingStopA11yLabel(
                 new Date(getRingingDisplay(ringingCycle).timeMs).getHours(),
                 new Date(getRingingDisplay(ringingCycle).timeMs).getMinutes(),
-                formatNextDate(getRingingDisplay(ringingCycle).dateMs),
+                text,
+                formatter.day(getRingingDisplay(ringingCycle).dateMs),
               )}
               accessibilityRole="button"
               accessibilityState={{ disabled: isBusy }}
@@ -3199,13 +3241,18 @@ function AlarmApp() {
                 (isBusy || pressed) && styles.buttonDimmed,
               ]}
             >
-              <Text style={styles.stopButtonText}>{RINGING_STOP_LABEL}</Text>
+              <Text style={styles.stopButtonText}>
+                {messages.ringing.stopLabel}
+              </Text>
             </Pressable>
             {(() => {
-              const snoozeCopy = getSnoozeCopy({
-                phase: 'ringing',
-                ...getSnoozeAvailability(ringingCycle, nowMs),
-              });
+              const snoozeCopy = getSnoozeCopy(
+                {
+                  phase: 'ringing',
+                  ...getSnoozeAvailability(ringingCycle, nowMs),
+                },
+                text,
+              );
               const snoozeDisabled = isBusy || snoozeCopy.actionDisabled;
               return (
                 <View testID="snooze-section">
@@ -3234,31 +3281,29 @@ function AlarmApp() {
         ) : missedCycles.length > 0 ? (
           <View style={styles.ringingCard} testID="missed-alarms">
             <Text accessibilityRole="header" style={styles.ringingLabel}>
-              見逃したアラーム
+              {messages.missed.title}
             </Text>
             <Text style={styles.ringingTitle}>
-              音は鳴らしません。起きたかどうかは判断していません。
+              {messages.missed.explanation}
             </Text>
             <Text style={styles.missedItem}>
-              見逃し合計 {missedCycles.length}件
+              {messages.missed.total(missedCycles.length)}
             </Text>
             {missedPreview.visible.map((cycle) => (
               <Text key={cycle.cycleId} style={styles.missedItem}>
-                {formatNextDate(cycle.dueAtMs)}{' '}
-                {formatAlarmTime(
-                  new Date(cycle.dueAtMs).getHours(),
-                  new Date(cycle.dueAtMs).getMinutes(),
-                )}
+                {formatter.day(cycle.dueAtMs)} {formatter.clockAt(cycle.dueAtMs)}
               </Text>
             ))}
             {missedPreview.hiddenCount > 0 ? (
               <Text style={styles.missedItem}>
-                ほか{missedPreview.hiddenCount}件
+                {messages.missed.hidden(missedPreview.hiddenCount)}
               </Text>
             ) : null}
             <Pressable
-              accessibilityHint="見逃したアラームをすべて確認済みにします。繰り返しの今後の予定は残ります。"
-              accessibilityLabel={`見逃した${missedCycles.length}件をすべて確認済みにする`}
+              accessibilityHint={messages.missed.acknowledgeAllHint}
+              accessibilityLabel={messages.missed.acknowledgeAllSpoken(
+                missedCycles.length,
+              )}
               accessibilityRole="button"
               accessibilityState={{ disabled: isBusy }}
               disabled={isBusy}
@@ -3269,7 +3314,9 @@ function AlarmApp() {
                 (isBusy || pressed) && styles.buttonDimmed,
               ]}
             >
-              <Text style={styles.stopButtonText}>すべて確認済みにする</Text>
+              <Text style={styles.stopButtonText}>
+                {messages.missed.acknowledgeAll}
+              </Text>
             </Pressable>
           </View>
         ) : loadFailed ? (
@@ -3279,21 +3326,21 @@ function AlarmApp() {
             testID="storage-load-failed"
           >
             <Text accessibilityRole="header" style={styles.deliveryWarningTitle}>
-              {STORAGE_LOAD_FAILED_COPY.title}
+              {messages.storageLoadFailed.title}
             </Text>
             <Text style={styles.deliveryWarningBody}>
-              {STORAGE_LOAD_FAILED_COPY.body}
+              {messages.storageLoadFailed.body}
             </Text>
             <Text style={styles.deliveryWarningBody}>
-              {STORAGE_LOAD_FAILED_COPY.addDisabledReason}
+              {messages.storageLoadFailed.addDisabledReason}
             </Text>
-            {STORAGE_LOAD_FAILED_COPY.restartSteps.map((step, index) => (
+            {messages.storageLoadFailed.restartSteps.map((step, index) => (
               <Text key={step} style={styles.deliveryWarningBody}>
                 {index + 1}. {step}
               </Text>
             ))}
             <Text style={styles.deliveryWarningBody}>
-              {STORAGE_RESET_COPY.lastResort}
+              {messages.storageLoadFailed.lastResort}
             </Text>
             {loadFailureCode ? (
               <Text
@@ -3301,14 +3348,14 @@ function AlarmApp() {
                 style={styles.errorCodeDetail}
                 testID="storage-load-failed-code"
               >
-                {describeErrorCode(loadFailureCode).message}
+                {messages.errors[loadFailureCode].message}
                 {'\n'}
-                エラーコード: {loadFailureCode}
+                {messages.common.errorCode}: {loadFailureCode}
               </Text>
             ) : null}
             <Pressable
-              accessibilityHint={STORAGE_RESET_COPY.hint}
-              accessibilityLabel={STORAGE_RESET_COPY.action}
+              accessibilityHint={messages.storageLoadFailed.resetHint}
+              accessibilityLabel={messages.storageLoadFailed.resetAction}
               accessibilityRole="button"
               accessibilityState={{ busy: isBusy, disabled: isBusy }}
               disabled={isBusy}
@@ -3320,7 +3367,7 @@ function AlarmApp() {
               testID="storage-reset-button"
             >
               <Text style={styles.settingsButtonText}>
-                {STORAGE_RESET_COPY.action}
+                {messages.storageLoadFailed.resetAction}
               </Text>
             </Pressable>
           </View>
@@ -3337,7 +3384,7 @@ function AlarmApp() {
                 {deliveryWarningCopy.title}
               </Text>
               <Pressable
-                accessibilityHint="端末の設定で通知をオンにできます"
+                accessibilityHint={messages.delivery.openSettingsHint}
                 accessibilityRole="button"
                 hitSlop={4}
                 onPress={openNotificationSettings}
@@ -3346,7 +3393,9 @@ function AlarmApp() {
                   pressed && styles.buttonDimmed,
                 ]}
               >
-                <Text style={styles.settingsButtonText}>設定を開く</Text>
+                <Text style={styles.settingsButtonText}>
+                  {messages.common.openSettings}
+                </Text>
               </Pressable>
             </View>
             <Text style={styles.deliveryWarningBody}>
@@ -3371,14 +3420,14 @@ function AlarmApp() {
           >
             <View style={styles.nextAlarmHeader}>
               <View>
-                <Text style={styles.nextAlarmLabel}>次のアラーム</Text>
+                <Text style={styles.nextAlarmLabel}>{messages.alarmList.nextAlarm}</Text>
                 <Text
                   adjustsFontSizeToFit
                   minimumFontScale={0.5}
                   numberOfLines={1}
                   style={styles.nextAlarmTime}
                 >
-                  {formatAlarmTime(
+                  {formatter.clock(
                     monitoringDefinition.hour,
                     monitoringDefinition.minute,
                   )}
@@ -3386,24 +3435,27 @@ function AlarmApp() {
               </View>
               <View style={styles.nextAlarmMeta}>
                 <Text style={styles.nextAlarmDate}>
-                  {formatNextDate(monitoringCycle.dueAtMs)}
+                  {formatter.day(monitoringCycle.dueAtMs)}
                 </Text>
                 <Text style={styles.nextAlarmCountdown}>
-                  {formatCountdown(monitoringCycle.dueAtMs - nowMs)}
+                  {formatLeadTime(monitoringCycle.dueAtMs - nowMs, messages)}
                 </Text>
               </View>
             </View>
             {stepWindowPhase === 'before' ? (
               <View
                 accessible
-                accessibilityLabel={`起床確認は${stepWindowStartLabel}から。アプリを表示している間に${STEP_THRESHOLD}歩で確認します`}
+                accessibilityLabel={messages.steps.windowStartsSpoken(
+                  stepWindowStartLabel,
+                  STEP_THRESHOLD,
+                )}
                 style={[styles.progressCopy, styles.progressCopyPending]}
               >
                 <Text style={styles.progressText}>
-                  起床確認は {stepWindowStartLabel} から
+                  {messages.steps.windowStarts(stepWindowStartLabel)}
                 </Text>
                 <Text style={styles.progressStatus}>
-                  アプリ表示中に{STEP_THRESHOLD}歩
+                  {messages.steps.whileOpen(STEP_THRESHOLD)}
                 </Text>
               </View>
             ) : !stepGuidance.showProgress ? (
@@ -3412,7 +3464,7 @@ function AlarmApp() {
                   {stepGuidance.message}
                   {stepGuidance.code ? (
                     <Text style={styles.errorCodeInline}>
-                      {'\n'}コード {stepGuidance.code}
+                      {'\n'}{messages.common.errorCode} {stepGuidance.code}
                     </Text>
                   ) : null}
                 </Text>
@@ -3426,7 +3478,9 @@ function AlarmApp() {
                       pressed && styles.buttonDimmed,
                     ]}
                   >
-                    <Text style={styles.stepSettingsButtonText}>設定を開く</Text>
+                    <Text style={styles.stepSettingsButtonText}>
+                      {messages.common.openSettings}
+                    </Text>
                   </Pressable>
                 ) : null}
               </View>
@@ -3434,13 +3488,13 @@ function AlarmApp() {
               <>
                 <View
                   accessible
-                  accessibilityLabel="起床確認の歩数"
+                  accessibilityLabel={messages.steps.progressLabel}
                   accessibilityRole="progressbar"
                   accessibilityValue={{
                     max: STEP_THRESHOLD,
                     min: 0,
                     now: Math.min(windowStepCount, STEP_THRESHOLD),
-                    text: `${STEP_THRESHOLD}歩中${windowStepCount}歩`,
+                    text: messages.common.stepsOf(windowStepCount, STEP_THRESHOLD),
                   }}
                   style={styles.progressTrack}
                 >
@@ -3462,7 +3516,7 @@ function AlarmApp() {
                     importantForAccessibility="no"
                     style={styles.progressText}
                   >
-                    起床確認 {windowStepCount} / {STEP_THRESHOLD}歩
+                    {messages.steps.progress(windowStepCount, STEP_THRESHOLD)}
                   </Text>
                   <Text style={styles.progressStatus}>{stepGuidance.message}</Text>
                 </View>
@@ -3489,13 +3543,13 @@ function AlarmApp() {
               <Text style={styles.idleIconText}>☾</Text>
             </View>
             <View style={styles.idleCopy}>
-              <Text style={styles.idleTitle}>次のアラームはありません</Text>
+              <Text style={styles.idleTitle}>{messages.alarmList.noNextTitle}</Text>
               <Text style={styles.idleText}>
                 {alarms.length === 0
-                  ? '右上の＋から、起床時刻を追加できます。'
+                  ? messages.alarmList.noNextEmpty
                   : alarms.every((alarm) => !alarm.enabled)
-                    ? '一覧のスイッチをオンにすると、次のアラームを設定できます。'
-                    : '次回の予約はありません。設定した時刻と繰り返しを確認してください。'}
+                    ? messages.alarmList.noNextOff
+                    : messages.alarmList.noNextNone}
               </Text>
             </View>
           </GlassSurface>
@@ -3523,7 +3577,7 @@ function AlarmApp() {
           <View style={styles.listHeader}>
             <View>
               <Text accessibilityRole="header" style={styles.sectionTitle}>
-                設定したアラーム
+                {messages.alarmList.listHeading}
               </Text>
             </View>
             <View style={styles.alarmCountBadge}>
@@ -3545,17 +3599,17 @@ function AlarmApp() {
         {orderedAlarms.length === 0 && loadFailed ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>
-              アラーム情報を読み込めません
+              {messages.storageLoadFailed.title}
             </Text>
             <Text style={styles.emptyText}>
-              {STORAGE_LOAD_FAILED_COPY.body}
+              {messages.storageLoadFailed.body}
             </Text>
           </View>
         ) : orderedAlarms.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Text style={styles.emptyTitle}>アラームはまだありません</Text>
+            <Text style={styles.emptyTitle}>{messages.alarmList.emptyTitle}</Text>
             <Text style={styles.emptyText}>
-              時刻と繰り返しを選んで、最初のアラームを追加してください。
+              {messages.alarmList.emptyBody}
             </Text>
           </View>
         ) : (
@@ -3564,23 +3618,33 @@ function AlarmApp() {
               const nextCycle = nextCycleForDefinition(definition, nowMs);
               const coverageLine = getScheduleCoverageLine(
                 describeScheduleCoverage(definition, nowMs),
-                formatNextDate,
+                text,
                 {
                   refillFailed: refillFailedAlarmIds.has(definition.id),
                   queueStatus: queueStatuses[definition.id],
                 },
               );
-              const todayExpiry = describeTodayOnlyExpiry(
-                definition,
-                nowMs,
-                formatNextDate,
+              const todayExpiry = describeTodayOnlyExpiry(definition, nowMs, text);
+              const repeatLabel = formatRepeatLabel(
+                definition.repeat,
+                messages,
+                formatter,
               );
               const repeatA11y = todayExpiry
                 ? todayExpiry.a11yLabel
-                : formatRepeatLabel(definition.repeat);
+                : repeatLabel;
+              const alarmClock = formatter.clock(
+                definition.hour,
+                definition.minute,
+              );
               const scheduleLineWarns =
                 definition.enabled &&
                 (deliveryWarningCopy !== null || coverageLine.isWarning);
+              const scheduleLineText = todayExpiry
+                ? todayExpiry.explanation
+                : definition.enabled && deliveryWarningCopy
+                  ? deliveryWarningCopy.scheduleLine
+                  : coverageLine.text;
               return (
                 <View
                   key={definition.id}
@@ -3600,31 +3664,31 @@ function AlarmApp() {
                           !definition.enabled && styles.textDisabled,
                         ]}
                       >
-                        {formatAlarmTime(definition.hour, definition.minute)}
+                        {alarmClock}
                       </Text>
                       <Text style={styles.repeatText}>
-                        {todayExpiry
-                          ? todayExpiry.rowLabel
-                          : formatRepeatLabel(definition.repeat)}
+                        {todayExpiry ? todayExpiry.rowLabel : repeatLabel}
                         {todayExpiry
                           ? ''
                           : nextCycle
-                          ? ` ・ 次回 ${formatNextDate(nextCycle.dueAtMs)}`
-                          : definition.enabled
-                            ? ' ・ 次回予約なし'
-                            : ' ・ オフ'}
+                            ? messages.alarmList.nextOccurrence(
+                                formatter.day(nextCycle.dueAtMs),
+                              )
+                            : definition.enabled
+                              ? messages.alarmList.noNextOccurrence
+                              : messages.alarmList.off}
                       </Text>
                     </View>
                     <Switch
                       accessibilityHint={
                         todayExpiry && !definition.enabled
-                          ? '終了しているためオンにできません。新しいアラームを追加してください'
-                          : 'アラーム全体のスイッチです。オフにすると、繰り返しを含むすべての回の通知を取り消します。この回だけ止めるには、上の今回分だけ止めるを使います'
+                          ? messages.alarmList.toggleHintEnded
+                          : messages.alarmList.toggleHintOn
                       }
-                      accessibilityLabel={`${formatAlarmTime(
-                        definition.hour,
-                        definition.minute,
-                      )}、${repeatA11y}のアラーム、すべての回`}
+                      accessibilityLabel={messages.alarmList.rowSpoken(
+                        alarmClock,
+                        repeatA11y,
+                      )}
                       disabled={
                         isBusy ||
                         listLocked ||
@@ -3648,43 +3712,45 @@ function AlarmApp() {
                   ) : null}
                   <View style={styles.alarmCardFooter}>
                     <Text
+                      accessibilityLabel={
+                        scheduleLineWarns
+                          ? `${messages.alarmList.warningLabel}: ${scheduleLineText}`
+                          : undefined
+                      }
                       style={[
                         styles.scheduleSummary,
                         scheduleLineWarns && styles.scheduleSummaryWarning,
                       ]}
                     >
-                      {todayExpiry
-                        ? todayExpiry.explanation
-                        : definition.enabled && deliveryWarningCopy
-                          ? deliveryWarningCopy.scheduleLine
-                          : coverageLine.text}
+                      {scheduleLineWarns ? '⚠ ' : ''}
+                      {scheduleLineText}
                     </Text>
                     <View style={styles.alarmCardActions}>
                     <Pressable
-                      accessibilityHint="時刻と繰り返しを変更します。オンのアラームは通知を予約し直します"
-                      accessibilityLabel={`${formatAlarmTime(
-                        definition.hour,
-                        definition.minute,
-                      )}、${formatRepeatLabel(definition.repeat)}のアラームを編集`}
+                      accessibilityHint={messages.edit.editHint}
+                      accessibilityLabel={messages.edit.editSpoken(
+                        alarmClock,
+                        repeatA11y,
+                      )}
                       accessibilityRole="button"
                       accessibilityState={{ disabled: !editAvailable }}
                       disabled={!editAvailable}
                       onPress={() => void openEditComposer(definition)}
                       style={styles.editButton}
                     >
-                      <Text style={styles.editText}>編集</Text>
+                      <Text style={styles.editText}>{messages.edit.editLabel}</Text>
                     </Pressable>
                     <Pressable
-                      accessibilityLabel={`${formatAlarmTime(
-                        definition.hour,
-                        definition.minute,
-                      )}、${repeatA11y}のアラームを削除`}
+                      accessibilityLabel={messages.alarmList.deleteSpoken(
+                        alarmClock,
+                        repeatA11y,
+                      )}
                       accessibilityRole="button"
                       disabled={isBusy || listLocked || deletionPending}
                       onPress={() => confirmDeleteAlarm(definition)}
                       style={styles.deleteButton}
                     >
-                      <Text style={styles.deleteText}>削除</Text>
+                      <Text style={styles.deleteText}>{messages.common.delete}</Text>
                     </Pressable>
                     </View>
                   </View>
@@ -3697,7 +3763,7 @@ function AlarmApp() {
         {Platform.OS === 'web' ? (
           <View style={styles.deviceNotice}>
             <Text style={styles.deviceNoticeText}>
-              通知と歩数計測はiPhoneまたはAndroid実機で利用できます。
+              {messages.alarmList.webOnly}
             </Text>
           </View>
         ) : null}
@@ -3711,7 +3777,10 @@ function AlarmApp() {
       <View style={styles.footerDock}>
         <View
           accessible
-          accessibilityLabel={`${bedsideGuidance.title}。${bedsideGuidance.detail}`}
+          accessibilityLabel={messages.composer.bedsideNote(
+            bedsideGuidance.title,
+            bedsideGuidance.detail,
+          )}
           style={styles.footerNote}
           testID="bedside-guidance"
         >
@@ -3741,24 +3810,24 @@ function AlarmApp() {
       />
 
       <SettingsModal
-        closeLabel={LOCAL_DATA_COPY.close}
+        closeLabel={messages.common.close}
         onClose={closeSettings}
-        subtitle={LOCAL_DATA_COPY.subtitle}
-        title={LOCAL_DATA_COPY.title}
+        subtitle={messages.settings.subtitle}
+        title={messages.settings.title}
         visible={isSettingsOpen && !ringingCycle}
       >
         <Text accessibilityRole="header" style={styles.settingsHeading}>
-          {LOCAL_DATA_COPY.summaryHeading}
+          {messages.settings.summaryHeading}
         </Text>
-        {LOCAL_DATA_COPY.summary.map((line) => (
+        {messages.settings.summary.map((line) => (
           <Text key={line} style={styles.settingsBody}>
             {line}
           </Text>
         ))}
         <Text accessibilityRole="header" style={styles.settingsHeading}>
-          {LOCAL_DATA_COPY.deleteHeading}
+          {messages.settings.deleteHeading}
         </Text>
-        <Text style={styles.settingsBody}>{LOCAL_DATA_COPY.deleteBody}</Text>
+        <Text style={styles.settingsBody}>{messages.settings.deleteBody}</Text>
         {settingsNotice ? (
           <Text
             accessibilityLiveRegion="polite"
@@ -3771,8 +3840,8 @@ function AlarmApp() {
         ) : null}
         <SunriseSettings resetPending={deletionPending} state={sun} />
         <Pressable
-          accessibilityHint={LOCAL_DATA_COPY.deleteHint}
-          accessibilityLabel={LOCAL_DATA_COPY.deleteAction}
+          accessibilityHint={messages.settings.deleteHint}
+          accessibilityLabel={messages.settings.deleteAction}
           accessibilityRole="button"
           accessibilityState={{
             busy: isBusy,
@@ -3786,7 +3855,9 @@ function AlarmApp() {
           ]}
           testID="delete-data-button"
         >
-          <Text style={styles.deleteDataText}>{LOCAL_DATA_COPY.deleteAction}</Text>
+          <Text style={styles.deleteDataText}>
+            {messages.settings.deleteAction}
+          </Text>
         </Pressable>
       </SettingsModal>
 
@@ -3817,6 +3888,7 @@ function AlarmApp() {
         visible={isComposerOpen && !ringingCycle}
       />
     </SafeAreaView>
+    </I18nProvider>
   );
 }
 
@@ -4061,6 +4133,7 @@ const styles = StyleSheet.create({
     letterSpacing: -1.6,
   },
   nextAlarmMeta: {
+    flexShrink: 1,
     alignItems: 'flex-end',
   },
   nextAlarmDate: {
@@ -4070,6 +4143,7 @@ const styles = StyleSheet.create({
   },
   nextAlarmCountdown: {
     marginTop: 4,
+    textAlign: 'right',
     color: HOME_COLORS.summaryText.countdown,
     fontSize: 12,
   },
@@ -4088,6 +4162,7 @@ const styles = StyleSheet.create({
   progressCopy: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     justifyContent: 'space-between',
     gap: 10,
     marginTop: 7,
@@ -4097,6 +4172,7 @@ const styles = StyleSheet.create({
     marginTop: 21,
   },
   progressText: {
+    flexShrink: 1,
     color: HOME_COLORS.summaryText.progress,
     fontSize: 11,
     lineHeight: 14,
@@ -4115,7 +4191,9 @@ const styles = StyleSheet.create({
     opacity: 0.85,
   },
   progressStatus: {
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 120,
     color: HOME_COLORS.summaryText.status,
     fontSize: 11,
     lineHeight: 15,
@@ -4212,12 +4290,16 @@ const styles = StyleSheet.create({
   },
   deliveryWarningHeader: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
   },
   deliveryWarningTitle: {
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 1,
+    // Wraps the action under a long title (English, or the largest text).
+    flexBasis: 160,
     color: '#FFFFFF',
     fontSize: 15,
     lineHeight: 20,

@@ -1,5 +1,6 @@
 import { replaceStoredCycle } from './alarmDefinitionMutations';
 import type { StoredAlarmDefinition } from './alarmStorage';
+import { AppError } from './errorCatalog';
 import type { SnoozeStore } from './snooze';
 import { stampStorageResult } from './storageResetGate';
 
@@ -60,7 +61,7 @@ export function createSnoozeTransaction({
         return snapshot;
       });
       if (!finished) {
-        throw new Error('スヌーズの処理が完了しませんでした。');
+        throw new AppError('SNOOZE_UNEXPECTED_FAILURE');
       }
       return withCommittedSnapshot(result as T, committed);
     });

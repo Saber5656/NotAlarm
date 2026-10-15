@@ -39,7 +39,7 @@ export function parseAlarmTimeInput(
 ): { hour: number; minute: number } {
   const normalizedHour = normalizeClockDigits(hourText);
   const normalizedMinute = normalizeClockDigits(minuteText);
-  const error = new Error('時は0〜23、分は0〜59で入力してください。');
+  const error = new AppError('TIME_INVALID');
 
   if (
     !/^\d{1,2}$/.test(normalizedHour) ||

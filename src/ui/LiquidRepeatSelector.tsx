@@ -4,12 +4,12 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
 } from 'react-native';
 
 import type { RepeatKind } from '../alarmSchedule';
 import { GlassSurface } from './GlassSurface';
+import { useText } from './I18nContext';
 import { UI_COLORS } from './tokens';
 import { useReducedMotion } from './useReducedMotion';
 
@@ -19,12 +19,7 @@ interface LiquidRepeatSelectorProps {
   value: RepeatKind;
 }
 
-const OPTIONS: Array<{ kind: RepeatKind; label: string }> = [
-  { kind: 'today', label: '今日だけ' },
-  { kind: 'daily', label: '毎日' },
-  { kind: 'weekdays', label: '平日' },
-  { kind: 'custom', label: '曜日指定' },
-];
+const KINDS: readonly RepeatKind[] = ['today', 'daily', 'weekdays', 'custom'];
 
 export function LiquidRepeatSelector({
   disabled = false,
@@ -32,17 +27,21 @@ export function LiquidRepeatSelector({
   value,
 }: LiquidRepeatSelectorProps) {
   const reduceMotion = useReducedMotion();
-  const { fontScale } = useWindowDimensions();
-  const usesLargeText = fontScale > 1.3;
-  const selectedIndex = OPTIONS.findIndex((option) => option.kind === value);
+  const { messages } = useText();
+  const options = useMemo(
+    () =>
+      KINDS.map((kind) => ({ kind, label: messages.repeat[kind] })),
+    [messages],
+  );
+  const selectedIndex = options.findIndex((option) => option.kind === value);
   const selection = useRef(new Animated.Value(selectedIndex)).current;
   const [trackWidth, setTrackWidth] = useState(0);
-  const segmentWidth = Math.max((trackWidth - 8) / OPTIONS.length, 0);
+  const segmentWidth = Math.max((trackWidth - 8) / options.length, 0);
   const translateX = useMemo(
     () =>
       selection.interpolate({
-        inputRange: OPTIONS.map((_, index) => index),
-        outputRange: OPTIONS.map((_, index) => index * segmentWidth),
+        inputRange: options.map((_, index) => index),
+        outputRange: options.map((_, index) => index * segmentWidth),
       }),
     [segmentWidth, selection],
   );
@@ -65,7 +64,7 @@ export function LiquidRepeatSelector({
 
   return (
     <View
-      accessibilityLabel="繰り返し"
+      accessibilityLabel={messages.repeat.sectionLabel}
       onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
       style={styles.track}
       testID="repeat-selector"
@@ -95,7 +94,7 @@ export function LiquidRepeatSelector({
         </Animated.View>
       ) : null}
 
-      {OPTIONS.map((option) => {
+      {options.map((option) => {
         const selected = value === option.kind;
         return (
           <Pressable
@@ -112,7 +111,6 @@ export function LiquidRepeatSelector({
             testID={`repeat-${option.kind}`}
           >
             <Text
-              numberOfLines={usesLargeText ? 2 : 1}
               style={[styles.label, selected && styles.labelSelected]}
             >
               {option.label}

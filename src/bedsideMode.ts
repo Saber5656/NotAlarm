@@ -1,3 +1,4 @@
+import type { Messages } from './i18n/messages';
 import type { StoredAlarmDefinition } from './alarmStorage';
 import type { NotificationDeliveryState } from './notificationDelivery';
 
@@ -22,46 +23,28 @@ export interface BedsideGuidance {
   keepAwakeFailure: string;
 }
 
-const BEDSIDE_TITLE = '寝るときはアプリを画面に表示したまま充電してください';
-const LEAVES_SCREEN = '画面ロック・アプリを閉じると';
-
-// What an alarm does once the app is off screen. Only a delivered
-// notification makes a sound then, so the other states must not promise one.
-const OFF_SCREEN_CONSEQUENCES: Record<
-  NotificationDeliveryState,
-  { detail: string; whenScreenOff: string }
-> = {
-  ok: {
-    detail: '通知音1回だけ・歩数確認なし',
-    whenScreenOff: 'アラームは通知音1回だけ・歩数確認なしになる',
-  },
-  off: {
-    detail: '鳴りません',
-    whenScreenOff: 'アラームが鳴らない',
-  },
-  silent: {
-    detail: '音が出ません',
-    whenScreenOff: 'アラームの音が出ない',
-  },
-  unknown: {
-    detail: '鳴るか確認できません',
-    whenScreenOff: 'アラームが鳴るか確認できない',
-  },
-};
-
 /**
  * Bedside guidance for the footer, the composer and the keep-awake failure
- * notice. `null` (not checked yet, and always on web) is treated like
- * `unknown`: nothing may be promised before the permission check completes.
+ * notice. What an alarm does once the app is off screen: only a delivered
+ * notification makes a sound then, so the other states must not promise one.
+ * `null` (not checked yet, and always on web) is treated like `unknown`:
+ * nothing may be promised before the permission check completes.
  */
 export function getBedsideGuidance(
   delivery: NotificationDeliveryState | null,
+  messages: Messages,
 ): BedsideGuidance {
-  const consequence = OFF_SCREEN_CONSEQUENCES[delivery ?? 'unknown'];
+  const b = messages.bedside;
+  const consequence = {
+    ok: { detail: b.detailOk, whenScreenOff: b.whenScreenOffOk },
+    off: { detail: b.detailOff, whenScreenOff: b.whenScreenOffOff },
+    silent: { detail: b.detailSilent, whenScreenOff: b.whenScreenOffSilent },
+    unknown: { detail: b.detailUnknown, whenScreenOff: b.whenScreenOffUnknown },
+  }[delivery ?? 'unknown'];
   return {
-    title: BEDSIDE_TITLE,
-    detail: `${LEAVES_SCREEN}${consequence.detail}`,
-    keepAwakeFailure: `画面を点けたままにできませんでした。画面が消えると${consequence.whenScreenOff}ため、端末の自動ロックをオフにしてください。`,
+    title: b.title,
+    detail: `${b.leavesScreen}${consequence.detail}`,
+    keepAwakeFailure: b.keepAwakeFailure(consequence.whenScreenOff),
   };
 }
 

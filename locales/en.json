@@ -1,0 +1,6 @@
+{
+  "ios": {
+    "NSMotionUsageDescription": "Counts your steps while the app is open to confirm that you are awake.",
+    "NSLocationWhenInUseUsageDescription": "Used once, only when you tap the button, to get your approximate location for sunrise and sunset backgrounds. Only a value rounded to about 10 km is saved."
+  }
+}

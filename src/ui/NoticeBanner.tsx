@@ -20,6 +20,7 @@ import {
 } from '../noticeGesture';
 import type { NoticeTone } from '../noticeTone';
 import { GlassSurface } from './GlassSurface';
+import { useText } from './I18nContext';
 import { useReducedMotion } from './useReducedMotion';
 
 export type { NoticeTone };
@@ -74,6 +75,7 @@ const NOTICE_SPRING_CONFIG = {
 export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
   const insets = useSafeAreaInsets();
   const reduceMotion = useReducedMotion();
+  const { messages } = useText();
   const translateY = useRef(
     new Animated.Value(NOTICE_OFFSCREEN_Y),
   ).current;
@@ -216,7 +218,7 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
             <Text style={styles.text}>{notice.text}</Text>
             {notice.code ? (
               <Text
-                accessibilityLabel={`エラーコード ${notice.code}`}
+                accessibilityLabel={`${messages.common.errorCode} ${notice.code}`}
                 selectable
                 style={styles.code}
                 testID="notice-error-code"
@@ -226,8 +228,8 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
             ) : null}
           </View>
           <Pressable
-            accessibilityHint="上にスワイプしても閉じられます"
-            accessibilityLabel="お知らせを閉じる"
+            accessibilityHint={messages.notice.dismissHint}
+            accessibilityLabel={messages.notice.dismiss}
             accessibilityRole="button"
             hitSlop={4}
             onPress={dismiss}

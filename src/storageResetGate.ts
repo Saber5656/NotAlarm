@@ -1,3 +1,6 @@
+import { describeErrorCode } from './errorCatalog';
+
+
 /**
  * Process-wide guard for an unfinished "delete all data". A reset removes
  * several keys one by one, so a failure can leave some gone and some present;
@@ -9,9 +12,7 @@
 export class StorageResetPendingError extends Error {
   readonly code = 'STORAGE_RESET_PENDING' as const;
   constructor() {
-    super(
-      'データの削除が途中で止まっています。設定の「データを削除」をもう一度実行して完了させてください。',
-    );
+    super(describeErrorCode('STORAGE_RESET_PENDING').message);
     this.name = 'StorageResetPendingError';
   }
 }

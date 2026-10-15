@@ -420,7 +420,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 新しい画面や外観は追加せず、既存の card・行・フォームの挙動と文言を直した。判定は `src/homeStatus.ts` の純粋関数で行う。
 
 - 鳴動中（`isAlarmListLocked`）は一覧のスイッチと削除を無効にし、一覧を薄く表示して読み上げ対象から外す。繰り返しの全周期をここから誤って取り消さないため。
-- 鳴動 card は見出し「鳴っています」、停止ボタン「アラームを止める」（56pt以上。起床確認ではなく音を止める操作）。鳴り始めに停止ボタンへ VoiceOver フォーカスを移す（300ms 後。追加画面が開いていた場合は閉じた後。iOS は onDismiss の100ms 後、ほかは700ms 後）。別の読み上げ（announce）は行わず、フォーカスが当たった停止ボタンの label「7時0分のアラームが鳴っています。アラームを止める」（`getRingingStopA11yLabel`）が読まれる。実機の VoiceOver では未測定。
+- 鳴動 card は見出し「鳴っています」、停止ボタン「アラームを止める」（56pt以上。起床確認ではなく音を止める操作）。鳴り始めに停止ボタンへ VoiceOver フォーカスを移す（300ms 後。追加画面が開いていた場合は閉じた後。iOS は onDismiss の100ms 後、ほかは700ms 後）。別の読み上げ（announce）は行わず、フォーカスが当たった停止ボタンの label（日本語は「10/15(水) 07:00のアラームが鳴っています。アラームを止める」、英語は日付つきで “The 7:00 AM alarm for Wed, 10/15 is ringing. Stop alarm”。スヌーズ鳴動では、その配信の時刻と日付 `getRingingDisplay` を使う。時刻は端末の言語と12/24時間設定に従う。11.6。`getRingingStopA11yLabel`）が読まれる。実機の VoiceOver では未測定。
 - 停止済みで期限前の回は、card 下と該当行に「10/3(土) 07:00 は100歩（または通知）で起床確認済みのため鳴りません」を表示する（`describeSuppressedOccurrence`。`stepCandidateRecorded` で理由を分ける）。
 - 歩数が使えない（端末にない・拒否・エラー）ときは進捗barと「n / 100歩」を隠し、「歩数による停止を確認できません。予定を確認してください」を表示する（先頭に「この端末では歩数を使えません。」「歩数の利用が許可されていません。」「歩数を計測できません。」のいずれかが付く）。通知配送や停止の保存が不明な場合もあるため、アラームが鳴るとは約束しない。拒否時だけ「設定を開く」。この間 card は最小140ptから内容に応じて伸びる（`getStepGuidance`）。
 - 保存データを読み込めない場合（`loadFailed`）は通常の空状態や「次のアラームはありません」を出さず、閉じられない danger card と一覧の説明を表示し、＋を無効にして理由を読み上げに含める。カード末尾に、再起動でも直らない場合の最後の手段として「通知を解除してリセット」（44pt以上、折り返し可）を置く。処理中は無効化し、失敗時もカードを維持し、一部がすでに消えている場合があること・再実行で続きから再開することを通知する。成功すると＋が有効になる。バナーは使わない（次の操作で消えるため）。
@@ -452,7 +452,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 
 **設計ターゲット。** 新しい外観・素材は作らない。既存の `NoticeBanner`（ガラスのバナー）と保存失敗カード、歩数の状態行の見た目を保ち、診断コードは本文の下に小さく添える二次情報にする。開発者向けの画面・ダイアログ・コピー操作は追加しない。Product Design の公式 skill をこのセッションで別途実行してはおらず、画像生成もしていない。
 
-**カタログ（`src/errorCatalog.ts`）。** 失敗点ごとに、安定した機械コード（例 `MAIN_UNVERIFIED`）、事実だけを述べる日本語の `message`、回復手順 `recovery`、`tone`、`retry`（`none` / `manual` / `next_launch`）を持つ。翻訳用に `errors.<CODE>.message` / `.recovery` のキーを返す（Issue #22 はこのキーで差し替える。i18n 本体は未実装）。
+**カタログ（`src/errorCatalog.ts`）。** 失敗点ごとに、安定した機械コード（例 `MAIN_UNVERIFIED`）、事実だけを述べる日本語の `message`、回復手順 `recovery`、`tone`、`retry`（`none` / `manual` / `next_launch`）を持つ。翻訳用に `errors.<CODE>.message` / `.recovery` のキーを返す（Issue #22 が §11.6 のとおり `Messages.errors` に日本語・英語の全文を持つ）。
 
 | 区分 | コード |
 | --- | --- |
@@ -475,6 +475,44 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 - 診断コードは notice の二次行（小さい文字、`selectable`、VoiceOver は「エラーコード …」）、保存失敗カードの末尾、歩数の状態行に出す。本文の文は、コードがなくても意味が通る。
 
 **未統合（他 Issue のマージ後）。** `docs/REMAINING_ISSUES.md` の ALR-009「Issue #20 の状況」に記録。
+
+### 11.6 日本語/英語表示とアクセシビリティ（Issue #22、2026-10-15）
+
+**設計ターゲット（実装前に確定）。** 新しい外観・素材・画面は作らない。視覚の基準は既存の写真背景、`GlassSurface`、追加 sheet（composer）、設定 sheet、ホームの各 card とし、文言を差し替えても同じ配置・色・余白で読めることを目標にする。Product Design の公式 skill は、新規画面や再設計ではなく既存デザイン内の文言・状態表現の修正にあたるため、このセッションでは実行していない（未実行として記録）。画像生成もしていない。
+
+**選定した案。**
+
+| 案 | 内容 | 採否 |
+| --- | --- | --- |
+| A | 全文言を型付き ja / en カタログへ集約し、端末の言語と時計設定に追従。既存の見た目は変えず、折り返し・スクロール・状態の文字表現だけ足す | **採用** |
+| B | アプリ内に言語切替の設定画面を足す | 不採用。永続設定を増やさず端末の言語に従う方針。設定 sheet は後続の設定のための枠のまま |
+| C | 画面ごとに文字列を直接書き換える | 不採用。日英の欠落をコンパイル時に検出できない |
+
+**言語の決め方。** `src/i18n/locale.ts`（RN 非依存）。端末の言語順位のうち最初に対応する言語（日本語・英語）を使い、対応言語が無ければ日本語。端末が英語なら英語。永続設定は持たず、`expo-localization`（SDK 57、Expo Go 同梱。公式ドキュメント v57 の Localization / Localization guide を確認）の `getLocales()` / `getCalendars()` を `src/i18n/deviceLocale.ts` だけで読む。iOS はアプリ実行中に結果が変わらないが Android は再起動なしで変わるため、アプリが前面へ戻るたび（`AppState` の `active`）に読み直す。config plugin は `supportedLocales: ['ja', 'en']`（端末設定のアプリ別言語用）だけを設定し、ネイティブ再ビルドを要する設定は増やさない。
+
+**カタログ。** `src/i18n/ja.ts` が正本で `Messages` 型を兼ね、`src/i18n/en.ts` は同じ型なので、キーや引数の過不足はコンパイルで失敗する。文は関数（引数）で組み立て、文の途中に英語/日本語の断片を継ぎ足さない。内部 ID（通知のアクション・カテゴリ ID、周期 ID、`reason` コード、保存キー）・ポリシー値（100歩、60分、10秒、最大10件など）・保存する時刻は言語に依存せず、カタログに入れない。
+
+**日付と時刻。** `src/i18n/format.ts`（`Intl.DateTimeFormat`、設定を引数で受ける純関数）。表示は端末の12/24時間設定（`getCalendars()[0].uses24hourClock`）を最優先し、不明なら日本語は24時間・英語は言語の慣習に従う。24時間表示は `hourCycle: 'h23'`（0:05 が「24:05」にならない）。曜日名・日付も端末の言語。時刻ピッカー（iOS の wheel、Android の clock dialog）にも同じ 12/24 設定と言語を渡す。
+
+**エラー。** 失敗の正本は `src/errorCatalog.ts`（Issue #20）で、安定した機械コード（`code`）・`tone`・`retry`・原因（`AppError.cause`）は言語に依存しない。文は `Messages.errors[code]`（`message` と `recovery`）から表示時に引く。日本語は `ERROR_CODES` と同じ表（`JA_ERROR_TEXTS`）、英語は `src/i18n/errors.en.ts`（`Record<ErrorCode, …>` なので 1 コードでも欠けると型エラー）。画面は `noticeFromCodeIn` / `noticeFromCodesIn` / `describeErrorIn`（`src/i18n/errorText.ts`）で、現在の言語の `ErrorNotice`（コード・tone は不変）にする。複数の結果（停止成立＋後続失敗＋取り消し未確認）は全ての文を残し、最も重い tone と先頭のコードを使い、文の間は言語ごとの区切り（`common.sentenceGap`）を入れる。`Error.message` や `new Error('…')` に日本語を直書きしない（例外の `message` は日本語のカタログ文で、画面には出さない）。コードを持たない例外（OS・ライブラリ由来）の文言は読まず `UNEXPECTED_FAILURE` 等の定型文にする。保存する値と再試行キー（`refill_failed:<code>` 等）にエラー文は含めず、言語に依存しない。持続的な警告・復旧カードなど、コードに結びつかない画面固有の文だけ `Messages` の個別キーに置く。
+
+**通知。** 文面は予約時の言語で固定される（OS が保持するため、言語を変えても既に予約済みの通知は元の言語のまま。次回の補充・再予約から新しい言語になる）。`notificationService.setNotificationMessages` は前面復帰のたびに更新する。アクション ID・カテゴリ ID・チャンネル ID は変えず、ボタンの文言（「起きています」/ "I’m up"）、プレビュー文、Android のチャンネル名だけを訳す。
+
+**アクセシビリティ。**
+
+- 追加ボタン（＋）、設定（⋯）、閉じる（×）など文字の無い操作は `accessibilityLabel` をカタログから設定する。主要な Pressable は `accessibilityRole="button"` で、停止・追加・確認は `disabled` / `busy` を伝える。追加が無効のときは理由（曜日未選択・直前すぎる時刻など）を `accessibilityHint` にも載せる。
+- 警告は色だけに頼らない。一覧の予約状況が警告のとき「⚠」を付け、読み上げは「注意: …」/ "Warning: …" を先頭に付ける。状態通知は既存の記号と live region、オン/オフ・終了は文字で表示する。
+- 追加 sheet は `accessibilityViewIsModal`、見出し（header ロール）を持ち、開いたとき見出しへフォーカスを送る。設定 sheet も modal と header を持つ。フォームは内部スクロールし、追加ボタンはスクロール外のフッターに固定して小さい画面・最大文字でも届く。
+- 最大文字サイズ・英語の長い文でも、1行で切り詰めるのは「自動縮小する時刻・見出し」だけ（テストで固定）。警告カードの見出しと操作、歩数の進捗行は折り返す。小さい操作は 44pt 以上。
+- 鳴動時のフォーカスは既存どおり停止ボタンへ移り、ラベルは端末の時刻形式の時刻と鳴動中であることを含む（12時間設定なら「7:00 AM」）。
+
+**検証の範囲。** `tests/i18n.test.ts`（言語決定、ja/en の鍵・引数の一致、日英の混入、Intl 整形、12/24 時間、プレーン文のエラー）、`tests/accessibility.test.ts`（JSX の構造確認）、既存の純関数テスト（ja を明示）。VoiceOver / TalkBack の読み上げ、実機の英語表示の折り返し、実機での言語・12/24 切替は**未確認**（`docs/DEVICE_TEST.md` 17）。
+
+**統合済みの機能（2026-10-15、main 9a9afd7 に再統合）。** #15 編集（composer の編集モード、編集ボタン、編集ジャーナルの失敗）、#25 日の出・日の入り設定（地域名、状態文、選択マーカー）、#30 今回だけスキップ（ボタン・確認・通知・警告）の文言とアクセシビリティ名を ja/en カタログへ移した。編集の失敗は `AlarmEditError.catalogCode`（`src/errorCatalog.ts` のコード）で表し、表示時に現在の言語で引く（暫定の `src/i18n/appError.ts` は廃止し、カタログを両言語の正本にした）。`circadianTheme` の位相計算は main のまま（位相ラベルは未使用のため削除）。
+
+**統合済みの機能（2026-10-15、main 9b3eba3 に再統合）。** #16 スヌーズ（スヌーズ中カード・ボタン・通知本文・結果通知）、#20 診断コード（101 コードの日英文、警告／停止の部分成功／メモリのみ追跡、エラーコードの読み上げ）、#29 原子的配送、#13 補充の追従、#43 通知チャンネルの警告。スヌーズ・停止の結果は `snoozeOutcome` が `TextContext` を受けて現在の言語で出す。時刻は `Formatter`（端末の 12/24 時間とタイムゾーン）で整形し、`HH:mm` を組み立てない。内部の論理日付・期限・検証（UTC 基準のずらし処理を含む）は表示と分離し、言語や時計設定で変わらない。**#17 / #19 / #21 も統合済み（ローカル作業ツリー）。** 見逃しカードの告知（`planMissedAnnouncement`。cycleId ごとに1回、鳴動中は保留して停止後に告知、確認済み・削除済み ID は prune。文言は `messages.missed.cardAnnouncement`）、見逃し確認済みの集約 notice（`getMissedAcknowledgementNotice(result, issues, messages)`。コードと tone は言語で変わらず、文は `Messages` から引く。main / check-in / 受理済みスヌーズの 3 ID を個別に dismiss）、読込失敗カードのスクロール（`getScreenScrollPolicy`）、リセット時の配信済み通知の dismiss、削除中は設定を閉じられない `closeSettings`（ref 参照）と、失敗時にホームへも出す `messages.settings.failedHome`。日英とも日本語のみの UI は残さない。
+
+**ネイティブの権限文言。** 歩数（`NSMotionUsageDescription`）と現在地（`NSLocationWhenInUseUsageDescription`）の許可ダイアログ文は、ネイティブビルドでは `locales/{ja,en}.json` で日英化される。Expo Go ではホストアプリの文言が表示され、このアプリでは変えられない（制限として記録。実機未確認）。
 
 ## 12. Platform 制約
 
@@ -566,12 +604,22 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | BED-06 | iPhone SE（667pt）を含む画面高、Dynamic Type 標準〜最大（`fontScale > 1.3` の画面スクロールを含む） | footer がスクロールせずに初期表示で見え、上のコンテンツ（一覧 panel またはスクロール領域）が縮む。footer は操作要素に重ならず、文字を省略せず、画面からはみ出さない（実機確認が必要） |
 | BED-07 | 配送状態 `ok` / `off` / `silent` / `unknown`・未確認（`null`） | `getBedsideGuidance` の1行目は常に「…画面に表示したまま…」。2行目は「画面ロック・アプリを閉じると」に続けて「通知音1回だけ・歩数確認なし」/「鳴りません」/「音が出ません」/「鳴るか確認できません」。`ok` 以外の2行目と keep-awake 失敗 notice は通知音に触れない |
 | BED-08 | Expo Go 実機でアプリ表示中にアラームを鳴らし、鳴動中に画面をロック・ほかのアプリへ切替する | ループ音が停止操作まで鳴り続ける（`shouldPlayInBackground` と Expo Go 本体の background audio に依存。実機確認が必要） |
+| I18N-01 | 端末の言語が `ja` / `en` / 未対応言語（例 `fr`）/ `fr` の次に `en` | 日本語 / 英語 / 日本語 / 英語（最初に対応する言語） |
+| I18N-02 | ja / en カタログのキーと引数 | 完全に一致。英語に日本語、日本語に英語の定型文が混ざらない |
+| I18N-03 | 端末の12/24時間設定が日本語・英語それぞれで異なる | 設定が言語の既定より優先。24時間は 00:05 を「24:05」と表示しない |
+| I18N-04 | `AppError` を英語で表示、コードを持たない例外 | カタログの英語、定型文。保存する識別子は言語非依存 |
+| I18N-05 | コード内の日本語文字列 | カタログ以外には無い |
+| A11Y-01 | すべての Pressable | `accessibilityRole="button"` か非表示の装飾。文字の無い操作はカタログのラベル |
+| A11Y-02 | 警告の予約状況行 | 「⚠」と「注意:」/ "Warning:" の読み上げ。色だけでは伝えない |
+| A11Y-03 | 追加 / 設定 sheet | modal、見出し、スクロール外の主操作。composer は開くと見出しへフォーカス |
+| A11Y-04 | 1行 `numberOfLines` の Text | 自動縮小か文字拡大の上限付きだけ |
 
 ## 14. 参照資料
 
 - [Safety verification: コード・基準・テスト対応](SAFETY_VERIFICATION.md)
 - [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
+- [Expo Localization — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/localization/)（`getLocales()` / `getCalendars()`、Expo Go 同梱、前面復帰時の再取得）と [Localization guide](https://docs.expo.dev/guides/localization/)
 - [Expo KeepAwake — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/keep-awake/)
 - [Expo DateTimePicker — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/date-time-picker/)
 - [Expo LinearGradient — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/linear-gradient/)

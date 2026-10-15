@@ -35,6 +35,7 @@ import {
   type ComposerSection,
 } from './LiquidComposerTabs';
 import { LiquidRepeatSelector } from './LiquidRepeatSelector';
+import { useText } from './I18nContext';
 import { UI_COLORS } from './tokens';
 
 interface AlarmComposerModalProps {
@@ -63,22 +64,8 @@ interface AlarmComposerModalProps {
   visible: boolean;
 }
 
-const WEEKDAY_OPTIONS: Array<{ value: Weekday; label: string }> = [
-  { value: 1, label: '月' },
-  { value: 2, label: '火' },
-  { value: 3, label: '水' },
-  { value: 4, label: '木' },
-  { value: 5, label: '金' },
-  { value: 6, label: '土' },
-  { value: 0, label: '日' },
-];
-
-function formatAlarmTime(date: Date): string {
-  return `${date.getHours().toString().padStart(2, '0')}:${date
-    .getMinutes()
-    .toString()
-    .padStart(2, '0')}`;
-}
+// Monday first, as in the picker row. Names come from the device language.
+const WEEKDAY_VALUES: readonly Weekday[] = [1, 2, 3, 4, 5, 6, 0];
 
 function sanitizeClockInput(value: string): string {
   return value
@@ -108,6 +95,9 @@ export function AlarmComposerModal({
   visible,
 }: AlarmComposerModalProps) {
   const insets = useSafeAreaInsets();
+  const { messages, formatter, intlTag, uses24HourClock } = useText();
+  const formatAlarmTime = (date: Date): string =>
+    formatter.clock(date.getHours(), date.getMinutes());
   const { fontScale, height: viewportHeight, width: viewportWidth } =
     useWindowDimensions();
   const usesLargeText = fontScale > 1.3;
@@ -117,6 +107,7 @@ export function AlarmComposerModal({
     fontScale,
   );
   const minuteInputRef = useRef<TextInput>(null);
+  const titleRef = useRef<Text>(null);
   const [formViewportHeight, setFormViewportHeight] = useState(0);
   const [formContentHeight, setFormContentHeight] = useState(0);
   const [weekdayWidth, setWeekdayWidth] = useState(0);
@@ -143,6 +134,20 @@ export function AlarmComposerModal({
       });
     }
   }, [formNotice?.text, formNotice?.tone, visible]);
+
+  // Hands screen-reader focus to the sheet title once the modal is on screen,
+  // so the first thing announced is where the user is, not a control behind it.
+  useEffect(() => {
+    if (!visible) {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      if (titleRef.current) {
+        AccessibilityInfo.sendAccessibilityEvent(titleRef.current, 'focus');
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [visible]);
 
   useEffect(() => {
     if (!visible) {
@@ -221,7 +226,7 @@ export function AlarmComposerModal({
 
     DateTimePickerAndroid.open({
       display: 'clock',
-      is24Hour: true,
+      is24Hour: uses24HourClock,
       mode: 'time',
       onChange: (event, date) => {
         if (event.type === 'set' && date) {
@@ -250,8 +255,9 @@ export function AlarmComposerModal({
       setIsTimeEditing(false);
       Keyboard.dismiss();
     } catch {
-      // Fixed copy: a thrown message is never shown.
-      const message = '時は0〜23、分は0〜59で入力してください。';
+      // The input is the only thing that can be wrong; a thrown message is
+      // never shown.
+      const message = messages.composer.timeInputInvalid;
       setTimeInputError(message);
       if (Platform.OS === 'ios') {
         AccessibilityInfo.announceForAccessibility(message);
@@ -263,7 +269,7 @@ export function AlarmComposerModal({
   const submitEnabled = canSubmit && !isTimeEditing;
   const weekdaySelectionError =
     repeatKind === 'custom' && customWeekdays.length === 0
-      ? '「繰り返し」で曜日を1つ以上選択してください。'
+      ? messages.composer.weekdayNeeded
       : null;
 
   return (
@@ -308,7 +314,9 @@ export function AlarmComposerModal({
             ]}
           >
           <View
-            accessibilityLabel={isEdit ? 'アラームを編集' : 'アラームを追加'}
+            accessibilityLabel={
+              isEdit ? messages.composer.editTitle : messages.composer.title
+            }
             accessibilityViewIsModal
             testID="alarm-composer-sheet"
             style={[
@@ -318,13 +326,17 @@ export function AlarmComposerModal({
           >
             <View style={styles.sheetHeader}>
               <View style={styles.sheetTitleCopy}>
-                <Text style={styles.sheetTitle}>
-                  {isEdit ? 'アラームを編集' : 'アラームを追加'}
+                <Text
+                  accessibilityRole="header"
+                  ref={titleRef}
+                  style={styles.sheetTitle}
+                >
+                  {isEdit ? messages.composer.editTitle : messages.composer.title}
                 </Text>
                 <Text style={styles.sheetSubtitle}>
                   {isEdit
-                    ? '保存すると、このアラームの通知だけを予約し直します'
-                    : '時刻と繰り返しを選んでください'}
+                    ? messages.composer.editSubtitle
+                    : messages.composer.subtitle}
                 </Text>
               </View>
               <GlassSurface
@@ -337,7 +349,7 @@ export function AlarmComposerModal({
                 tintColor="#FFFFFFA8"
               >
                 <Pressable
-                  accessibilityLabel="閉じる"
+                  accessibilityLabel={messages.composer.close}
                   accessibilityRole="button"
                   disabled={isBusy}
                   hitSlop={12}
@@ -380,7 +392,7 @@ export function AlarmComposerModal({
                   <View style={styles.timeEditor}>
                     <View style={styles.timeInputRow}>
                       <TextInput
-                        accessibilityLabel="時"
+                        accessibilityLabel={messages.composer.hour}
                         autoFocus
                         inputMode="numeric"
                         keyboardType="number-pad"
@@ -402,7 +414,7 @@ export function AlarmComposerModal({
                       />
                       <Text style={styles.timeColon}>:</Text>
                       <TextInput
-                        accessibilityLabel="分"
+                        accessibilityLabel={messages.composer.minute}
                         inputMode="numeric"
                         keyboardType="number-pad"
                         maxLength={2}
@@ -437,7 +449,9 @@ export function AlarmComposerModal({
                           pressed && styles.buttonPressed,
                         ]}
                       >
-                        <Text style={styles.timeCancelText}>キャンセル</Text>
+                        <Text style={styles.timeCancelText}>
+                          {messages.composer.timeCancel}
+                        </Text>
                       </Pressable>
                       <GlassSurface
                         fallbackColor="rgba(225, 233, 255, 0.96)"
@@ -455,7 +469,9 @@ export function AlarmComposerModal({
                             pressed && styles.buttonPressed,
                           ]}
                         >
-                          <Text style={styles.timeConfirmText}>この時刻に決定</Text>
+                          <Text style={styles.timeConfirmText}>
+                            {messages.composer.timeConfirm}
+                          </Text>
                         </Pressable>
                       </GlassSurface>
                     </View>
@@ -471,16 +487,18 @@ export function AlarmComposerModal({
                           ]}
                         >
                           <Text style={styles.dialPickerLabel}>
-                            時刻ダイヤル
+                            {messages.composer.dialTitle}
                           </Text>
                           <Text style={styles.dialPickerHint}>
-                            上下に回して選択
+                            {messages.composer.dialHint}
                           </Text>
                         </View>
                         <DateTimePicker
-                          accessibilityLabel="アラーム時刻をダイヤルで選択"
+                          accessibilityLabel={messages.composer.dialSpoken}
                           disabled={isBusy}
                           display="spinner"
+                          is24Hour={uses24HourClock}
+                          locale={intlTag}
                           minuteInterval={1}
                           mode="time"
                           onChange={(_, date) =>
@@ -495,8 +513,8 @@ export function AlarmComposerModal({
                       </View>
                     ) : Platform.OS === 'android' ? (
                       <Pressable
-                        accessibilityHint="Androidの時計ダイヤルを開きます"
-                        accessibilityLabel="ダイヤルで時刻を選択"
+                        accessibilityHint={messages.composer.openDialHint}
+                        accessibilityLabel={messages.composer.openDialSpoken}
                         accessibilityRole="button"
                         disabled={isBusy}
                         onPress={openAndroidTimePicker}
@@ -511,20 +529,20 @@ export function AlarmComposerModal({
                         </View>
                         <View style={styles.androidDialCopy}>
                           <Text style={styles.dialPickerLabel}>
-                            時計ダイヤルで選択
+                            {messages.composer.openDialTitle}
                           </Text>
                           <Text style={styles.dialPickerHint}>
-                            タップして開く
+                            {messages.composer.openDialTap}
                           </Text>
                         </View>
                       </Pressable>
                     ) : (
                       <View style={styles.dialUnavailable}>
                         <Text style={styles.dialPickerLabel}>
-                          ダイヤルで設定
+                          {messages.composer.openDialSet}
                         </Text>
                         <Text style={styles.dialPickerHint}>
-                          Expo Go実機で使用できます
+                          {messages.composer.needsDevice}
                         </Text>
                       </View>
                     )}
@@ -538,8 +556,10 @@ export function AlarmComposerModal({
                       tintColor="#FFFFFFD8"
                     >
                       <Pressable
-                        accessibilityHint="時と分をキーボードから直接入力できます"
-                        accessibilityLabel={`${formatAlarmTime(selectedTime)}、キーボードで時刻を入力`}
+                        accessibilityHint={messages.composer.typeTimeHint}
+                        accessibilityLabel={messages.composer.typeTimeSpoken(
+                          formatAlarmTime(selectedTime),
+                        )}
                         accessibilityRole="button"
                         disabled={isBusy}
                         onPress={beginTimeEditing}
@@ -551,7 +571,9 @@ export function AlarmComposerModal({
                         testID="alarm-time-edit-trigger"
                       >
                         <View>
-                          <Text style={styles.selectedTimeLabel}>選択中</Text>
+                          <Text style={styles.selectedTimeLabel}>
+                            {messages.composer.selected}
+                          </Text>
                           <Text style={styles.timePreview}>
                             {formatAlarmTime(selectedTime)}
                           </Text>
@@ -562,8 +584,12 @@ export function AlarmComposerModal({
                             usesLargeText && styles.timeEditCopyLargeText,
                           ]}
                         >
-                          <Text style={styles.timeEditLabel}>数字で入力</Text>
-                          <Text style={styles.timeEditHint}>時刻をタップ</Text>
+                          <Text style={styles.timeEditLabel}>
+                            {messages.composer.typeDigits}
+                          </Text>
+                          <Text style={styles.timeEditHint}>
+                            {messages.composer.tapTime}
+                          </Text>
                         </View>
                       </Pressable>
                     </GlassSurface>
@@ -572,7 +598,7 @@ export function AlarmComposerModal({
                 </View>
               ) : (
                 <View style={styles.repeatPanel}>
-                  <Text style={styles.sectionLead}>鳴らす日を選択</Text>
+                  <Text style={styles.sectionLead}>{messages.composer.pickDays}</Text>
                   <LiquidRepeatSelector
                     disabled={isBusy}
                     onChange={(kind) => {
@@ -588,24 +614,23 @@ export function AlarmComposerModal({
                       onLayout={(event) => setWeekdayWidth(event.nativeEvent.layout.width)}
                       style={styles.weekdayBlock}
                     >
-                      <Text style={styles.weekdayHint}>鳴らす曜日</Text>
+                      <Text style={styles.weekdayHint}>
+                        {messages.composer.weekdayHint}
+                      </Text>
                       <View style={[styles.weekdayRow, { maxWidth: weekdayColumns * 44 + (weekdayColumns - 1) * 4 }]}>
-                        {WEEKDAY_OPTIONS.map((option) => {
-                          const selected = customWeekdays.includes(option.value);
+                        {WEEKDAY_VALUES.map((value) => {
+                          const selected = customWeekdays.includes(value);
                           return (
                             <Pressable
-                              accessibilityLabel={`${option.label}曜日`}
+                              accessibilityLabel={formatter.weekdayLong(value)}
                               accessibilityRole="button"
-                              accessibilityState={{
-                                disabled: isBusy,
-                                selected,
-                              }}
+                              accessibilityState={{ disabled: isBusy, selected }}
                               disabled={isBusy}
                               hitSlop={2}
-                              key={option.value}
+                              key={value}
                               onPress={() => {
                                 if (!isBusy) {
-                                  onToggleWeekday(option.value);
+                                  onToggleWeekday(value);
                                 }
                               }}
                               style={({ pressed }) => [
@@ -621,7 +646,7 @@ export function AlarmComposerModal({
                                   selected && styles.weekdayButtonTextSelected,
                                 ]}
                               >
-                                {option.label}
+                                {formatter.weekdayShort(value)}
                               </Text>
                             </Pressable>
                           );
@@ -635,12 +660,17 @@ export function AlarmComposerModal({
                       <Text style={styles.stepBadgeText}>100</Text>
                     </View>
                     <View style={styles.behaviorCopy}>
-                      <Text style={styles.behaviorTitle}>100歩で起床を確認</Text>
+                      <Text style={styles.behaviorTitle}>
+                        {messages.composer.behaviorTitle}
+                      </Text>
                       <Text style={styles.behaviorText}>
-                        アラームの60分前から、アプリを画面に表示している間に数えます。対象のアラームだけを停止し、ほかの時刻には影響しません。
+                        {messages.composer.behaviorBody}
                       </Text>
                       <Text style={styles.behaviorBedside}>
-                        {bedsideGuidance.title}。{bedsideGuidance.detail}。
+                        {messages.composer.bedsideNote(
+                          bedsideGuidance.title,
+                          bedsideGuidance.detail,
+                        )}
                       </Text>
                     </View>
                   </View>
@@ -650,7 +680,11 @@ export function AlarmComposerModal({
 
             {!isTimeEditing ? <View style={styles.sheetFooter}>
               <Text
-                accessibilityLabel={`${isEdit ? '保存する内容' : '追加する内容'}。${summary.text}`}
+                accessibilityLabel={
+                  isEdit
+                    ? messages.composer.editSummarySpoken(summary.text)
+                    : messages.composer.summarySpoken(summary.text)
+                }
                 accessibilityLiveRegion="polite"
                 style={[
                   styles.summaryText,
@@ -699,7 +733,9 @@ export function AlarmComposerModal({
                 </View>
               ) : null}
               {Platform.OS === 'web' ? (
-                <Text style={styles.deviceHint}>登録はExpo Go実機で行えます</Text>
+                <Text style={styles.deviceHint}>
+                  {messages.composer.deviceHint}
+                </Text>
               ) : null}
               <GlassSurface
                 fallbackColor={
@@ -716,7 +752,19 @@ export function AlarmComposerModal({
                 tintColor={submitEnabled ? '#3264E4D8' : '#9BA5C7C8'}
               >
                 <Pressable
+                  accessibilityHint={
+                    submitEnabled
+                      ? undefined
+                      : (weekdaySelectionError ?? summary.text)
+                  }
+                  accessibilityLabel={
+                    isEdit ? messages.composer.editSubmit : messages.composer.submit
+                  }
                   accessibilityRole="button"
+                  accessibilityState={{
+                    busy: isBusy,
+                    disabled: !submitEnabled,
+                  }}
                   disabled={!submitEnabled}
                   onPress={onSubmit}
                   style={({ pressed }) => [
@@ -728,7 +776,7 @@ export function AlarmComposerModal({
                     <ActivityIndicator color="#FFFFFF" />
                   ) : (
                     <Text style={styles.primaryButtonText}>
-                      {isEdit ? 'この内容で保存' : 'この内容で追加'}
+                      {isEdit ? messages.composer.editSubmit : messages.composer.submit}
                     </Text>
                   )}
                 </Pressable>

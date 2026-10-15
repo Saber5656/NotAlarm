@@ -1,6 +1,8 @@
 import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
+import { ja } from './i18n/ja';
+import type { Messages } from './i18n/messages';
 import {
   ALREADY_UP_OWNER,
   AWAKE_CHECKIN_CATEGORY,
@@ -14,8 +16,6 @@ import {
 } from './alarmContracts';
 import type { ScheduledNotificationSnapshot } from './alarmNotificationOwnership';
 import {
-  SNOOZE_NOTIFICATION_BODY,
-  SNOOZE_NOTIFICATION_TITLE,
   getMainAlarmNotificationBody,
 } from './alarmNotificationContent';
 import {
@@ -54,6 +54,18 @@ export function installForegroundNotificationHandler(): void {
       };
     },
   });
+}
+
+/**
+ * Language of the text on notifications this module schedules and of the
+ * Android channel names. Notification text is fixed when it is scheduled, so
+ * the app sets it from the device language before every scheduling pass.
+ * Action and category identifiers are never localized, only their labels.
+ */
+let notificationMessages: Messages = ja;
+
+export function setNotificationMessages(messages: Messages): void {
+  notificationMessages = messages;
 }
 
 export async function prepareNotifications(): Promise<void> {
@@ -98,7 +110,7 @@ async function registerAlarmNotificationTypes(): Promise<void> {
     [
       {
         identifier: CONFIRM_AWAKE_ACTION,
-        buttonTitle: '起きています',
+        buttonTitle: notificationMessages.notifications.checkInButton,
         options: {
           isAuthenticationRequired: false,
           opensAppToForeground: false,
@@ -106,14 +118,14 @@ async function registerAlarmNotificationTypes(): Promise<void> {
       },
     ],
     {
-      previewPlaceholder: '起床確認',
+      previewPlaceholder: notificationMessages.notifications.checkInPreview,
     },
   );
 
   if (Platform.OS === 'android') {
     await Promise.all([
       Notifications.setNotificationChannelAsync(ALARM_CHANNEL_ID, {
-        name: 'アラーム',
+        name: notificationMessages.notifications.alarmChannel,
         importance: Notifications.AndroidImportance.MAX,
         audioAttributes: {
           usage: Notifications.AndroidAudioUsage.ALARM,
@@ -123,7 +135,7 @@ async function registerAlarmNotificationTypes(): Promise<void> {
         sound: 'default',
       }),
       Notifications.setNotificationChannelAsync(CHECK_IN_CHANNEL_ID, {
-        name: '起床確認',
+        name: notificationMessages.notifications.checkInChannel,
         importance: Notifications.AndroidImportance.DEFAULT,
         enableVibrate: false,
         sound: null,
@@ -172,8 +184,8 @@ function checkInContent(
   mainAlarmId: string,
 ): Notifications.NotificationContentInput {
   return {
-    title: 'もう起きていますか？',
-    body: '確実に起きている場合だけ「起きています」を押してください。',
+    title: notificationMessages.notifications.checkInTitle,
+    body: notificationMessages.notifications.checkInBody,
     sound: false,
     categoryIdentifier: AWAKE_CHECKIN_CATEGORY,
     data: {
@@ -196,8 +208,11 @@ export async function scheduleMainAlarmNotification(input: {
   return Notifications.scheduleNotificationAsync({
     ...(input.identifier ? { identifier: input.identifier } : {}),
     content: {
-      title: '⏰ 起きる時間です',
-      body: getMainAlarmNotificationBody({ repeats: input.repeats }),
+      title: notificationMessages.notifications.mainTitle,
+      body: getMainAlarmNotificationBody(
+        { repeats: input.repeats },
+        notificationMessages,
+      ),
       sound: 'default',
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
@@ -221,8 +236,8 @@ export async function scheduleSnoozeNotification(input: {
   return Notifications.scheduleNotificationAsync({
     identifier: input.identifier,
     content: {
-      title: SNOOZE_NOTIFICATION_TITLE,
-      body: SNOOZE_NOTIFICATION_BODY,
+      title: notificationMessages.notifications.snoozeTitle,
+      body: notificationMessages.notifications.snoozeBody,
       sound: 'default',
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
