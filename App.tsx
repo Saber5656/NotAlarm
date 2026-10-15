@@ -549,10 +549,8 @@ async function reconcileScheduleWithQueueOnce(
       } catch {
         canSchedule = false;
       }
-      const zoneChanged = didPlanningZoneChange(
-        await loadPlanningZone(AsyncStorage),
-        zone,
-      );
+      const storedZone = await loadPlanningZone(AsyncStorage);
+      const zoneChanged = didPlanningZoneChange(storedZone, zone);
       let outcome: ReconcileOutcome | null = null;
       const alarms = await transactAlarmDefinitions(
         async (current, checkpoint) => {
@@ -575,6 +573,7 @@ async function reconcileScheduleWithQueueOnce(
             excludedAlarmIds,
             readQueue: readScheduledNotificationQueue,
             orphans: orphanStore,
+            originZone: storedZone,
             canSchedule,
             nowMs: Date.now,
             gateway: reconcileGateway,

@@ -13,6 +13,8 @@ import {
   recordRefillAttempt,
 } from '../src/alarmScheduling';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
+import { currentPlanningZone } from '../src/planningZone';
+import { stampOccurrence } from '../src/occurrenceIdentity';
 import type { AlarmSchedulingGateway } from '../src/alarmOrchestrator';
 import type { StoredAlarmDefinition } from '../src/alarmStorage';
 
@@ -500,4 +502,79 @@ test('a refill that cannot run leaves every enabled alarm short', () => {
     recordRefillAttempt(new Set(['alarm-off']), attempt),
     new Set(['alarm-on']),
   );
+});
+
+test('cycles created by a fill are stamped with their logical date and zone', async () => {
+  const now = new Date(2026, 7, 20, 6, 0, 0).getTime();
+  const gateway: AlarmSchedulingGateway = {
+    scheduleMain: async ({ cycleId }) => `main-${cycleId}`,
+    scheduleCheckIn: async ({ cycleId }) => `check-${cycleId}`,
+  };
+  const definition: StoredAlarmDefinition = {
+    id: 'alarm-1',
+    hour: 7,
+    minute: 0,
+    repeat: makeAlarmRepeat('daily', now),
+    enabled: true,
+    createdAtMs: now,
+    cycles: [],
+  };
+  const result = await fillAlarmDefinitionSchedule(
+    definition,
+    now,
+    gateway,
+    undefined,
+    currentPlanningZone(),
+  );
+  assert.ok(result.definition.cycles.length > 0);
+  for (const cycle of result.definition.cycles) {
+    assert.equal(cycle.planningZone, currentPlanningZone());
+    assert.equal(
+      cycle.logicalDateKey,
+      new Date(cycle.dueAtMs).toLocaleDateString('sv-SE'),
+    );
+  }
+});
+
+test('a zone change while registration awaits keeps the original date and zone', async () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'Asia/Tokyo';
+  try {
+    const now = new Date(2026, 9, 15, 6, 0, 0).getTime();
+    const definition: StoredAlarmDefinition = {
+      id: 'alarm-tz',
+      hour: 7,
+      minute: 0,
+      repeat: makeAlarmRepeat('daily', now),
+      enabled: true,
+      createdAtMs: now,
+      cycles: [],
+    };
+    const gateway: AlarmSchedulingGateway = {
+      scheduleMain: async ({ cycleId }) => {
+        // The device moves to Los Angeles while the OS call is in flight.
+        process.env.TZ = 'America/Los_Angeles';
+        return `main-${cycleId}`;
+      },
+      scheduleCheckIn: async ({ cycleId }) => `check-${cycleId}`,
+    };
+    let sequence = 0;
+    const result = await fillAlarmDefinitionSchedule(
+      definition,
+      now,
+      gateway,
+      () => `cycle-${++sequence}`,
+      'Asia/Tokyo',
+    );
+    // 07:00 Tokyo on Oct 15 is Oct 14 15:00 in Los Angeles.
+    assert.equal(result.definition.cycles[0].logicalDateKey, '2026-10-15');
+    assert.equal(result.definition.cycles[0].planningZone, 'Asia/Tokyo');
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
+test('an unknown planning zone stamps no identity instead of inventing one', () => {
+  assert.deepEqual(stampOccurrence(Date.now(), 'Not/AZone'), {});
 });

@@ -1,3 +1,5 @@
+import { currentPlanningZone } from './planningZone';
+import { stampOccurrence } from './occurrenceIdentity';
 import { getUpcomingAlarmTimes, SCHEDULED_OCCURRENCES_PER_ALARM } from './alarmSchedule';
 import {
   type AlarmSchedulingGateway,
@@ -114,6 +116,7 @@ export async function fillAlarmDefinitionSchedule(
   nowMs: number,
   gateway: AlarmSchedulingGateway,
   makeCycleId: () => string = defaultCycleId,
+  planningZone: string = currentPlanningZone(),
 ): Promise<AlarmScheduleFillResult> {
   const normalizedCycles = normalizeCycles(definition.cycles, nowMs);
   if (!definition.enabled) {
@@ -199,6 +202,8 @@ export async function fillAlarmDefinitionSchedule(
         phase: 'armed',
         stepCount: 0,
         stepCandidateRecorded: false,
+        // Every new cycle carries its own logical date and zone.
+        ...stampOccurrence(dueAtMs, planningZone),
       };
       cycles.push(cycle);
       scheduledCycles.push(cycle);

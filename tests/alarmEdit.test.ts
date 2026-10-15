@@ -15,7 +15,9 @@ import {
   type PendingAlarmEdit,
 } from '../src/alarmEdit';
 import { getCheckInAtMs } from '../src/alarmPolicy';
-import { makeAlarmRepeat } from '../src/alarmSchedule';
+import { localDateKey, makeAlarmRepeat } from '../src/alarmSchedule';
+import { readOccurrenceIdentity } from '../src/occurrenceIdentity';
+import { currentPlanningZone } from '../src/planningZone';
 import type {
   AlarmPhase,
   StoredAlarm,
@@ -1294,5 +1296,139 @@ describe('PR40 review fixes', () => {
       (c) => c.cycleId === 'new-cycle-1',
     )!;
     assert.equal(requests[0], getCheckInAtMs(first.dueAtMs, first.armedAtMs));
+  });
+});
+
+describe('per-occurrence metadata through edits', () => {
+  const stamped = (c: StoredAlarm): StoredAlarm => ({
+    ...c,
+    logicalDateKey: localDateKey(c.dueAtMs),
+    planningZone: 'Asia/Tokyo',
+  });
+
+  test('replacement cycles are stamped at creation with their own date and the planning zone', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const result = await editAlarmDefinition(h.input([a1], { planningZone: 'Asia/Tokyo' }));
+    for (const c of result.alarms[0].cycles) {
+      assert.deepEqual(readOccurrenceIdentity(c), {
+        logicalDateKey: localDateKey(c.dueAtMs),
+        planningZone: 'Asia/Tokyo',
+      });
+    }
+  });
+
+  test('without an explicit zone the current planning zone is stamped', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const result = await editAlarmDefinition(h.input([a1]));
+    assert.ok(result.alarms[0].cycles.every((c) => c.planningZone === currentPlanningZone()));
+  });
+
+  test('the journaled replacement already carries the metadata, so recovery keeps it', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    await editAlarmDefinition(h.input([a1], { planningZone: 'Asia/Tokyo' }));
+    // The journal is removed on success; capture the replacing entry from the run.
+    const h2 = harness([a1]);
+    h2.after((event) => event === 'journal:replacing', () => undefined);
+    h2.failCheckpointTimes = 2;
+    await assert.rejects(() => editAlarmDefinition(h2.input([a1], { planningZone: 'Asia/Tokyo' })));
+    const entry = h2.journalEntries.get('a1')!;
+    assert.equal(entry.stage, 'replacing');
+    assert.ok(entry.newCycles.every((c) => readOccurrenceIdentity(c)?.planningZone === 'Asia/Tokyo'));
+  });
+
+  test('a check-in that could not be scheduled keeps the cycle metadata', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const original = h.gateway.scheduleCheckIn;
+    h.gateway.scheduleCheckIn = async (request) => {
+      if (request.cycleId === 'new-cycle-2') throw new Error('check-in failed');
+      return original(request);
+    };
+    const result = await editAlarmDefinition(h.input([a1], { planningZone: 'Asia/Tokyo' }));
+    const second = result.alarms[0].cycles[1];
+    assert.equal(second.checkInNotificationId, undefined);
+    assert.equal(readOccurrenceIdentity(second)?.planningZone, 'Asia/Tokyo');
+  });
+
+  test('a kept old cycle keeps its metadata and a legacy one is not stamped', async () => {
+    const base = definition('a1');
+    const a1 = {
+      ...base,
+      cycles: [base.cycles[0], stamped(base.cycles[1]), base.cycles[2]],
+    };
+    const h = harness([a1]);
+    const second = a1.cycles[1];
+    h.after(
+      (event) => event === 'cancel:a1-main-1',
+      () => {
+        h.clock = second.dueAtMs + 1;
+      },
+    );
+    const result = await editAlarmDefinition(h.input([a1], { planningZone: 'America/Los_Angeles' }));
+    const kept = result.alarms[0].cycles.find((c) => c.cycleId === second.cycleId)!;
+    assert.deepEqual(kept, second);
+    assert.equal(kept.planningZone, 'Asia/Tokyo', 'origin zone is not overwritten by the edit zone');
+  });
+
+  test('an edit that is rolled back leaves legacy cycles exactly as they were', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    h.failMainAt = 2;
+    await assert.rejects(() => editAlarmDefinition(h.input([a1])));
+    assert.ok(h.saved.every((alarms) => alarms[0].cycles.every((c) => !('planningZone' in c) && !('logicalDateKey' in c))));
+  });
+
+  test('recovery applies journaled metadata untouched', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const newCycles = [stamped(cycle('a1', 7)), cycle('a1', 8)];
+    for (const c of newCycles) {
+      h.scheduled.add(c.mainAlarmId);
+      h.scheduled.add(c.checkInNotificationId!);
+    }
+    const entry: PendingAlarmEdit = {
+      alarmId: 'a1', stage: 'replacing', requestedAtMs: NOW, hour: 6, minute: 30,
+      repeat: makeAlarmRepeat('weekdays', NOW),
+      oldNotificationIds: ['a1-main-1'],
+      newNotificationIds: newCycles.flatMap((c) => [c.mainAlarmId, c.checkInNotificationId!]),
+      newCycles,
+    };
+    const result = await recoverPendingAlarmEdit({
+      alarms: [a1], entry, gateway: h.gateway, journal: h.journal,
+      checkpoint: async (next) => void h.saved.push(next),
+    });
+    assert.deepEqual(result[0].cycles, newCycles);
+    assert.equal('planningZone' in result[0].cycles[1], false, 'a legacy journal cycle is not stamped');
+  });
+
+  test('recovery drops malformed journaled metadata instead of storing or inventing it', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const bad = { ...cycle('a1', 7), logicalDateKey: '2026-02-31', planningZone: 'Asia/Tokyo' };
+    const half = { ...cycle('a1', 8), planningZone: 'Asia/Tokyo' };
+    for (const c of [bad, half]) {
+      h.scheduled.add(c.mainAlarmId);
+      h.scheduled.add(c.checkInNotificationId!);
+    }
+    const entry: PendingAlarmEdit = {
+      alarmId: 'a1', stage: 'replacing', requestedAtMs: NOW, hour: 6, minute: 30,
+      repeat: makeAlarmRepeat('weekdays', NOW),
+      oldNotificationIds: [],
+      newNotificationIds: [bad, half].flatMap((c) => [c.mainAlarmId, c.checkInNotificationId!]),
+      newCycles: [bad, half],
+    };
+    assert.equal(isPendingAlarmEdit(entry), true, 'the notification ids stay recoverable');
+    const result = await recoverPendingAlarmEdit({
+      alarms: [a1], entry, gateway: h.gateway, journal: h.journal,
+      checkpoint: async (next) => void h.saved.push(next),
+    });
+    for (const c of result[0].cycles) {
+      assert.equal('logicalDateKey' in c, false, c.cycleId);
+      assert.equal('planningZone' in c, false, c.cycleId);
+    }
+    assert.equal(result[0].cycles.length, 2);
   });
 });
