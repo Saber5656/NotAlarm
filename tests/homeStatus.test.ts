@@ -25,6 +25,9 @@ import {
   describeTodayOnlyExpiry,
   findAlarmListLock,
   getRingingStopA11yLabel,
+  getRingingDisplay,
+  planMissedAnnouncement,
+  MISSED_CARD_ANNOUNCEMENT,
   runUnlessAlarmListLocked,
   getStepGuidance,
   isAlarmListLocked,
@@ -218,6 +221,110 @@ describe('summarizeNewAlarm', () => {
 });
 
 describe('ringing copy', () => {
+  const ringing = (over: Partial<StoredAlarm> = {}): StoredAlarm => ({
+    alarmId: 'a',
+    cycleId: 'c',
+    mainAlarmId: 'm',
+    armedAtMs: 0,
+    dueAtMs: new Date(2026, 9, 14, 23, 58).getTime(),
+    phase: 'ringing',
+    stepCount: 0,
+    stepCandidateRecorded: false,
+    ...over,
+  });
+
+  test('the focused stop label carries the occurrence date', () => {
+    const label = getRingingStopA11yLabel(0, 5, '10/14(水)');
+    assert.equal(label, '10/14(水) 0時5分のアラームが鳴っています。アラームを止める');
+  });
+
+  test('a main ring displays its own due date and time', () => {
+    const cycle = ringing();
+    assert.deepEqual(getRingingDisplay(cycle), {
+      timeMs: cycle.dueAtMs,
+      dateMs: cycle.dueAtMs,
+    });
+  });
+
+  test('a snooze ring displays the snooze time, with the date of that time', () => {
+    const snoozeDue = new Date(2026, 9, 15, 0, 3).getTime();
+    const cycle = ringing({ snooze: { count: 1, notificationId: 's', dueAtMs: snoozeDue } });
+    assert.deepEqual(getRingingDisplay(cycle), { timeMs: snoozeDue, dateMs: snoozeDue });
+  });
+
+  test('a snooze record without a delivery time keeps the original', () => {
+    const cycle = ringing({ snooze: { count: 1 } });
+    assert.equal(getRingingDisplay(cycle).timeMs, cycle.dueAtMs);
+  });
+
+  test('missed cycles are announced by id: new once, existing never again', () => {
+    const plan = (announced: string[], ids: string[], isRinging = false) =>
+      planMissedAnnouncement({ announced: new Set(announced), missedCycleIds: ids, isRinging });
+    const first = plan([], ['a', 'b']);
+    assert.equal(first.announce, true);
+    assert.deepEqual([...first.announced].sort(), ['a', 'b']);
+    // Same ids on later ticks stay silent.
+    assert.equal(plan(['a', 'b'], ['a', 'b']).announce, false);
+    // A new id while the card is already visible announces once.
+    const added = plan(['a', 'b'], ['a', 'b', 'c']);
+    assert.equal(added.announce, true);
+    assert.equal(plan([...added.announced], ['a', 'b', 'c']).announce, false);
+    assert.equal(plan([], []).announce, false);
+    assert.match(MISSED_CARD_ANNOUNCEMENT, /見逃し/);
+  });
+
+  test('ringing defers announcing new ids and never re-announces known ones', () => {
+    const during = planMissedAnnouncement({
+      announced: new Set(['a']),
+      missedCycleIds: ['a', 'n'],
+      isRinging: true,
+    });
+    assert.equal(during.announce, false);
+    assert.deepEqual([...during.announced], ['a']);
+    // After stop: only the pending id triggers one announcement.
+    const after = planMissedAnnouncement({
+      announced: during.announced,
+      missedCycleIds: ['a', 'n'],
+      isRinging: false,
+    });
+    assert.equal(after.announce, true);
+    // Known ids hidden by ringing are not announced again after stop.
+    const ringOnly = planMissedAnnouncement({
+      announced: new Set(['a']),
+      missedCycleIds: ['a'],
+      isRinging: true,
+    });
+    assert.equal(
+      planMissedAnnouncement({
+        announced: ringOnly.announced,
+        missedCycleIds: ['a'],
+        isRinging: false,
+      }).announce,
+      false,
+    );
+  });
+
+  test('acknowledged or deleted ids are pruned so a later new cycle announces', () => {
+    const cleared = planMissedAnnouncement({
+      announced: new Set(['a', 'b']),
+      missedCycleIds: ['b'],
+      isRinging: false,
+    });
+    assert.equal(cleared.announce, false);
+    assert.deepEqual([...cleared.announced], ['b']);
+    const empty = planMissedAnnouncement({
+      announced: cleared.announced,
+      missedCycleIds: [],
+      isRinging: false,
+    });
+    assert.equal(empty.announce, false);
+    assert.equal(empty.announced.size, 0);
+    assert.equal(
+      planMissedAnnouncement({ announced: empty.announced, missedCycleIds: ['a'], isRinging: false }).announce,
+      true,
+    );
+  });
+
   test('the stop control label carries the time and that it is ringing', () => {
     assert.equal(
       getRingingStopA11yLabel(7, 0),

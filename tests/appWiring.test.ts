@@ -660,3 +660,24 @@ test('the reconcile pass releases its main ids at the checkpoint and abandons th
   assert.match(pass, /gateway: passGateway/);
   assert.match(pass, /finally \{\s*schedulingGateway\.abandonProvisional\(registered\);/);
 });
+
+test('missed acknowledgement shows the aggregate notice, not the last refill side effect', () => {
+  const ack = block('const acknowledgeMissed = useCallback', 'const outcomeEffects');
+  assert.match(ack, /getMissedAcknowledgementNotice\(/);
+  assert.match(ack, /collectedIssues|refillIssues/);
+  assert.doesNotMatch(ack, /result\.refillSeverity === 'none'/);
+});
+
+test('the ringing display and focused label use the occurrence date and current ring time', () => {
+  const card = block('{ringingCycle ? (', 'missedCycles.length > 0 ? (');
+  assert.match(card, /getRingingDisplay\(ringingCycle\)/);
+  assert.match(card, /getRingingStopA11yLabel\([\s\S]*formatNextDate/);
+});
+
+test('missed cycles are announced by tracked ids without moving focus', () => {
+  assert.match(app, /planMissedAnnouncement\(/);
+  assert.match(app, /announceForAccessibility\(MISSED_CARD_ANNOUNCEMENT\)/);
+  const effect = block('planMissedAnnouncement({', 'MISSED_CARD_ANNOUNCEMENT)');
+  assert.doesNotMatch(effect, /setAccessibilityFocus/);
+  assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null\]/);
+});

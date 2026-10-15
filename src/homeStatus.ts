@@ -405,8 +405,58 @@ export const RINGING_STOP_HINT =
  * the time and that the alarm is ringing, so it does not depend on a separate
  * announcement that the focus move would cut off.
  */
-export function getRingingStopA11yLabel(hour: number, minute: number): string {
-  return `${hour}時${minute}分のアラームが鳴っています。${RINGING_STOP_LABEL}`;
+export function getRingingStopA11yLabel(
+  hour: number,
+  minute: number,
+  dateLabel?: string,
+): string {
+  const date = dateLabel ? `${dateLabel} ` : '';
+  return `${date}${hour}時${minute}分のアラームが鳴っています。${RINGING_STOP_LABEL}`;
+}
+
+/**
+ * What the ringing card shows. A main ring shows its own due time and date. A
+ * snooze ring shows when that delivery actually fired, with that moment's
+ * date; the cycle's original `dueAtMs` is untouched.
+ */
+export function getRingingDisplay(cycle: StoredAlarm): {
+  timeMs: number;
+  dateMs: number;
+} {
+  const snoozeDueAtMs = cycle.snooze?.dueAtMs;
+  const ms =
+    cycle.snooze && cycle.snooze.count > 0 && snoozeDueAtMs !== undefined
+      ? snoozeDueAtMs
+      : cycle.dueAtMs;
+  return { timeMs: ms, dateMs: ms };
+}
+
+export const MISSED_CARD_ANNOUNCEMENT =
+  '見逃したアラームがあります。音は鳴らしていません。確認済みにできます。';
+
+export interface MissedAnnouncementPlan {
+  announce: boolean;
+  /** Missed cycle ids already announced; gone or acknowledged ids are pruned. */
+  announced: ReadonlySet<string>;
+}
+
+/**
+ * Tracks which missed cycles were already announced, so only a cycle that has
+ * not been announced yet is spoken: never twice, never while ringing (pending
+ * ids wait for the ring to end), and never from the per-second clock tick.
+ */
+export function planMissedAnnouncement(input: {
+  announced: ReadonlySet<string>;
+  missedCycleIds: readonly string[];
+  isRinging: boolean;
+}): MissedAnnouncementPlan {
+  const current = new Set(input.missedCycleIds);
+  const kept = new Set([...input.announced].filter((id) => current.has(id)));
+  if (input.isRinging) {
+    return { announce: false, announced: kept };
+  }
+  const announce = [...current].some((id) => !kept.has(id));
+  return { announce, announced: current };
 }
 
 function isTerminalCycle(cycle: StoredAlarm): boolean {
