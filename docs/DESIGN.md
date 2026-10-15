@@ -539,6 +539,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 
 ## 14. 参照資料
 
+- [Safety verification: コード・基準・テスト対応](SAFETY_VERIFICATION.md)
 - [Expo Notifications — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/notifications/)
 - [Expo Pedometer — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/pedometer/)
 - [Expo KeepAwake — SDK 57](https://docs.expo.dev/versions/v57.0.0/sdk/keep-awake/)

@@ -129,6 +129,7 @@ import {
   removePendingAlarmCancellation,
   runExclusiveAlarmStorage,
   removePendingAlarmEdit,
+  saveCycleRinging,
   saveMonitoringCycleStepCount,
   savePendingAlarmEdit,
   saveStoredAlarm,
@@ -213,7 +214,6 @@ import {
 import {
   createSnoozeService,
   getSnoozeAvailability,
-  markDeliveredCycleRinging,
 } from './src/snooze';
 import { getSnoozeCopy } from './src/snoozeCopy';
 import { createSnoozeTransaction } from './src/snoozeTransaction';
@@ -1688,20 +1688,26 @@ function AlarmApp() {
           return;
         }
 
-        // Decided on the latest stored state inside the storage turn, never
-        // on a copy read earlier, so it cannot undo a stop, snooze or reset.
-        const deliveredCycleId: string = data.cycleId;
-        void transactAlarmDefinitions(async (current) =>
-          markDeliveredCycleRinging(
-            current,
-            deliveredCycleId,
-            notification.request.identifier,
-          ),
+        // Read, check and write happen inside one queued mutation, so a stop
+        // that commits first is never overwritten by this delivery.
+        void saveCycleRinging(
+          {
+            alarmId: typeof data.alarmId === 'string' ? data.alarmId : undefined,
+            cycleId: data.cycleId,
+            mainAlarmId: notification.request.identifier,
+          },
+          Date.now,
         )
-          .then((next) => {
-            setCurrentAlarms(next);
+          .then(({ alarms, status }) => {
+            if (status === 'ringing' || status === 'missed') {
+              setCurrentAlarms(alarms);
+            }
           })
-          .catch(() => {
+          .catch((error: unknown) => {
+            // A pending deletion is reported as such, not as a save failure.
+            if (reportResetPending(error)) {
+              return;
+            }
             setNotice({
               tone: 'danger',
               text: '鳴動中のアラーム状態を保存できませんでした。',
@@ -1721,7 +1727,7 @@ function AlarmApp() {
       responseSubscription.remove();
       receivedSubscription.remove();
     };
-  }, [handleAwakeResponse, isLoaded, setCurrentAlarms]);
+  }, [handleAwakeResponse, isLoaded, reportResetPending, setCurrentAlarms]);
 
   useEffect(() => {
     const interval = setInterval(() => {

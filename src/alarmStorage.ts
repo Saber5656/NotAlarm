@@ -1,7 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
+  type MainDeliveryIdentity,
   type MonitoringStepUpdateStatus,
+  type RingingTransitionStatus,
+  markCycleRinging,
   replaceStoredCycle,
   updateMonitoringCycleStepCount,
 } from './alarmDefinitionMutations';
@@ -308,6 +311,32 @@ export async function saveStoredAlarm(
   cycle: StoredAlarm,
 ): Promise<StoredAlarmDefinition[]> {
   return mutateAlarmDefinitions((alarms) => replaceStoredCycle(alarms, cycle));
+}
+
+/**
+ * Atomic ringing transition for a delivered main notification: the cycle is
+ * read, checked and written inside one queued mutation, so a stop, dismissal
+ * or acknowledgement that commits first is never overwritten.
+ */
+export async function saveCycleRinging(
+  expected: MainDeliveryIdentity,
+  readNowMs: () => number = Date.now,
+): Promise<{
+  alarms: StoredAlarmDefinition[];
+  status: RingingTransitionStatus;
+}> {
+  let status: RingingTransitionStatus = 'not_found';
+  const alarms = await transactAlarmDefinitions((current) => {
+    // The clock is read here, after any earlier queued work has finished, so
+    // a long wait or a clock correction cannot leave a stale deadline check.
+    const result = markCycleRinging(current, expected, readNowMs());
+    status = result.status;
+    // Nothing is written unless the cycle actually changed.
+    return status === 'ringing' || status === 'missed'
+      ? result.alarms
+      : current;
+  });
+  return { alarms, status };
 }
 
 export async function saveMonitoringCycleStepCount(

@@ -14,6 +14,8 @@
 
 ## 一覧
 
+コードとテストの対応・実行結果は [SAFETY_VERIFICATION.md](SAFETY_VERIFICATION.md) を参照（物理端末項目は pending）。
+
 | ID | Priority | タイトル | 主なリスク |
 |---|---|---|---|
 | ALR-001 | P0 | Focus・消音を含む鳴動保証を設計する | アラームを残しても音が出ない |
