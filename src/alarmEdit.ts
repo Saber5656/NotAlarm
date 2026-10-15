@@ -473,14 +473,9 @@ export async function editAlarmDefinition(
           ),
         );
       }
-      // Its time has come: leave the notification and the cycle alone.
-      entry = {
-        ...entry,
-        oldNotificationIds: entry.oldNotificationIds.filter(
-          (remaining) => remaining !== item.id,
-        ),
-      };
-      await tryJournal(() => journal.save(entry));
+      // Its time has come: leave the notification and the cycle alone. Its ids
+      // stay journaled until the definition that tracks it is checkpointed, so
+      // a crash before then still lets recovery find and keep the cycle.
       continue;
     }
     try {
@@ -557,7 +552,9 @@ export async function editAlarmDefinition(
     }
     // Earlier steps took time: never schedule a check-in in the past.
     const checkInNow = now();
-    const checkInAtMs = getCheckInAtMs(planned.dueAtMs, checkInNow);
+    // Same arm time as the persisted cycle, so reconciliation expects this id
+    // at exactly this trigger time.
+    const checkInAtMs = getCheckInAtMs(planned.dueAtMs, base.armedAtMs);
     if (checkInAtMs <= checkInNow) {
       finalCycles.push(withoutCheckIn(base));
       continue;
@@ -686,16 +683,15 @@ export async function recoverPendingAlarmEdit(input: {
     return input.alarms;
   }
 
-  const nowMs = (input.now ?? Date.now)();
+  const nowFn = input.now ?? Date.now;
   const newCycleIds = new Set(entry.newCycles.map((cycle) => cycle.cycleId));
-  // Old cycles whose time has come and whose main was never cancelled keep
-  // their data and their notifications.
+  // Old cycles whose main was never cancelled stay tracked; those that come due
+  // before their cancellation keep their data and their notifications.
   const pendingOld = target.cycles.filter(
     (cycle) =>
       !newCycleIds.has(cycle.cycleId) &&
       entry.oldNotificationIds.includes(cycle.mainAlarmId),
   );
-  const dueOld = pendingOld.filter((cycle) => isDueLive(cycle, nowMs));
 
   let alarms = input.alarms;
   const applied = entry.newCycles.every((cycle) =>
@@ -730,16 +726,37 @@ export async function recoverPendingAlarmEdit(input: {
     await input.checkpoint(alarms);
   }
 
-  const protectedIds = new Set(
-    dueOld.flatMap((cycle) => [
-      cycle.mainAlarmId,
-      ...(cycle.checkInNotificationId ? [cycle.checkInNotificationId] : []),
-    ]),
-  );
-  const failed = await cancelAll(
-    entry.oldNotificationIds.filter((id) => !protectedIds.has(id)),
-    gateway,
-  );
+  const cycleByNotificationId = new Map<string, StoredAlarm>();
+  for (const cycle of pendingOld) {
+    cycleByNotificationId.set(cycle.mainAlarmId, cycle);
+    if (cycle.checkInNotificationId) {
+      cycleByNotificationId.set(cycle.checkInNotificationId, cycle);
+    }
+  }
+  // The clock is read again right before each cancellation: a cycle that came
+  // due during the earlier awaits must keep its notification and its data.
+  const protectedIds = new Set<string>();
+  const cancelledOldMains = new Set<string>();
+  const failed: string[] = [];
+  for (const id of entry.oldNotificationIds) {
+    const owner = cycleByNotificationId.get(id);
+    if (
+      owner &&
+      !cancelledOldMains.has(owner.cycleId) &&
+      isDueLive(owner, nowFn())
+    ) {
+      protectedIds.add(id);
+      continue;
+    }
+    try {
+      await gateway.cancelScheduled(id);
+      if (owner && id === owner.mainAlarmId) {
+        cancelledOldMains.add(owner.cycleId);
+      }
+    } catch {
+      failed.push(id);
+    }
+  }
   // Drop old cycles whose main is now proven cancelled; keep the rest tracked.
   const stale = pendingOld.filter(
     (cycle) =>
