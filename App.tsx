@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   activateKeepAwakeAsync,
   deactivateKeepAwake,
@@ -106,6 +107,7 @@ import {
   markDueCyclesRinging,
   mutateAlarmDefinitions,
   removePendingAlarmCancellation,
+  runExclusiveAlarmStorage,
   saveMonitoringCycleStepCount,
   saveStoredAlarm,
   transactAlarmDefinitions,
@@ -121,6 +123,8 @@ import {
 import {
   cancelNotificationIfPresent,
   cancelScheduledNotification,
+  cancelScheduledNotificationById,
+  listScheduledNotificationSnapshots,
   listScheduledNotificationIds,
   dismissDeliveredNotification,
   installForegroundNotificationHandler,
@@ -144,6 +148,7 @@ import {
   RINGING_STOP_HINT,
   RINGING_STOP_LABEL,
   STORAGE_LOAD_FAILED_COPY,
+  STORAGE_RESET_COPY,
   SUPPRESSION_WARNING_COPY,
   type PedometerState,
   type SuppressionWarningKind,
@@ -156,6 +161,7 @@ import {
   runUnlessAlarmListLocked,
   summarizeNewAlarm,
 } from './src/homeStatus';
+import { createStorageResetService } from './src/storageReset';
 import { suppressionJournal } from './src/suppressionJournalStorage';
 import {
   describeScheduleCoverage,
@@ -170,6 +176,19 @@ const schedulingGateway = {
   scheduleMain: scheduleMainAlarmNotification,
   scheduleCheckIn: scheduleCheckInNotification,
 };
+
+// Order matches the stop path: the suppression journal lock, then the
+// definition/cancellation queues. Only the recovery card calls reset().
+const storageReset = createStorageResetService({
+  store: AsyncStorage,
+  gateway: {
+    listScheduled: listScheduledNotificationSnapshots,
+    cancelScheduled: cancelScheduledNotificationById,
+  },
+  exclusive: (run) =>
+    suppressionJournal.exclusive(() => runExclusiveAlarmStorage(run)),
+  nowMs: Date.now,
+});
 
 const cancellationGateway = {
   cancelScheduled: cancelNotificationIfPresent,
@@ -705,6 +724,21 @@ function AlarmApp() {
     void (async () => {
       try {
         let cancellationRecoveryFailed = false;
+        if (await storageReset.hasPendingReset()) {
+          // An earlier reset stopped halfway: stay on the recovery card so the
+          // user can finish it. Nothing is resumed automatically.
+          throw new Error('storage reset is unfinished');
+        }
+        try {
+          if ((await storageReset.readAmbiguousCount()) > 0 && mounted) {
+            setNotice({
+              tone: 'danger',
+              text: STORAGE_RESET_COPY.ambiguousWarning,
+            });
+          }
+        } catch {
+          // Advisory only; never blocks startup.
+        }
         try {
           await recoverPendingAlarmCancellations();
         } catch {
@@ -1604,6 +1638,60 @@ function AlarmApp() {
     [deleteAlarm],
   );
 
+  const performStorageReset = useCallback(async () => {
+    if (!loadFailed || isBusy) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const { ambiguousCount } = await storageReset.reset();
+      setCurrentAlarms([]);
+      setRefillFailedAlarmIds(new Set());
+      setSuppressionWarning(null);
+      setLoadFailed(false);
+      setNotice(
+        ambiguousCount > 0
+          ? { tone: 'danger', text: STORAGE_RESET_COPY.ambiguousWarning }
+          : { tone: 'neutral', text: STORAGE_RESET_COPY.done },
+      );
+    } catch {
+      // The failure card stays; nothing was erased unless cancellation held.
+      setNotice({ tone: 'danger', text: STORAGE_RESET_COPY.failed });
+    } finally {
+      setIsBusy(false);
+    }
+  }, [isBusy, loadFailed, setCurrentAlarms]);
+
+  const confirmStorageReset = useCallback(() => {
+    if (!loadFailed || isBusy) {
+      return;
+    }
+    Alert.alert(
+      STORAGE_RESET_COPY.firstConfirmTitle,
+      STORAGE_RESET_COPY.firstConfirmBody,
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: '次へ',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert(
+              STORAGE_RESET_COPY.finalConfirmTitle,
+              STORAGE_RESET_COPY.finalConfirmBody,
+              [
+                { text: 'キャンセル', style: 'cancel' },
+                {
+                  text: STORAGE_RESET_COPY.action,
+                  style: 'destructive',
+                  onPress: () => void performStorageReset(),
+                },
+              ],
+            ),
+        },
+      ],
+    );
+  }, [isBusy, loadFailed, performStorageReset]);
+
   const stopRinging = useCallback(async () => {
     if (!ringingCycle || isBusy) {
       return;
@@ -1876,6 +1964,26 @@ function AlarmApp() {
                 {index + 1}. {step}
               </Text>
             ))}
+            <Text style={styles.deliveryWarningBody}>
+              {STORAGE_RESET_COPY.lastResort}
+            </Text>
+            <Pressable
+              accessibilityHint={STORAGE_RESET_COPY.hint}
+              accessibilityLabel={STORAGE_RESET_COPY.action}
+              accessibilityRole="button"
+              accessibilityState={{ busy: isBusy, disabled: isBusy }}
+              disabled={isBusy}
+              onPress={confirmStorageReset}
+              style={({ pressed }) => [
+                styles.resetButton,
+                (isBusy || pressed) && styles.buttonDimmed,
+              ]}
+              testID="storage-reset-button"
+            >
+              <Text style={styles.settingsButtonText}>
+                {STORAGE_RESET_COPY.action}
+              </Text>
+            </Pressable>
           </View>
         ) : deliveryWarningCopy ? (
           <View
@@ -2584,6 +2692,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 14,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  resetButton: {
+    minHeight: 44,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 14,
     backgroundColor: 'rgba(255, 255, 255, 0.92)',
   },

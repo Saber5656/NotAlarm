@@ -222,6 +222,12 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 全ての read-modify-write は直列 mutation queue 内で最新値を読み直し、通知応答・歩数更新・画面操作・起動時補充が互いの保存結果を古い snapshot で上書きしない。
 - v2 が存在せず valid な v1 がある場合、`today` definition 1件へ移行し、v2 保存成功後に v1 key を削除する。
 - malformed data では推測復旧せず、予約済み通知を勝手に解除しない。
+- 読めない保存データからの脱出は、失敗カード（`loadFailed`）上の「通知を解除してリセット」だけから、2回の確認（`Alert` 2連続）を経て実行する。起動・前面復帰・通知応答・補充などの自動経路は保存データも通知も消さない（`tests/appWiring.test.ts`）。
+- リセットは再利用できる `createStorageResetService`（`src/storageReset.ts`）が行う。`cancelAllScheduledNotificationsAsync` は使わない（Expo Go は他プロジェクトの通知と同じ予約キューを共有する）。解除対象は、新規予約の payload に付く固定マーカー `owner: 'already-up/v1'` に加え、kind ごとの必須 ID（main は alarmId・cycleId、check-in は alarmId・cycleId・mainAlarmId・category）が揃う通知（`isOwnedAlarmNotification`）と、単独で検証に通った保存元（definitions v2、legacy、suppression journal）の正確な ID だけ。壊れた JSON から ID を推測しない。
+- **互換性の制限**: マーカー導入前に予約された通知は payload だけでは他の Expo Go プロジェクトの通知と区別できない。保存済みの正確な ID（definitions・legacy・suppression journal・中断した intent）が読める場合に限り解除し、それ以外の契約形式の通知は kind/title だけで解除せず「判別不能」として残す。通知応答（action）の解釈はマーカーなしでも従来どおり受け付ける。
+- reset は `{ ambiguousCount }` を返す。1件以上残る場合は「判別できない古い通知が残り、鳴る場合がある」という警告を表示し、`already-up/storage-reset-limitation/v1` に記録して再起動後も起動時に再確認・再表示する（残りが0件になれば自動で消す）。判別不能な通知は保存データの回復と新規アラームの追加を妨げない。
+- 手順は、①`already-up/storage-reset-intent/v1` に意図と既知 ID を保存、②該当通知を ID 指定で解除、③予約キューを再取得して残りがないことを確認、④definitions・legacy・cancellation journal・suppression journal を削除、⑤最後に intent を削除。解除を確認できなければ保存データと intent を残して失敗を返す。intent が残る間は起動時も失敗カードを維持し、利用者が再試行する（自動再開しない）。
+- reset は suppression journal の排他 → `runExclusiveAlarmStorage`（definitions と cancellation journal のキュー）の順で直列化し、停止・追加・補充と同時に走らない。
 
 ## 11. UI 契約
 
@@ -340,7 +346,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 - 鳴動 card は見出し「鳴っています」、停止ボタン「アラームを止める」（56pt以上。起床確認ではなく音を止める操作）。鳴り始めに停止ボタンへ VoiceOver フォーカスを移す（300ms 後。追加画面が開いていた場合は閉じた後。iOS は onDismiss の100ms 後、ほかは700ms 後）。別の読み上げ（announce）は行わず、フォーカスが当たった停止ボタンの label「7時0分のアラームが鳴っています。アラームを止める」（`getRingingStopA11yLabel`）が読まれる。実機の VoiceOver では未測定。
 - 停止済みで期限前の回は、card 下と該当行に「10/3(土) 07:00 は100歩（または通知）で起床確認済みのため鳴りません」を表示する（`describeSuppressedOccurrence`。`stepCandidateRecorded` で理由を分ける）。
 - 歩数が使えない（端末にない・拒否・エラー）ときは進捗barと「n / 100歩」を隠し、「歩数による停止を確認できません。予定を確認してください」を表示する（先頭に「この端末では歩数を使えません。」「歩数の利用が許可されていません。」「歩数を計測できません。」のいずれかが付く）。通知配送や停止の保存が不明な場合もあるため、アラームが鳴るとは約束しない。拒否時だけ「設定を開く」。この間 card は最小140ptから内容に応じて伸びる（`getStepGuidance`）。
-- 保存データを読み込めない場合（`loadFailed`）は通常の空状態や「次のアラームはありません」を出さず、閉じられない danger card と一覧の説明を表示し、＋を無効にして理由を読み上げに含める。バナーは使わない（次の操作で消えるため）。
+- 保存データを読み込めない場合（`loadFailed`）は通常の空状態や「次のアラームはありません」を出さず、閉じられない danger card と一覧の説明を表示し、＋を無効にして理由を読み上げに含める。カード末尾に、再起動でも直らない場合の最後の手段として「通知を解除してリセット」（44pt以上、折り返し可）を置く。処理中は無効化し、失敗時もカードを維持して「保存データは消していません」を通知する。成功すると＋が有効になる。バナーは使わない（次の操作で消えるため）。
 - 追加フォームは全タブ共通で「平日・初回 10/5 07:00（2日9時間後）」を追加ボタン上に表示し、24時間より先は注意色にする（`summarizeNewAlarm`）。追加成功バナーにも初回日時を入れる。
 - 最大文字サイズ: 画面名・時刻（card・一覧・鳴動）は1行で自動縮小し、＋は文字拡大しない。鳴動 card の補足文は時刻と重ならない通常の並びにした。
 - 小さい文字の色は `HOME_COLORS`（`src/ui/tokens.ts`）に集約し、`tests/homeContrast.test.ts` で白・黒の背景写真上でも 4.5:1（進捗barは 3:1）を固定する。native Liquid Glass 表示の実測はできていない。
