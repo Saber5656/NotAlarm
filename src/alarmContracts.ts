@@ -14,6 +14,73 @@ export interface AlarmNotificationData {
   mainAlarmId?: string;
   /** 1-based snooze number; present only on a snooze delivery. */
   snooze?: number;
+  /**
+   * Exact scheduled delivery time of this notification (a snooze's own due
+   * time for a snooze). Absent only on notifications queued before it existed.
+   */
+  dueAtMs?: number;
+}
+
+export function buildMainNotificationData(input: {
+  alarmId: string;
+  cycleId: string;
+  dueAtMs: number;
+}): AlarmNotificationData {
+  return {
+    owner: ALREADY_UP_OWNER,
+    kind: MAIN_ALARM_KIND,
+    alarmId: input.alarmId,
+    cycleId: input.cycleId,
+    dueAtMs: input.dueAtMs,
+  };
+}
+
+export function buildSnoozeNotificationData(input: {
+  alarmId: string;
+  cycleId: string;
+  dueAtMs: number;
+  snoozeNumber: number;
+}): AlarmNotificationData {
+  return {
+    ...buildMainNotificationData(input),
+    snooze: input.snoozeNumber,
+  };
+}
+
+/**
+ * Reads what a delivered main notification claims to be. A missing `dueAtMs`
+ * is the explicit legacy case (already queued); a provided one must be a
+ * finite number, otherwise the payload is rejected rather than treated as
+ * legacy.
+ */
+export function readMainDeliveryIdentity(
+  data: unknown,
+  deliveredId: string,
+): {
+  alarmId?: string;
+  cycleId: string;
+  mainAlarmId: string;
+  dueAtMs?: number;
+} | null {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+  const { kind, alarmId, cycleId, dueAtMs } = data as Record<string, unknown>;
+  if (kind !== MAIN_ALARM_KIND || typeof cycleId !== 'string') {
+    return null;
+  }
+  if (
+    dueAtMs !== undefined &&
+    (typeof dueAtMs !== 'number' || !Number.isFinite(dueAtMs))
+  ) {
+    return null;
+  }
+  return {
+    alarmId: typeof alarmId === 'string' ? alarmId : undefined,
+    cycleId,
+    mainAlarmId: deliveredId,
+    dueAtMs: dueAtMs as number | undefined,
+  };
 }
 
 /** Strict shape check shared by notification responses and ownership tests. */
@@ -23,7 +90,7 @@ export function parseAlarmNotificationData(
   if (!data || typeof data !== 'object') {
     return null;
   }
-  const { owner, kind, alarmId, cycleId, mainAlarmId, snooze } = data as Record<
+  const { owner, kind, alarmId, cycleId, mainAlarmId, snooze, dueAtMs } = data as Record<
     string,
     unknown
   >;
@@ -33,7 +100,9 @@ export function parseAlarmNotificationData(
     typeof cycleId !== 'string' ||
     (mainAlarmId !== undefined && typeof mainAlarmId !== 'string') ||
     (owner !== undefined && typeof owner !== 'string') ||
-    (snooze !== undefined && !Number.isInteger(snooze))
+    (snooze !== undefined && !Number.isInteger(snooze)) ||
+    (dueAtMs !== undefined &&
+      (typeof dueAtMs !== 'number' || !Number.isFinite(dueAtMs)))
   ) {
     return null;
   }
@@ -44,5 +113,6 @@ export function parseAlarmNotificationData(
     cycleId,
     mainAlarmId,
     snooze: snooze as number | undefined,
+    dueAtMs: dueAtMs as number | undefined,
   };
 }
