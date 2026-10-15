@@ -7,5 +7,7 @@ export function getMainAlarmNotificationBody(
   messages: Messages,
 ): string {
   const { mainBody, keepReservingHint } = messages.notifications;
-  return input.repeats ? `${mainBody}${keepReservingHint}` : mainBody;
+  return input.repeats
+    ? `${mainBody}${messages.common.sentenceGap}${keepReservingHint}`
+    : mainBody;
 }
