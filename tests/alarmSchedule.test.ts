@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   formatRepeatLabel,
   getUpcomingAlarmTimes,
+  isAlarmRepeat,
   makeAlarmRepeat,
 } from '../src/alarmSchedule';
 
@@ -52,4 +53,14 @@ test('custom repeat normalizes weekdays and formats a release-facing label', () 
 
 test('custom repeat rejects an empty weekday selection', () => {
   assert.throws(() => makeAlarmRepeat('custom', Date.now(), []), /曜日/);
+});
+
+test('today repeat accepts only real calendar dates', () => {
+  const today = (dateKey: string) => ({ kind: 'today', weekdays: [], dateKey });
+  for (const bad of ['2026-13-01', '2026-00-10', '2026-02-29', '2026-04-31', '2026-01-00', '2026-01-32']) {
+    assert.equal(isAlarmRepeat(today(bad)), false, bad);
+  }
+  for (const good of ['2028-02-29', '2026-12-31', '2026-02-28']) {
+    assert.equal(isAlarmRepeat(today(good)), true, good);
+  }
 });
