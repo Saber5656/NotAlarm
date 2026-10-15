@@ -195,6 +195,7 @@ import {
 } from './src/homeStatus';
 import {
   LOCAL_DATA_COPY,
+  canCloseSettings,
   deleteAllLocalData,
   getLocalDataDeletionAvailability,
 } from './src/localDataDeletion';
@@ -2537,6 +2538,8 @@ function AlarmApp() {
         // and alarm writes are refused until a retry finishes.
         setDeletionPending(true);
         setSettingsNotice(LOCAL_DATA_COPY.failed);
+        // Also on home, so the failure and the retry steps outlive the sheet.
+        setNotice({ tone: 'danger', text: LOCAL_DATA_COPY.failedHome });
         return;
       }
       applyLocalDataDeleted();
@@ -2552,6 +2555,14 @@ function AlarmApp() {
       setIsBusy(false);
     }
   }, [applyLocalDataDeleted, isBusy, isLoaded, sun]);
+
+  // Back, backdrop and the close button all land here; the ref is read at call
+  // time so a deletion started a moment ago still blocks them.
+  const closeSettings = useCallback(() => {
+    if (canCloseSettings({ deletionInFlight: deletionInFlightRef.current })) {
+      setIsSettingsOpen(false);
+    }
+  }, []);
 
   const confirmLocalDataDeletion = useCallback(() => {
     const availability = getLocalDataDeletionAvailability({
@@ -3691,7 +3702,7 @@ function AlarmApp() {
 
       <SettingsModal
         closeLabel={LOCAL_DATA_COPY.close}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={closeSettings}
         subtitle={LOCAL_DATA_COPY.subtitle}
         title={LOCAL_DATA_COPY.title}
         visible={isSettingsOpen && !ringingCycle}

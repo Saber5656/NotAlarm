@@ -102,6 +102,10 @@ function makeGateway(
 ) {
   const scheduled = [...initial];
   const gateway: StorageResetGateway = {
+    async listPresented() {
+      return [];
+    },
+    async dismissPresented() {},
     async listScheduled() {
       await options.gate;
       return [...scheduled];
@@ -216,6 +220,10 @@ test("after a failure and restart the pending deletion is visible and never auto
 test("a listing failure is reported as failed without touching data", async () => {
   const store = makeStore({ [ALARM_DEFINITIONS_STORAGE_KEY]: "{bad" });
   const gateway: StorageResetGateway = {
+    async listPresented() {
+      return [];
+    },
+    async dismissPresented() {},
     async listScheduled() {
       throw new Error("unavailable");
     },
@@ -239,6 +247,10 @@ test("deletion serialises with an in-flight mutation instead of interleaving", a
   const base = makeGateway([], { gate }).gateway;
   const gateway: StorageResetGateway = {
     ...base,
+    async listPresented() {
+      return [];
+    },
+    async dismissPresented() {},
     async listScheduled() {
       events.push("delete-run");
       return base.listScheduled();
