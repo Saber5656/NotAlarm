@@ -33,4 +33,5 @@ jobs:
       - run: npm test
       - run: npx expo install --check
       - run: npx --yes expo-doctor@1.20.4
-      - run: npx expo export --platform all --output-dir dist-ci
+      - run: npx expo export --platform all --source-maps --output-dir dist-ci
+      - run: npm run security:check -- --dist dist-ci

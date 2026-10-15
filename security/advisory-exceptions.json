@@ -1,0 +1,17 @@
+{
+  "note": "Not fixes. Upstream has no fixed release; reachability is assessed in docs/DEPENDENCY_SECURITY.md. The check fails when an entry expires, the installed version changes, the advisory set on the package changes, or any other finding appears.",
+  "exceptions": [
+    {
+      "package": "braces",
+      "advisoryUrl": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+      "installedVersion": "3.0.3",
+      "expires": "2026-11-14"
+    },
+    {
+      "package": "node-forge",
+      "advisoryUrl": "https://github.com/advisories/GHSA-86w9-cpqp-85rv",
+      "installedVersion": "1.4.0",
+      "expires": "2026-11-14"
+    }
+  ]
+}

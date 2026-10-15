@@ -34,7 +34,8 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
-    "export:web": "expo export --platform web"
+    "export:web": "expo export --platform web",
+    "security:check": "tsx scripts/check-dependency-security.ts"
   },
   "private": true,
   "overrides": {

@@ -402,21 +402,30 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 ### 背景
 
-2026-08-20 時点の `npm audit --omit=dev` は、Expo SDK 54 の dependency を中心に 17 件（moderate 8 / high 9、critical 0）を報告する。自動修正候補は Expo SDK 57 への更新を含み、App Store 版 Expo Go による iPhone 実機確認という現行要件と衝突するため実行していない。
+Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` 直後の `npm audit` は 23 件（moderate 7 / high 16、critical 0）を報告した。原因 advisory は 3 件で、残りは依存関係の伝播である。自動修正候補は `expo@44.0.6` などへの downgrade で、`--force` は使わない。
+
+### 対応状況（2026-10-15）
+
+- 解消: `uuid` GHSA-w5hq-g745-h8pq（moderate）。`xcode@3.0.1`（`@expo/config-plugins` 経由）が固定する `uuid@7.0.3` を `overrides.xcode.uuid = ^11.1.1`（解決 11.1.1）へ更新した。`xcode` は `uuid.v4()` のみ使用し、11.x は CJS `require('uuid')` を維持する。`generateUuid()` の動作、`expo install --check`、expo-doctor 1.20.4（21/21）、export 全 platform で確認した。
+- 残存（修正版なし）: `braces@3.0.3` GHSA-vfj7-8cjw-p6xm（high、`<=3.0.3`。npm の最新も 3.0.3）。経路は `expo > @expo/metro > metro-file-map > micromatch > braces`。
+- 残存（修正版なし）: `node-forge@1.4.0` GHSA-86w9-cpqp-85rv（high、`<=1.4.0`。npm の最新も 1.4.0）。経路は `expo > @expo/cli > node-forge` と `@expo/code-signing-certificates`。
+- 上記 2 件の伝播として high 16 件が残る（`npm audit` は 23 → 16、moderate 0）。修正済みとは扱わない。
+- 到達可能性評価（2026-10-15）: インストール済みソース、export 済み sourcemap、dev server の実行時トレースで、脆弱な入力が届く経路を確認できなかった（根拠と仮定は `docs/DEPENDENCY_SECURITY.md`）。緩和コードは追加していない。
+- 期限付き例外 `security/advisory-exceptions.json`（期限 2026-11-14）。`npm run security:check` は期限切れ、不正な `expires`、版の変化、例外外の finding、呼び出し経路の仮定の変化で fail する。CI は export（`--source-maps`、`dist-ci`）の後に `npm run security:check -- --dist dist-ci` を実時計で実行する。
+- 再開条件: braces / node-forge の修正版公開、または Expo が依存を更新した時点で `npm audit` を再実行し、例外を削除する。期限までに修正されなければ再評価する。
 
 ### スコープ
 
 - 各 advisory の到達可能性を mobile runtime / Metro・CLI・asset 処理に分けて評価する
-- Expo SDK 54 の修正版、または development build を併用した上位 SDK への安全な更新経路を確認する
-- untrusted asset を Metro / `image-size` に入力する開発フローを制限する
+- untrusted asset や入力を Metro / CLI に渡す開発フローを制限する
 - 強制 downgrade や `--force` を使わず lockfile を更新する
 
 ### 受け入れ条件
 
-- [ ] high / critical advisory が 0、または非到達性と期限付き risk acceptance が記録されている
-- [ ] `npx expo-doctor` が全チェックを通過する
-- [ ] `npm test` / `npm run typecheck` / `npm run export:web` が更新後も通る
-- [ ] Expo SDK 54 から外れる場合は、versioned docs に基づく移行差分と実機配布方法が記録されている
+- [x] high / critical advisory が 0、または非到達性と期限付き risk acceptance が記録されている（braces・node-forge は修正版なし。非到達性の根拠と 2026-11-14 期限の例外を記録。advisory 自体は未解決）
+- [x] `npx expo-doctor` が全チェックを通過する（1.20.4、21/21）
+- [x] `npm test` / `npm run typecheck` / `npx expo export --platform all` が更新後も通る
+- [x] Expo SDK 57 のまま維持し、SDK 変更はない
 
 ---
 
