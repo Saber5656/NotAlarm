@@ -243,6 +243,17 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 
 タイムゾーン変更、手動時刻変更、端末再起動、OS 設定からの通知削除で、保存済み状態と OS の scheduled notification がずれる可能性がある。
 
+### 対応状況（2026-10-15、実装済み・実機は未検証）
+
+- 起動時（`markDueCyclesRinging` の後）と `active` 復帰時に、保存した未来の周期と OS の保留通知を照合する（`src/scheduleReconciliation.ts`、App.tsx の `reconcileScheduleWithQueue`。順序・rollback は [DESIGN 6.1](DESIGN.md)）。main が無ければ同じ周期で再予約し、check-in だけ無ければ check-in だけ再予約する。権限が戻った後の次の照合で修復する。
+- キューを読めない・権限がない場合は修復せず、行に「通知の予約状況を確認できません」「通知が端末に見つかりません」を表示して「予約済み」としない。
+- 繰り返しの `HH:mm` はローカル壁時計、「今日だけ」は元のローカル日付に固定（[DESIGN 4.1](DESIGN.md)）。タイムゾーン変更で壁時計とずれた周期は、新規予約 → cancel の順で組み直し、組み直した旨を notice で示す。計画時のタイムゾーンを保存する。
+- 未完了の cancel / suppression journal がある alarm、オフの alarm、`suppressed` / `dismissed` / `ringing` の周期、無関係な通知 ID には触れない。照合は suppression ロックと保存キューの内側で直列に実行し、同時実行は共有する。
+- 64 件の共有キューを守る: 置換は古い周期 1 件ずつ、外部通知を含めて空きが無ければ予約せず `capacity_full` を表示。OS への登録は読み直して確認してから古い予約を cancel する。保存失敗で cancel できなかった ID は永続して次回 cancel する。途中失敗時は保存済みの最新 checkpoint を読み直す。
+- 補充は `assessReconciledState` が許可したときだけ（保存済み状態を読めた・OS キューを読めた・中断なし・解除できない ID なし）。満たさなければ補充せず警告のまま次回再試行する。orphan 解放は保存済みの周期が参照する生きた ID を cancel しない。
+- 自動テストで固定: 欠落 main / check-in、キュー不明、権限の変更、繰り返しの照合、suppressed、無関係な ID、タイムゾーン変更（`tests/scheduleReconciliation.test.ts`、`planningZone.test.ts`、`scheduleCoverage.test.ts`、`reconcileGate.test.ts`、`notificationTrigger.test.ts`、`queueInspection.test.ts`、`appWiring.test.ts`）。
+- 未実施: 実機（Expo Go / iOS・Android）での再起動・通知削除・手動時刻・タイムゾーン変更。アプリが動いていない間の不整合は次の起動・前面復帰まで検知できない。通知は kind / alarmId / cycleId / mainAlarmId の内容と発火時刻で照合する。Android は DATE、iOS は絶対 UTC の CALENDAR トリガー（秒へ切り上げ）で予約し、読み戻した日時成分を検査する。旧ビルドの iOS 相対予約は移行する。同じタイムゾーンでの手動時計変更後に正しく鳴るかは物理端末で未確認のまま。
+
 ### スコープ
 
 - absolute date と wall-clock time の仕様を決定する
@@ -253,9 +264,9 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 ### 受け入れ条件
 
 - [ ] 各時刻変更シナリオの期待動作と実機結果がある
-- [ ] メイン通知が OS 上にないのに「設定済み」と表示しない
-- [ ] 不整合解消のために無関係な通知をキャンセルしない
-- [ ] 再スケジュールが必要な場合は利用者に明示する
+- [x] メイン通知が OS 上にないのに「設定済み」と表示しない（照合後。照合前の表示と実機検証は未実施）
+- [x] 不整合解消のために無関係な通知をキャンセルしない（保存した ID のみ cancel。実機検証は未実施）
+- [x] 再スケジュールが必要な場合は利用者に明示する（notice と行表示。実機検証は未実施）
 
 ---
 

@@ -207,3 +207,41 @@ function dateFromKey(dateKey: string, hour: number, minute: number): number {
   }
   return candidate.getTime();
 }
+
+/**
+ * Whether a stored due time still matches the alarm's local wall-clock time.
+ * Repeating HH:mm and the today-only date key are both local to the current
+ * time zone, so after a zone change an occurrence planned earlier no longer
+ * lines up. The check uses the same constructor as the planner, so a time that
+ * does not exist on a DST day is judged by where the planner places it.
+ */
+export function isDueTimeWallClockAligned(
+  dueAtMs: number,
+  hour: number,
+  minute: number,
+  repeat: AlarmRepeat,
+): boolean {
+  if (!Number.isFinite(dueAtMs)) {
+    return false;
+  }
+  const due = new Date(dueAtMs);
+  if (repeat.kind === 'today') {
+    try {
+      return dateFromKey(repeat.dateKey!, hour, minute) === dueAtMs;
+    } catch {
+      return false;
+    }
+  }
+  const expected = new Date(
+    due.getFullYear(),
+    due.getMonth(),
+    due.getDate(),
+    hour,
+    minute,
+    0,
+    0,
+  ).getTime();
+  return (
+    expected === dueAtMs && repeat.weekdays.includes(due.getDay() as Weekday)
+  );
+}

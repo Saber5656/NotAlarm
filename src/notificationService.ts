@@ -13,6 +13,11 @@ import {
 import type { ScheduledNotificationSnapshot } from './alarmNotificationOwnership';
 import { getMainAlarmNotificationBody } from './alarmNotificationContent';
 import {
+  describeScheduledRequest,
+  type QueueInspection,
+} from './queueInspection';
+import { toUtcCalendarFields } from './notificationTrigger';
+import {
   assessNotificationDelivery,
   type NotificationDeliveryState,
 } from './notificationDelivery';
@@ -134,7 +139,19 @@ export async function readNotificationDelivery(): Promise<NotificationDeliverySt
   }
 }
 
+/**
+ * Android keeps an absolute DATE trigger. On iOS a DATE input is turned into a
+ * relative time interval that cannot be read back, so an explicit UTC calendar
+ * trigger (rounded up to the second) is used and can be verified later.
+ */
 function dateTrigger(dateMs: number, channelId: string) {
+  if (Platform.OS === 'ios') {
+    return {
+      type: Notifications.SchedulableTriggerInputTypes.CALENDAR as const,
+      repeats: false,
+      ...toUtcCalendarFields(dateMs),
+    };
+  }
   return {
     type: Notifications.SchedulableTriggerInputTypes.DATE as const,
     date: dateMs,
@@ -207,6 +224,23 @@ export async function listScheduledNotificationIds(): Promise<
   }
   const scheduled = await Notifications.getAllScheduledNotificationsAsync();
   return new Set(scheduled.map((request) => request.identifier));
+}
+
+/**
+ * Read-only: every pending notification of the shared OS queue with its
+ * content and trigger, parsed defensively. A failed read is 'unknown', never
+ * an empty queue.
+ */
+export async function readScheduledNotificationQueue(): Promise<QueueInspection> {
+  if (Platform.OS === 'web') {
+    return { kind: 'known', entries: [] };
+  }
+  try {
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    return { kind: 'known', entries: scheduled.map(describeScheduledRequest) };
+  } catch {
+    return { kind: 'unknown' };
+  }
 }
 
 export async function cancelScheduledNotification(

@@ -16,6 +16,8 @@ import {
   createStorageResetService,
   type StorageResetGateway,
 } from "../src/storageReset";
+import { ORPHANED_NOTIFICATIONS_KEY } from "../src/orphanedNotifications";
+import { PLANNING_ZONE_KEY } from "../src/planningZone";
 import { SUPPRESSION_JOURNAL_KEY } from "../src/suppressionJournal";
 
 const OWNED_KEYS = [
@@ -355,4 +357,130 @@ test("legacy notifications cancel when their exact id is stored", async () => {
   const result = await service(store, gateway).reset();
   assert.deepEqual(cancelled, ["old-1"]);
   assert.equal(result.ambiguousCount, 0);
+});
+
+const orphanJournal = (...ids: string[]) =>
+  JSON.stringify({ version: 1, ids });
+
+test("cancels a marked orphan and clears the orphan journal only after confirmation", async () => {
+  const store = makeStore({
+    ...corrupt,
+    [ORPHANED_NOTIFICATIONS_KEY]: orphanJournal("orphan-1", "gone"),
+  });
+  const { gateway, scheduled, cancelled } = makeGateway([
+    ownedMain("orphan-1"),
+    foreign("host-1"),
+  ]);
+
+  await service(store, gateway).reset();
+
+  assert.deepEqual(cancelled, ["orphan-1"]);
+  assert.deepEqual(scheduled.map((item) => item.identifier), ["host-1"]);
+  assert.equal(store.data.has(ORPHANED_NOTIFICATIONS_KEY), false);
+});
+
+test("keeps the orphan journal while an orphan cancellation is unconfirmed", async () => {
+  const journal = orphanJournal("orphan-1");
+  const store = makeStore({ ...corrupt, [ORPHANED_NOTIFICATIONS_KEY]: journal });
+  const { gateway } = makeGateway([ownedMain("orphan-1")], {
+    ignoreCancel: new Set(["orphan-1"]),
+  });
+
+  await assert.rejects(
+    () => service(store, gateway).reset(),
+    StorageResetIncompleteError,
+  );
+  assert.equal(store.data.get(ORPHANED_NOTIFICATIONS_KEY), journal);
+  assert.equal(store.removed.includes(ORPHANED_NOTIFICATIONS_KEY), false);
+});
+
+test("a valid orphan journal's exact id cancels this app's legacy unmarked main", async () => {
+  const store = makeStore({
+    ...corrupt,
+    [ORPHANED_NOTIFICATIONS_KEY]: orphanJournal("legacy-old", "gone"),
+  });
+  const legacy: ScheduledNotificationSnapshot = {
+    identifier: "legacy-old",
+    content: {
+      title: "x",
+      categoryIdentifier: null,
+      data: { kind: "main_alarm", alarmId: "a1", cycleId: "c" },
+    },
+  };
+  const { gateway, scheduled, cancelled } = makeGateway([legacy, foreign("host-1")]);
+
+  const result = await service(store, gateway).reset();
+
+  assert.deepEqual(cancelled, ["legacy-old"]);
+  assert.deepEqual(scheduled.map((item) => item.identifier), ["host-1"]);
+  assert.equal(result.ambiguousCount, 0);
+  assert.equal(store.data.has(ORPHANED_NOTIFICATIONS_KEY), false);
+});
+
+test("the orphan ids are in the durable intent before cancellation, and the journal stays when unconfirmed", async () => {
+  const journal = orphanJournal("legacy-old");
+  const store = makeStore({ ...corrupt, [ORPHANED_NOTIFICATIONS_KEY]: journal });
+  const legacy: ScheduledNotificationSnapshot = {
+    identifier: "legacy-old",
+    content: {
+      title: "x",
+      categoryIdentifier: null,
+      data: { kind: "main_alarm", alarmId: "a1", cycleId: "c" },
+    },
+  };
+  const { gateway } = makeGateway([legacy], {
+    ignoreCancel: new Set(["legacy-old"]),
+  });
+
+  await assert.rejects(
+    () => service(store, gateway).reset(),
+    StorageResetIncompleteError,
+  );
+  assert.deepEqual(
+    JSON.parse(store.data.get(STORAGE_RESET_INTENT_KEY)!).ownedIds,
+    ["legacy-old"],
+  );
+  assert.equal(store.data.get(ORPHANED_NOTIFICATIONS_KEY), journal);
+});
+
+test("a malformed orphan journal is untrusted: legacy ids stay and are reported", async () => {
+  const store = makeStore({
+    ...corrupt,
+    [ORPHANED_NOTIFICATIONS_KEY]: JSON.stringify({ version: 1, ids: ["legacy-old", 5] }),
+  });
+  const legacy: ScheduledNotificationSnapshot = {
+    identifier: "legacy-old",
+    content: {
+      title: "x",
+      categoryIdentifier: null,
+      data: { kind: "main_alarm", alarmId: "a1", cycleId: "c" },
+    },
+  };
+  const { gateway, cancelled } = makeGateway([legacy, ownedMain("m1")]);
+
+  const result = await service(store, gateway).reset();
+
+  assert.deepEqual(cancelled, ["m1"]);
+  assert.equal(result.ambiguousCount, 1);
+  assert.equal(store.data.has(STORAGE_RESET_LIMITATION_KEY), true);
+});
+
+test("a reset also clears the stored planning zone; a missing zone is fine", async () => {
+  const withZone = makeStore({ ...corrupt, [PLANNING_ZONE_KEY]: "{}" });
+  await service(withZone, makeGateway([]).gateway).reset();
+  assert.equal(withZone.data.has(PLANNING_ZONE_KEY), false);
+
+  const without = makeStore({ ...corrupt });
+  await service(without, makeGateway([]).gateway).reset();
+  assert.equal(without.data.has(STORAGE_RESET_INTENT_KEY), false);
+});
+
+test("an unreadable orphan journal does not stop a reset from cancelling marked notifications", async () => {
+  const store = makeStore({ ...corrupt, [ORPHANED_NOTIFICATIONS_KEY]: "{broken" });
+  const { gateway, cancelled } = makeGateway([ownedMain("m1")]);
+
+  await service(store, gateway).reset();
+
+  assert.deepEqual(cancelled, ["m1"]);
+  assert.equal(store.data.has(ORPHANED_NOTIFICATIONS_KEY), false);
 });

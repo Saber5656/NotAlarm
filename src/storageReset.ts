@@ -11,6 +11,11 @@ import {
   readValidLegacyAlarm,
 } from './alarmStorage';
 import {
+  ORPHANED_NOTIFICATIONS_KEY,
+  parseOrphanJournal,
+} from './orphanedNotifications';
+import { PLANNING_ZONE_KEY } from './planningZone';
+import {
   SUPPRESSION_JOURNAL_KEY,
   readValidSuppressionIntents,
   type KeyValueStore,
@@ -32,6 +37,11 @@ const ALARM_STORAGE_KEYS = [
   ACTIVE_ALARM_STORAGE_KEY,
   ALARM_CANCELLATION_JOURNAL_KEY,
   SUPPRESSION_JOURNAL_KEY,
+  // Marked orphans are cancelled with the other owned requests above; the
+  // journal is dropped only with the rest, after cancellation is confirmed.
+  ORPHANED_NOTIFICATIONS_KEY,
+  // Not alarm data, but local state; a missing zone is simply a no-op.
+  PLANNING_ZONE_KEY,
 ] as const;
 
 const MAX_REMEMBERED_IDS = 1_000;
@@ -138,6 +148,18 @@ async function readOwnedIds(store: KeyValueStore): Promise<string[]> {
     []) {
     add(intent.mainAlarmId);
     add(intent.checkInNotificationId);
+  }
+
+  // A valid journal can hold this app's legacy unmarked main, whose id the
+  // stored cycle no longer carries. An untrusted journal contributes nothing.
+  try {
+    for (const id of parseOrphanJournal(
+      await store.getItem(ORPHANED_NOTIFICATIONS_KEY),
+    )) {
+      add(id);
+    }
+  } catch {
+    // Only namespace-owned requests are cancelled; the rest stays ambiguous.
   }
 
   return [...ids];
