@@ -4,7 +4,10 @@ import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 
 import { makeAlarmRepeat } from '../src/alarmSchedule';
+import { RECOVERY_WINDOW_MS } from '../src/missedAlarms';
 import {
+  type MainDeliveryIdentity,
+  markCycleRinging,
   prepareAlarmEnable,
   replaceStoredCycle,
   updateMonitoringCycleStepCount,
@@ -273,5 +276,78 @@ describe('prepareAlarmEnable', () => {
     const due = new Date(2026, 9, 15, 7, 0).getTime();
     assert.equal(prepareAlarmEnable(def, due - 9_999).ok, false);
     assert.equal(prepareAlarmEnable(def, due - 10_000).ok, true);
+  });
+});
+
+describe('markCycleRinging', () => {
+  const identity = { cycleId: 'cycle-1', mainAlarmId: 'main-1' };
+  const NOW_MS = 10_500;
+
+  function mark(
+    stored: StoredAlarm,
+    expected: Partial<MainDeliveryIdentity> = {},
+    nowMs = NOW_MS,
+  ) {
+    return markCycleRinging(
+      [definition(stored)],
+      { ...identity, ...expected },
+      nowMs,
+    );
+  }
+
+  test('rings an armed or step_candidate cycle that matches and is due', () => {
+    for (const phase of ['armed', 'step_candidate'] as const) {
+      const result = mark(cycle(phase, 40), { dueAtMs: 10_000 });
+      assert.equal(result.status, 'ringing');
+      assert.equal(result.alarms[0]?.cycles[0]?.phase, 'ringing');
+      assert.equal(result.alarms[0]?.cycles[0]?.stepCount, 40);
+    }
+  });
+
+  test('never revives a finished cycle from an old or duplicate delivery', () => {
+    for (const phase of ['suppressed', 'dismissed', 'missed'] as const) {
+      const stored = cycle(phase);
+      const result = mark(stored);
+      assert.equal(result.status, 'not_awaiting');
+      assert.deepEqual(result.alarms[0]?.cycles[0], stored);
+    }
+  });
+
+  test('a repeated delivery of a ringing cycle changes nothing', () => {
+    const stored = cycle('ringing');
+    const result = mark(stored);
+    assert.equal(result.status, 'already_ringing');
+    assert.deepEqual(result.alarms[0]?.cycles[0], stored);
+  });
+
+  test('a phase this build does not know is left alone', () => {
+    const stored = { ...cycle('armed'), phase: 'future_phase' } as unknown as StoredAlarm;
+    const result = mark(stored);
+    assert.equal(result.status, 'not_awaiting');
+    assert.deepEqual(result.alarms[0]?.cycles[0], stored);
+  });
+
+  test('requires the exact cycle, main notification and due time', () => {
+    const stored = cycle('armed');
+    assert.equal(mark(stored, { cycleId: 'cycle-2' }).status, 'not_found');
+    assert.equal(mark(stored, { mainAlarmId: 'main-0' }).status, 'mismatch');
+    assert.equal(mark(stored, { dueAtMs: 9_999 }).status, 'mismatch');
+    assert.equal(mark(stored, { alarmId: 'alarm-2' }).status, 'not_found');
+    for (const status of ['mismatch', 'not_found']) {
+      assert.notEqual(status, 'ringing');
+    }
+    assert.equal(mark(stored, { mainAlarmId: 'main-0' }).alarms[0]?.cycles[0]?.phase, 'armed');
+  });
+
+  test('does not ring before the stored deadline', () => {
+    const result = mark(cycle('armed'), {}, 9_999);
+    assert.equal(result.status, 'not_due');
+    assert.equal(result.alarms[0]?.cycles[0]?.phase, 'armed');
+  });
+
+  test('a delivery discovered after the recovery window becomes silent missed', () => {
+    const result = mark(cycle('armed'), {}, 10_000 + RECOVERY_WINDOW_MS + 1);
+    assert.equal(result.status, 'missed');
+    assert.equal(result.alarms[0]?.cycles[0]?.phase, 'missed');
   });
 });

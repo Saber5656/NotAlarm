@@ -516,10 +516,10 @@ test('snooze, stop and recovery run in one suppression-then-storage transaction'
 
 test('a delivered alarm notification is applied to the latest stored state', () => {
   const received = block('addNotificationReceivedListener', 'const lastResponse');
-  assert.match(received, /transactAlarmDefinitions\(/);
-  assert.match(received, /markDeliveredCycleRinging\(/);
+  assert.match(received, /saveCycleRinging\(/);
   assert.match(received, /notification\.request\.identifier/);
-  // No copy of the cycle read earlier is written back.
+  // One transition only: no second ringing path and no earlier copy written back.
+  assert.doesNotMatch(received, /markDeliveredCycleRinging|transactAlarmDefinitions/);
   assert.doesNotMatch(received, /saveStoredAlarm|loadStoredAlarmByCycleId/);
 });
 
@@ -548,4 +548,30 @@ test('Android channel delivery wiring', () => {
     assert.match(read, /mainChannelId: ALARM_CHANNEL_ID/);
     assert.doesNotMatch(read, /CHECK_IN_CHANNEL_ID|requestPermissionsAsync|setNotificationChannelAsync/);
     assert.match(read, /getNotificationChannelAsync/);
+});
+
+test('a delivered main notification rings through the atomic transition only', () => {
+  const listener = block(
+    'addNotificationReceivedListener',
+    'getLastNotificationResponse',
+  );
+  assert.match(listener, /saveCycleRinging\(/);
+  assert.match(listener, /\},\s*Date\.now,\s*\)/);
+  assert.doesNotMatch(listener, /Date\.now\(\)/);
+  assert.match(listener, /notification\.request\.identifier/);
+  assert.doesNotMatch(listener, /loadStoredAlarmByCycleId|saveStoredAlarm/);
+});
+
+test('a failed delivery save reports a pending deletion instead of a generic failure', () => {
+  const listener = block(
+    'addNotificationReceivedListener',
+    'getLastNotificationResponse',
+  );
+  const caught = listener.slice(listener.indexOf('.catch('));
+  assert.match(caught, /reportResetPending\(error\)/);
+  assert.ok(
+    caught.indexOf('reportResetPending(error)') <
+      caught.indexOf('保存できませんでした'),
+  );
+  assert.match(app, /\[handleAwakeResponse, isLoaded, reportResetPending, setCurrentAlarms\]/);
 });
