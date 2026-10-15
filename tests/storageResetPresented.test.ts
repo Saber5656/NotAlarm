@@ -11,6 +11,10 @@ import {
   createStorageResetService,
   type StorageResetGateway,
 } from "../src/storageReset";
+import {
+  LOCAL_DATA_COPY,
+  canCloseSettings,
+} from "../src/localDataDeletion";
 
 function owned(identifier: string): ScheduledNotificationSnapshot {
   return {
@@ -213,4 +217,11 @@ test("a payload-owned id is persisted before cancellation, so a presented copy w
 
   assert.ok(JSON.parse(intentAtCancel!).ownedIds.includes("m1"));
   assert.deepEqual(os.dismissed, ["m1"]);
+});
+
+test("settings cannot be closed while a deletion is in flight, and the failure copy tells how to retry from home", () => {
+  assert.equal(canCloseSettings({ deletionInFlight: true }), false);
+  assert.equal(canCloseSettings({ deletionInFlight: false }), true);
+  assert.match(LOCAL_DATA_COPY.failedHome, /設定/);
+  assert.match(LOCAL_DATA_COPY.failedHome, /データを削除/);
 });

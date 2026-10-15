@@ -50,6 +50,19 @@ export function getLocalDataDeletionAvailability({
   return { allowed: true };
 }
 
+/**
+ * Settings stay open while a deletion runs, so its outcome cannot be missed.
+ * `deletionInFlight` must come from a ref, not render-time state, so back,
+ * backdrop and close read the current value.
+ */
+export function canCloseSettings({
+  deletionInFlight,
+}: {
+  deletionInFlight: boolean;
+}): boolean {
+  return !deletionInFlight;
+}
+
 /** Plain-language summary; the precise list lives in docs/PRIVACY.md. */
 export const LOCAL_DATA_COPY = {
   settingsLabel: '設定とプライバシー',
@@ -80,5 +93,7 @@ export const LOCAL_DATA_COPY = {
     '削除しました。ただし、このアプリのものか判別できない古い形式の通知が残っています。他のアプリの通知の可能性があるため解除していません。判別できない通知は鳴る場合があるので、端末の通知設定を確認してください。',
   failed:
     '削除を最後まで完了できませんでした。一部の通知やデータはすでに消えている場合があります。削除が終わるまで、アラームの追加・変更はできません。もう一度「データを削除」を実行すると続きから再開します。',
+  failedHome:
+    'データの削除を最後まで完了できませんでした。削除が終わるまで、アラームの追加・変更はできません。「設定とプライバシー」を開き、もう一度「データを削除」を実行すると続きから再開します。',
   close: '閉じる',
 } as const;
