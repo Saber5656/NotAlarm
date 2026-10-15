@@ -13,6 +13,12 @@ import {
   SuppressionSaveError,
 } from './alarmOrchestrator';
 import { MIN_ARM_LEAD_MS } from './alarmPolicy';
+import {
+  type ErrorCode,
+  type ErrorNotice,
+  describeErrorCode,
+  noticeFromCode,
+} from './errorCatalog';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 
 /**
@@ -132,7 +138,9 @@ export type PedometerState =
   | 'preparing'
   | 'counting'
   | 'unavailable'
+  | 'availability_unknown'
   | 'denied'
+  | 'permission_unknown'
   | 'error';
 
 export interface StepGuidance {
@@ -141,12 +149,23 @@ export interface StepGuidance {
   /** Status line shown with the bar, or in its place when it is hidden. */
   message: string;
   canOpenSettings: boolean;
+  /** Catalog code of the failure, shown as secondary detail; none while fine. */
+  code?: ErrorCode;
 }
+
+const STEP_FAILURE_CODES = {
+  unavailable: 'SENSOR_UNAVAILABLE',
+  availability_unknown: 'SENSOR_AVAILABILITY_UNKNOWN',
+  denied: 'SENSOR_PERMISSION_DENIED',
+  permission_unknown: 'SENSOR_PERMISSION_UNKNOWN',
+  error: 'SENSOR_READ_FAILED',
+} as const satisfies Record<
+  Exclude<PedometerState, 'preparing' | 'counting'>,
+  ErrorCode
+>;
 
 // Deliberately does not promise the alarm will ring: notification delivery or
 // a failed cancel save can be unknown at the same time.
-const STEPS_UNUSABLE = '歩数による停止を確認できません。予定を確認してください';
-
 export function getStepGuidance(state: PedometerState): StepGuidance {
   switch (state) {
     case 'preparing':
@@ -161,24 +180,16 @@ export function getStepGuidance(state: PedometerState): StepGuidance {
         message: 'アプリ表示中のみ計測',
         canOpenSettings: false,
       };
-    case 'unavailable':
+    default: {
+      const code = STEP_FAILURE_CODES[state];
+      const { message, recovery } = describeErrorCode(code);
       return {
         showProgress: false,
-        message: `この端末では歩数を使えません。${STEPS_UNUSABLE}`,
-        canOpenSettings: false,
+        message: message + recovery,
+        canOpenSettings: state === 'denied',
+        code,
       };
-    case 'denied':
-      return {
-        showProgress: false,
-        message: `歩数の利用が許可されていません。${STEPS_UNUSABLE}`,
-        canOpenSettings: true,
-      };
-    case 'error':
-      return {
-        showProgress: false,
-        message: `歩数を計測できません。${STEPS_UNUSABLE}`,
-        canOpenSettings: false,
-      };
+    }
   }
 }
 
@@ -235,63 +246,56 @@ export const SUPPRESSION_WARNING_COPY: Record<
 /** Turns a thrown suppression error into a persistent warning and a notice. */
 export function classifySuppressionFailure(
   error: unknown,
-): { warning: SuppressionWarningKind; notice: string } | null {
+): { warning: SuppressionWarningKind; notice: ErrorNotice } | null {
   if (error instanceof SuppressionSaveError) {
     return {
       warning: 'save_failed',
-      notice:
-        '起床を確認し通知を取り消しましたが、状態を保存できませんでした。アプリを開き直すと復旧を再試行します。',
+      notice: noticeFromCode('SUPPRESSION_SAVE_FAILED'),
     };
   }
   if (error instanceof SuppressionCancelUnknownError) {
     return {
       warning: 'status_unknown',
-      notice:
-        '通知の取り消し結果を確認できませんでした。この回が鳴るかは未確認です。',
+      notice: noticeFromCode('CANCEL_UNKNOWN'),
     };
   }
   return null;
 }
 
-/** Notice for a stop attempt that left the alarm in place. */
-export function describeAlarmRemains(reason: string): {
-  tone: 'warning' | 'danger';
-  text: string;
-} {
+/** The catalog code for why a stop attempt left the alarm in place. */
+export function getAlarmRemainsCode(reason: string): ErrorCode {
   switch (reason) {
     case 'CANCEL_NOT_VERIFIED':
-      return {
-        tone: 'danger',
-        text: 'アラーム停止を確認できませんでした。鳴る前提で扱ってください。',
-      };
-    case 'ALARM_DUE_OR_PAST':
-      return {
-        tone: 'warning',
-        text: 'アラーム時刻になったため停止しませんでした。アラームは鳴ります。',
-      };
+      return 'CANCEL_NOT_VERIFIED';
+    case 'JOURNAL_NOT_WRITTEN':
+      return 'SUPPRESSION_JOURNAL_NOT_WRITTEN';
     case 'SKIP_BEFORE_WINDOW':
-      return {
-        tone: 'warning',
-        text: 'まだ止められる時間（アラームの60分前から）ではないため、アラームを維持します。',
-      };
+      return 'SKIP_BEFORE_WINDOW';
     case 'WRONG_OCCURRENCE':
     case 'WRONG_CYCLE':
     case 'WRONG_MAIN_ALARM':
-      return {
-        tone: 'warning',
-        text: '確認した回とは別の回になっているため止めませんでした。アラームは維持します。',
-      };
-    case 'JOURNAL_NOT_WRITTEN':
-      return {
-        tone: 'warning',
-        text: '停止の記録を保存できなかったため、通知は取り消していません。アラームは予定どおり鳴ります。',
-      };
+      return 'WRONG_OCCURRENCE';
+    case 'ALARM_DUE_OR_PAST':
+    case 'STEP_AT_OR_AFTER_DUE':
+    case 'CONFIRMATION_AT_OR_AFTER_DUE':
+      return 'DEADLINE_PASSED';
+    case 'INVALID_STEP_SAMPLE':
+      return 'STEP_COUNT_INVALID';
+    case 'INVALID_RESPONSE':
+    case 'INVALID_ALARM_RECORD':
+    case 'INVALID_PROCESSING_TIME':
+    case 'INVALID_STEP_TIME':
+    case 'INVALID_CONFIRMATION_TIME':
+    case 'NOT_EXPLICIT_CONFIRMATION':
+      return 'ACTION_INVALID';
     default:
-      return {
-        tone: 'warning',
-        text: 'この確認は現在のアラーム周期と一致しないため、アラームを維持します。',
-      };
+      return 'ACTION_STALE';
   }
+}
+
+/** Notice for a stop attempt that left the alarm in place. */
+export function describeAlarmRemains(reason: string): ErrorNotice {
+  return noticeFromCode(getAlarmRemainsCode(reason));
 }
 
 const DISTANT_FIRST_RING_MS = 24 * 60 * 60_000;

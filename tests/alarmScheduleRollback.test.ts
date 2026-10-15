@@ -71,7 +71,7 @@ test('rollback attempts all IDs and exposes any notification that may remain', a
     (error) => {
       assert.ok(error instanceof ScheduledNotificationRollbackError);
       assert.deepEqual(error.failures, [
-        { notificationId: 'check-1', message: 'still scheduled' },
+        { notificationId: 'check-1', code: 'NOTIFICATION_CANCEL_UNVERIFIED' },
       ]);
       return true;
     },
@@ -98,4 +98,51 @@ test('a successful persistence operation never cancels its notifications', async
 
   assert.equal(result, 'saved');
   assert.deepEqual(cancelled, []);
+});
+
+test('failed rollback ids are recorded durably and only then reported as recorded', async () => {
+  const recorded: string[][] = [];
+  const failing = {
+    async cancelScheduled(notificationId: string | undefined) {
+      if (notificationId === 'check-1') throw new Error('still scheduled');
+    },
+  };
+  await assert.rejects(
+    withScheduledNotificationRollback(
+      async (track) => {
+        track([cycle()]);
+        throw new Error('storage unavailable');
+      },
+      failing,
+      { add: async (ids) => void recorded.push(ids) },
+    ),
+    (error) => {
+      assert.ok(error instanceof ScheduledNotificationRollbackError);
+      assert.equal(error.recorded, true);
+      assert.equal(error.code, 'ROLLBACK_INCOMPLETE_RECORDED');
+      return true;
+    },
+  );
+  assert.deepEqual(recorded, [['check-1']]);
+
+  await assert.rejects(
+    withScheduledNotificationRollback(
+      async (track) => {
+        track([cycle()]);
+        throw new Error('storage unavailable');
+      },
+      failing,
+      {
+        add: async () => {
+          throw new Error('journal unavailable');
+        },
+      },
+    ),
+    (error) => {
+      assert.ok(error instanceof ScheduledNotificationRollbackError);
+      assert.equal(error.recorded, false, 'a failed record is never claimed');
+      assert.equal(error.code, 'ROLLBACK_INCOMPLETE');
+      return true;
+    },
+  );
 });

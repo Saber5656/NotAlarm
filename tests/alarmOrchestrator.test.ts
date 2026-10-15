@@ -124,7 +124,7 @@ test('a check-in scheduling failure preserves the scheduled main alarm', async (
   assert.deepEqual(calls, ['main', 'check-in']);
   assert.equal(result.mainAlarmId, 'main-id');
   assert.equal(result.checkInNotificationId, undefined);
-  assert.equal(result.checkInWarning, 'check-in unavailable');
+  assert.equal(result.checkInErrorCode, 'CHECKIN_REGISTER_FAILED');
 });
 
 test('a main scheduling failure never attempts to schedule a check-in', async () => {

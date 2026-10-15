@@ -13,6 +13,12 @@ import {
   scheduleAlarmNotificationsFailSafe,
 } from './alarmOrchestrator';
 import { getCheckInAtMs } from './alarmPolicy';
+import {
+  type ErrorCode,
+  type ErrorNotice,
+  describeErrorCode,
+  errorCodeOf,
+} from './errorCatalog';
 import { classifyDueCycle } from './missedAlarms';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 
@@ -34,7 +40,7 @@ export type AlarmScheduleIssue =
       alarmId: string;
       cycleId: string;
       dueAtMs: number;
-      message: string;
+      code: ErrorCode;
     }
   | {
       kind: 'check_in_schedule_failed';
@@ -42,7 +48,7 @@ export type AlarmScheduleIssue =
       cycleId: string;
       dueAtMs: number;
       mainAlarmId: string;
-      message: string;
+      code: ErrorCode;
     };
 
 export type AlarmScheduleIssueSeverity = 'none' | 'warning' | 'danger';
@@ -54,6 +60,29 @@ export function getAlarmScheduleIssueSeverity(
     return 'danger';
   }
   return issues.length > 0 ? 'warning' : 'none';
+}
+
+/**
+ * The notice for what a fill left unfinished, or null when nothing is wrong.
+ * A main failure always wins over a check-in failure, and `lead` states what
+ * did succeed first. The text never says the alarm is reserved while a main
+ * notification is missing or unverified.
+ */
+export function describeScheduleIssues(
+  issues: readonly AlarmScheduleIssue[],
+  lead: string,
+): ErrorNotice | null {
+  const main = issues.find((issue) => issue.kind === 'main_schedule_failed');
+  const first = main ?? issues[0];
+  if (!first) {
+    return null;
+  }
+  const { tone, message, recovery } = describeErrorCode(first.code);
+  return {
+    tone,
+    code: first.code,
+    text: `${lead}${main ? '予約が完了していない回があります。' : ''}${message}${recovery}`,
+  };
 }
 
 /**
@@ -261,14 +290,14 @@ export async function fillAlarmDefinitionSchedule(
       occupiedDueTimes.add(dueAtMs);
       activeCycleCount += 1;
 
-      if (scheduled.checkInWarning) {
+      if (scheduled.checkInErrorCode) {
         issues.push({
           kind: 'check_in_schedule_failed',
           alarmId: definition.id,
           cycleId,
           dueAtMs,
           mainAlarmId: scheduled.mainAlarmId,
-          message: scheduled.checkInWarning,
+          code: scheduled.checkInErrorCode,
         });
       }
     } catch (error) {
@@ -277,10 +306,8 @@ export async function fillAlarmDefinitionSchedule(
         alarmId: definition.id,
         cycleId,
         dueAtMs,
-        message:
-          error instanceof Error
-            ? error.message
-            : 'アラーム通知を予約できませんでした。',
+        // Only a catalog code survives; the thrown message is never kept.
+        code: errorCodeOf(error, 'MAIN_REGISTER_FAILED'),
       });
       break;
     }

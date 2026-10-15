@@ -136,7 +136,7 @@ test('check-in failure keeps the main cycle and reports a typed warning', async 
       cycleId: 'cycle-1',
       dueAtMs: new Date(2026, 7, 20, 7, 0, 0).getTime(),
       mainAlarmId: 'main-1',
-      message: 'check-in unavailable',
+      code: 'CHECKIN_REGISTER_FAILED',
     },
   ]);
   assert.equal(getAlarmScheduleIssueSeverity(result.issues), 'warning');
@@ -181,7 +181,7 @@ test('a later main failure keeps prior cycles but reports danger, not a check-in
       alarmId: 'alarm-1',
       cycleId: 'cycle-2',
       dueAtMs: new Date(2026, 7, 21, 7, 0, 0).getTime(),
-      message: 'main unavailable',
+      code: 'MAIN_REGISTER_FAILED',
     },
   ]);
   assert.equal(getAlarmScheduleIssueSeverity(result.issues), 'danger');
@@ -335,7 +335,7 @@ test('schedule issue keys ignore the regenerated cycle id and due time', () => {
     alarmId: 'alarm-1',
     cycleId: 'cycle-1',
     dueAtMs: 1_000,
-    message: 'failed',
+    code: 'MAIN_REGISTER_FAILED',
   };
   const retried: AlarmScheduleIssue = {
     ...first,
@@ -348,7 +348,7 @@ test('schedule issue keys ignore the regenerated cycle id and due time', () => {
     cycleId: 'cycle-3',
     dueAtMs: 3_000,
     mainAlarmId: 'main-3',
-    message: 'failed',
+    code: 'MAIN_REGISTER_FAILED',
   };
 
   assert.equal(getAlarmScheduleIssueKey(first), getAlarmScheduleIssueKey(retried));
@@ -439,14 +439,14 @@ function issue(
   alarmId: string,
 ): AlarmScheduleIssue {
   return kind === 'main_schedule_failed'
-    ? { kind, alarmId, cycleId: 'cycle', dueAtMs: 1_000, message: 'failed' }
+    ? { kind, alarmId, cycleId: 'cycle', dueAtMs: 1_000, code: 'MAIN_REGISTER_FAILED' }
     : {
         kind,
         alarmId,
         cycleId: 'cycle',
         dueAtMs: 1_000,
         mainAlarmId: 'main',
-        message: 'failed',
+        code: 'MAIN_REGISTER_FAILED',
       };
 }
 

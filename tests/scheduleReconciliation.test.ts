@@ -1154,8 +1154,8 @@ describe('recoverAbortedReconciliation', () => {
 
   test('failed rollback ids are reported, not dropped', async () => {
     const error = new ScheduledNotificationRollbackError(new Error('save'), [
-      { notificationId: 'n-1', message: 'x' },
-      { notificationId: 'n-2', message: 'y' },
+      { notificationId: 'n-1', code: 'NOTIFICATION_CANCEL_UNVERIFIED' },
+      { notificationId: 'n-2', code: 'NOTIFICATION_CANCEL_UNVERIFIED' },
     ]);
     const out = await recoverAbortedReconciliation(error, async () => durable, known);
     assert.deepEqual(out.unrecoveredNotificationIds, ['n-1', 'n-2']);

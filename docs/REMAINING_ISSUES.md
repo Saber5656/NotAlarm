@@ -295,6 +295,20 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 - [ ] キャンセル失敗では `suppressed` と表示しない
 - [ ] retry が重複通知や誤キャンセルを起こさない
 
+### Issue #20 の状況（診断コードと事実ベースの復旧 UI、2026-10-15）
+
+- コード完了（物理端末は未確認）: `src/errorCatalog.ts` に一意な診断コード・事実だけの日本語文言・回復手順・retry 区分・翻訳キーを集約し、通知権限／メイン登録・確認／起床確認のみ／歩数センサー（利用可否・許可・読み取り）／保存（破損・読み出し・保存）／無効な操作・期限／取り消し不明を別コードにした（docs/DESIGN.md 11.5）。メインは予約後に OS の予約一覧で確認し、確認できなければ `MAIN_UNVERIFIED` として保存せず成功表示しない。起床確認だけの失敗はメインを残して警告する。UI は例外の `message` を表示しない。破壊的操作は自動再試行せず、再開するのは既存の耐久ジャーナルのみ。
+- 受け入れ条件との対応: 一意なコード・説明＝カタログと `tests/errorCatalog.test.ts`／メイン未確認で成功表示しない＝`tests/diagnostics.test.ts`／取り消し失敗で suppressed と表示しない＝既存テスト＋`CANCEL_UNKNOWN`／retry が重複・誤キャンセルを起こさない＝取り消しを再実行しないことを回数で検証。「メインは残っている」と「アラーム未設定」の視覚的な区別は、tone（warning／danger）と文言のみ。専用の図記号は追加していない。
+- 制限: `MAIN_UNVERIFIED` のうち一覧の読み取り失敗では通知が実在する場合があり、その孤児通知は ID が不明なため自動では解除しない（文言で別の目覚ましの併用を案内するのみ）。`console` への診断ログ・共有機能は未実装（ALR-011）。
+- 他 Issue のマージ後に統合が必要（本ブランチは該当ツリーを編集していない）:
+  - Issue #13（予約 reconcile）: キュー障害を `AlarmScheduleIssue.code` かカタログの新コードで表す。`kind` が `main_schedule_failed` なら `getAlarmScheduleIssueKey` の重複抑止をコード単位にするか決める。`describeScheduleIssues` を使う。
+  - Issue #15（編集）: 型付きの編集エラーを `AppError` + カタログ追加（追加のみ）にし、`prepareAlarmEnable` と同様に `message` ではなく `code` を返す。
+  - Issue #16（スヌーズ）: 結果型を `AwakeResponseResult` と同じく reason→`getAlarmRemainsCode` に対応づけ、未知の reason は `ACTION_STALE`（維持）に落ちることを確認する。
+  - Issue #30（今回だけ抑止）: 抑止結果の `alarm_remains` 理由を `getAlarmRemainsCode` に追加し、保存失敗は `SUPPRESSION_SAVE_FAILED` を再利用する。
+  - Issue #22（i18n）: `messageKey` / `recoveryKey` を翻訳キーとして使う。`homeStatus.ts` の `STORAGE_*_COPY` / `SUPPRESSION_WARNING_COPY` など、カタログ未移行の固定文言が残る。
+  - ネイティブ移行（#26〜#28）: 新コードはネイティブ API に依存しない。通知・センサーの gateway 実装だけを差し替える。
+- 未実行: 実機での表示（docs/DEVICE_TEST.md 項目17）。
+
 ### Issue #19 の状況（保存データを読めない場合のリセット）
 
 - コード完了: 失敗カードからの2段階確認リセット（本アプリの予約通知だけを ID/payload 検証で解除 → 確認後に保存キー削除、耐久 intent による再試行）。自動テスト・typecheck・iOS export は成功。

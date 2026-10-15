@@ -3,6 +3,7 @@ import type {
   AlarmCancellationCompletion,
   StoredAlarmDefinition,
 } from './alarmStorage';
+import { AppError } from './errorCatalog';
 
 export interface AlarmCancellationGateway {
   cancelScheduled(notificationId: string | undefined): Promise<void>;
@@ -58,7 +59,7 @@ export async function cancelAlarmDefinitionWithCheckpoints({
 }: CancelAlarmDefinitionInput): Promise<StoredAlarmDefinition[]> {
   const target = alarms.find((alarm) => alarm.id === alarmId);
   if (!target) {
-    throw new Error('対象のアラームが見つかりません。');
+    throw new AppError('ALARM_NOT_FOUND');
   }
 
   let next = alarms;

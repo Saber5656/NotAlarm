@@ -100,7 +100,7 @@ describe('assessReconciledState: refill only from a fresh, verified state', () =
 
   test('ids a failed rollback left in the OS queue block the refill until recovered', async () => {
     const error = new ScheduledNotificationRollbackError(new Error('save'), [
-      { notificationId: 'n-1', message: 'x' },
+      { notificationId: 'n-1', code: 'NOTIFICATION_CANCEL_UNVERIFIED' },
     ]);
     const aborted = await recoverAbortedReconciliation(error, async () => reloaded, known);
     const gate = assessReconciledState(

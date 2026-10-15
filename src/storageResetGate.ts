@@ -7,6 +7,7 @@
  * an in-flight task cannot skip it.
  */
 export class StorageResetPendingError extends Error {
+  readonly code = 'STORAGE_RESET_PENDING' as const;
   constructor() {
     super(
       'データの削除が途中で止まっています。設定の「データを削除」をもう一度実行して完了させてください。',

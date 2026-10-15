@@ -7,6 +7,7 @@ import {
 } from './alarmSchedule';
 import type { AlarmScheduleIssue } from './alarmScheduling';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
+import { describeErrorCode, errorCodeOf, type ErrorCode } from './errorCatalog';
 import { findAlarmListLock } from './homeStatus';
 import { stampOccurrence, withTrustedOccurrenceMetadata } from './occurrenceIdentity';
 import { currentPlanningZone } from './planningZone';
@@ -52,12 +53,16 @@ export type AlarmEditErrorCode =
   | 'rollback_incomplete';
 
 export class AlarmEditError extends Error {
+  /**
+   * `code` says which step failed; `catalogCode` is the entry that words it.
+   * The message is the catalog text, never the text of an underlying error.
+   */
   constructor(
     readonly code: AlarmEditErrorCode,
-    message: string,
+    readonly catalogCode: ErrorCode,
     readonly rolledBack: boolean,
   ) {
-    super(message);
+    super(describeErrorCode(catalogCode).message);
     this.name = 'AlarmEditError';
   }
 }
@@ -191,6 +196,22 @@ function replaceDefinition(
   return alarms.map((alarm) => (alarm.id === next.id ? next : alarm));
 }
 
+/**
+ * Wording for a main notification that could not be reserved during an edit.
+ * The edit is rolled back in every case, so each wording says the alarm is
+ * unchanged.
+ */
+function editScheduleFailureCode(error: unknown): ErrorCode {
+  const cause = errorCodeOf(error, 'MAIN_REGISTER_FAILED');
+  if (cause === 'MAIN_RECONCILE_PENDING') {
+    return 'EDIT_RECONCILE_PENDING';
+  }
+  if (cause === 'MAIN_UNVERIFIED') {
+    return 'EDIT_SCHEDULE_UNVERIFIED';
+  }
+  return 'EDIT_SCHEDULE_FAILED';
+}
+
 /** Best-effort write: a stale journal entry is only ever cancelled again. */
 async function tryJournal(run: () => Promise<void>): Promise<void> {
   try {
@@ -238,11 +259,7 @@ async function rollbackReplacement(
       newCycles: [],
     }),
   );
-  throw new AlarmEditError(
-    'rollback_incomplete',
-    '編集を中止しましたが、新しい通知の一部を解除できませんでした。次回起動時に再試行します。端末の通知一覧を確認してください。',
-    false,
-  );
+  throw new AlarmEditError('rollback_incomplete', 'EDIT_ROLLBACK_INCOMPLETE', false);
 }
 
 export async function editAlarmDefinition(
@@ -252,19 +269,13 @@ export async function editAlarmDefinition(
   const startMs = now();
   const target = alarms.find((alarm) => alarm.id === alarmId);
   if (!target) {
-    throw new AlarmEditError(
-      'not_found',
-      '対象のアラームが見つかりません。',
-      true,
-    );
+    throw new AlarmEditError('not_found', 'ALARM_NOT_FOUND', true);
   }
   const lock = findAlarmListLock(alarms, startMs);
   if (lock) {
     throw new AlarmEditError(
       'locked',
-      lock === 'snoozed'
-        ? 'スヌーズ中は編集できません。先にアラームを止めてください。'
-        : 'アラームが鳴っている間は編集できません。',
+      lock === 'snoozed' ? 'EDIT_LOCKED_SNOOZED' : 'EDIT_LOCKED',
       true,
     );
   }
@@ -274,7 +285,7 @@ export async function editAlarmDefinition(
   if (target.cycles.some((cycle) => cycle.snooze?.pending !== undefined)) {
     throw new AlarmEditError(
       'unsettled',
-      'このアラームのスヌーズの処理が完了していません。アプリを開き直してから編集してください。',
+      'EDIT_SNOOZE_UNSETTLED',
       true,
     );
   }
@@ -282,11 +293,7 @@ export async function editAlarmDefinition(
     (entry) => entry.alarmId === alarmId,
   );
   if (hasEarlierEdit || (await input.hasUnsettledWork(alarmId, cycleIds))) {
-    throw new AlarmEditError(
-      'unsettled',
-      'このアラームの前回の処理が完了していません。アプリを開き直してから編集してください。',
-      true,
-    );
+    throw new AlarmEditError('unsettled', 'EDIT_UNSETTLED', true);
   }
   if (
     !Number.isInteger(hour) ||
@@ -297,11 +304,7 @@ export async function editAlarmDefinition(
     minute > 59 ||
     !isAlarmRepeat(repeat)
   ) {
-    throw new AlarmEditError(
-      'invalid_time',
-      '有効なアラーム時刻を選択してください。',
-      true,
-    );
+    throw new AlarmEditError('invalid_time', 'TIME_INVALID', true);
   }
 
   if (!target.enabled) {
@@ -324,13 +327,7 @@ export async function editAlarmDefinition(
   const planningZone = input.planningZone ?? currentPlanningZone();
   const dueTimes = getUpcomingAlarmTimes(startMs, hour, minute, repeat);
   if (dueTimes.length === 0 || dueTimes[0] - startMs < MIN_ARM_LEAD_MS) {
-    throw new AlarmEditError(
-      'invalid_time',
-      repeat.kind === 'today'
-        ? '「今日だけ」は現在より後の時刻を選択してください。'
-        : '次回のアラーム時刻を計算できません。',
-      true,
-    );
+    throw new AlarmEditError('invalid_time', repeat.kind === 'today' ? 'TIME_PAST_TODAY' : 'TIME_UNCOMPUTABLE', true);
   }
 
   // Only the replacement mains are staged before the old schedule is released;
@@ -338,11 +335,7 @@ export async function editAlarmDefinition(
   // The count includes notifications this app does not own.
   const pendingCount = (await gateway.listScheduledIds()).size;
   if (pendingCount + dueTimes.length > MAX_PENDING_NOTIFICATIONS) {
-    throw new AlarmEditError(
-      'capacity',
-      `予約できる通知の数（${MAX_PENDING_NOTIFICATIONS}件）に空きがないため編集できません。このアラームは変更していません。他のアラームを減らしてからやり直してください。`,
-      true,
-    );
+    throw new AlarmEditError('capacity', 'EDIT_CAPACITY', true);
   }
 
   // Ids are chosen here so they can be journaled before the OS creates them.
@@ -370,11 +363,7 @@ export async function editAlarmDefinition(
   try {
     await journal.save(entry);
   } catch {
-    throw new AlarmEditError(
-      'journal_failed',
-      '編集の記録を保存できませんでした。このアラームは変更していません。',
-      true,
-    );
+    throw new AlarmEditError('journal_failed', 'STORAGE_JOURNAL_SAVE_FAILED', true);
   }
 
   const newIds: string[] = [];
@@ -383,14 +372,10 @@ export async function editAlarmDefinition(
     throw error;
   };
   const journalFailed = () =>
-    new AlarmEditError(
-      'journal_failed',
-      '編集の記録を保存できませんでした。このアラームは変更していません。',
-      true,
-    );
+    new AlarmEditError('journal_failed', 'STORAGE_JOURNAL_SAVE_FAILED', true);
 
   const mainIds: string[] = [];
-  let mainFailure: string | undefined;
+  let mainFailure: ErrorCode | undefined;
   for (const planned of plan) {
     newIds.push(planned.mainId);
     entry = { ...entry, newNotificationIds: [...newIds] };
@@ -415,20 +400,13 @@ export async function editAlarmDefinition(
       }
       mainIds.push(id);
     } catch (error) {
-      mainFailure =
-        error instanceof Error
-          ? error.message
-          : 'メインのアラーム通知を予約できませんでした。';
+      mainFailure = editScheduleFailureCode(error);
       break;
     }
   }
   if (mainFailure !== undefined) {
     return abort(
-      new AlarmEditError(
-        'schedule_failed',
-        `${mainFailure} このアラームは変更していません。`,
-        true,
-      ),
+      new AlarmEditError('schedule_failed', mainFailure, true),
     );
   }
 
@@ -437,20 +415,12 @@ export async function editAlarmDefinition(
   const afterScheduling = now();
   if (target.cycles.some((cycle) => isDueLive(cycle, afterScheduling))) {
     return abort(
-      new AlarmEditError(
-        'deadline',
-        '編集中にアラームの時刻になったため、編集を中止しました。このアラームは変更していません。',
-        true,
-      ),
+      new AlarmEditError('deadline', 'EDIT_DEADLINE_PASSED', true),
     );
   }
   if (plan[0].dueAtMs - afterScheduling < MIN_ARM_LEAD_MS) {
     return abort(
-      new AlarmEditError(
-        'invalid_time',
-        '編集中に次回のアラーム時刻が近づきすぎたため、編集を中止しました。このアラームは変更していません。',
-        true,
-      ),
+      new AlarmEditError('invalid_time', 'EDIT_TIME_TOO_CLOSE', true),
     );
   }
 
@@ -490,11 +460,7 @@ export async function editAlarmDefinition(
     if (!ownerCancelled && isDueLive(item.cycle, now())) {
       if (!released) {
         return abort(
-          new AlarmEditError(
-            'deadline',
-            '編集中にアラームの時刻になったため、編集を中止しました。このアラームは変更していません。',
-            true,
-          ),
+          new AlarmEditError('deadline', 'EDIT_DEADLINE_PASSED', true),
         );
       }
       // Its time has come: leave the notification and the cycle alone. Its ids
@@ -509,11 +475,7 @@ export async function editAlarmDefinition(
         if (!released) {
           // Nothing old has been touched yet: undo the replacement.
           return abort(
-            new AlarmEditError(
-              'cancel_failed',
-              '古い通知の解除を確認できなかったため編集を中止しました。このアラームは変更していません。',
-              true,
-            ),
+            new AlarmEditError('cancel_failed', 'EDIT_CANCEL_UNVERIFIED', true),
           );
         }
         // The replacement is fully scheduled: finish forward and keep the
@@ -552,7 +514,7 @@ export async function editAlarmDefinition(
   const finalCycles: StoredAlarm[] = [];
   for (const [index, planned] of plan.entries()) {
     const base = newCycles[index];
-    const fail = async (message: string): Promise<void> => {
+    const fail = async (code: ErrorCode): Promise<void> => {
       await cancelAll([planned.checkInId], gateway);
       issues.push({
         kind: 'check_in_schedule_failed',
@@ -560,18 +522,16 @@ export async function editAlarmDefinition(
         cycleId: planned.cycleId,
         dueAtMs: planned.dueAtMs,
         mainAlarmId: base.mainAlarmId,
-        message,
+        code,
       });
       finalCycles.push(withoutCheckIn(base));
     };
     if (pending === null) {
-      await fail(
-        '通知の空き数を確認できないため、起床確認通知の予約を見送りました。',
-      );
+      await fail('CHECKIN_REGISTER_FAILED');
       continue;
     }
     if (pending + 1 > MAX_PENDING_NOTIFICATIONS) {
-      await fail('通知の空きが足りないため、起床確認通知を予約できませんでした。');
+      await fail('CHECKIN_REGISTER_FAILED');
       continue;
     }
     // Earlier steps took time: never schedule a check-in in the past.
@@ -594,11 +554,7 @@ export async function editAlarmDefinition(
       pending += 1;
       finalCycles.push({ ...base, checkInNotificationId: checkInId });
     } catch (error) {
-      await fail(
-        error instanceof Error
-          ? error.message
-          : '起床確認通知を予約できませんでした。',
-      );
+      await fail(errorCodeOf(error, 'CHECKIN_REGISTER_FAILED'));
     }
   }
 
@@ -639,11 +595,7 @@ export async function editAlarmDefinition(
     }
   }
   if (saveError !== undefined) {
-    throw new AlarmEditError(
-      'save_failed',
-      '新しい通知は予約しましたが、アラーム設定を保存できませんでした。次回起動時に編集を完了します。',
-      false,
-    );
+    throw new AlarmEditError('save_failed', 'EDIT_SAVE_FAILED', false);
   }
   if (!cleanupPending) {
     await tryJournal(() => journal.remove(alarmId));
@@ -697,11 +649,7 @@ export async function recoverPendingAlarmEdit(input: {
       await tryJournal(() =>
         journal.save({ ...entry, newNotificationIds: failed }),
       );
-      throw new AlarmEditError(
-        'rollback_incomplete',
-        '前回の編集で予約した通知の一部を解除できませんでした。',
-        false,
-      );
+      throw new AlarmEditError('rollback_incomplete', 'EDIT_ROLLBACK_INCOMPLETE', false);
     }
     await journal.remove(entry.alarmId);
     return input.alarms;
@@ -807,11 +755,7 @@ export async function recoverPendingAlarmEdit(input: {
     await tryJournal(() =>
       journal.save({ ...entry, oldNotificationIds: failed }),
     );
-    throw new AlarmEditError(
-      'cancel_failed',
-      '前回の編集で古い通知の一部を解除できませんでした。',
-      false,
-    );
+    throw new AlarmEditError('cancel_failed', 'EDIT_CLEANUP_INCOMPLETE', false);
   }
   await journal.remove(entry.alarmId);
   return alarms;

@@ -392,7 +392,8 @@ describe('classifySuppressionFailure', () => {
       new SuppressionSaveError('c1', new Error('disk')),
     );
     assert.equal(result?.warning, 'save_failed');
-    assert.doesNotMatch(result?.notice ?? '', /有効/);
+    assert.doesNotMatch(result?.notice.text ?? '', /有効/);
+    assert.equal(result?.notice.code, 'SUPPRESSION_SAVE_FAILED');
   });
 
   test('maps an unknown cancellation to the unverified warning', () => {
@@ -400,6 +401,7 @@ describe('classifySuppressionFailure', () => {
       new SuppressionCancelUnknownError('c1', new Error('x')),
     );
     assert.equal(result?.warning, 'status_unknown');
+    assert.equal(result?.notice.code, 'CANCEL_UNKNOWN');
   });
 
   test('other errors are not suppression failures', () => {

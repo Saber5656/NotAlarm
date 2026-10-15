@@ -154,13 +154,16 @@ test('startup treats an unfinished reset as a recovery state before any refill',
     'await storageReset.hasPendingReset()',
     'await recoverPendingAlarmCancellations()',
   );
-  assert.match(startup, /throw new Error/);
+  assert.match(startup, /throw new AppError\('STORAGE_RESET_PENDING'\)/);
 });
 
 test('the reset gate is installed at the storage layer and completion advances the epoch', () => {
   assert.match(app, /installStorageResetGate\(\(\) => storageReset\.hasPendingReset\(\)\)/);
   const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
-  assert.match(reset, /onCompleted: \(\) => \{\s*advanceStorageEpoch\(\);/);
+  assert.match(
+    reset,
+    /onCompleted: \(\) => \{\s*advanceStorageEpoch\(\);\s*snoozeService\.forgetUnsettled\(\);\s*\/\/[^\n]*\s*schedulingGateway\.clearUnresolved\(\);/,
+  );
 });
 
 test('results read before a finished deletion never reach the screen', () => {
@@ -177,14 +180,17 @@ test('a finished deletion clears warning memory owned by the deleted alarms', ()
 
 test('a refused stop stops sound and the banner itself and never rewrites the alarm list', () => {
   const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
-  const refused = block('if (isStorageResetPendingError(error)) {\n          // Fail-safe', '} else {');
+  const refused = block(
+    'if (isStorageResetPendingError(error) && !stoppedCycle) {',
+    '} else if (stoppedCycle) {',
+  );
   assert.ok(
     refused.indexOf('stopForegroundAlarmSound()') <
       refused.indexOf('setDeletionPending(true)'),
   );
   assert.match(refused, /dismissDeliveredNotification\(cycle\.mainAlarmId\)/);
   assert.doesNotMatch(refused, /setCurrentAlarms/);
-  assert.match(refused, /音と通知は止めましたが/);
+  assert.match(refused, /noticeFromCode\('STOP_RESET_PENDING'\)/);
   // The stop record itself is only written by the locked snooze service.
   assert.doesNotMatch(stop, /saveStoredAlarm\(/);
 });
@@ -499,7 +505,7 @@ test('stop and snooze go through the shared snooze service, never raw cancellati
   // Success is announced only on the snoozed result.
   assert.ok(
     snooze.indexOf("result.status === 'snoozed'") <
-      snooze.indexOf('スヌーズしました'),
+      snooze.indexOf('presentSnoozed('),
   );
   // A refused snooze keeps the alarm ringing and surfaces the deletion state.
   assert.match(snooze, /isStorageResetPendingError\(error\)/);
@@ -598,4 +604,59 @@ test('every refill path hands the stored origin zone to the fill', () => {
   assert.ok(withOrigin >= 4, `origin zone read ${withOrigin} times`);
   const refill = block('async function refillEnabledSchedulesOnce', 'interface ScreenFrameProps');
   assert.match(refill, /unverifiedAlarmIds/);
+});
+
+test('unverified main ids are journaled, block retries, and reconcile/reset resolve them', () => {
+  assert.match(app, /withMainVerification\([\s\S]*?orphans: orphanStore/);
+  assert.match(app, /scheduleMain: schedulingGateway\.scheduleMainForReconcile/);
+  assert.match(app, /await schedulingGateway\.flushUnresolved\(\)/);
+});
+
+test('edit failures and rollbacks go through the catalog and the durable record', () => {
+  const perform = block('const performEditAlarm = useCallback', 'const openEditComposer');
+  assert.doesNotMatch(perform, /error\.message|error instanceof Error/);
+  assert.match(perform, /describeError\(error\)/);
+  assert.match(perform, /noticeFromCode\('EDIT_CLEANUP_PENDING'\)/);
+  // Every add/enable/refill rollback records ids it could not cancel.
+  const callers = app.match(/withScheduledNotificationRollback\(/g)?.length ?? 0;
+  assert.equal(
+    app.match(/cancellationGateway,\s+orphanStore,\s+schedulingGateway,\s+\)/g)?.length,
+    callers,
+  );
+});
+
+test('cancellation failure copy is shown only when the resume record exists', () => {
+  assert.match(app, /async function cancellationFailureNotice/);
+  assert.doesNotMatch(app, /setNotice\(noticeFromCode\('DELETE_CANCEL_INCOMPLETE'\)\)/);
+  assert.doesNotMatch(app, /:\s*noticeFromCode\('DISABLE_CANCEL_INCOMPLETE'\)/);
+});
+
+test('a saved stop is shown before the refill, and a refill failure is not a failed stop', () => {
+  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  assert.match(stop, /presentStopped\(result,/);
+  assert.match(stop, /getSnoozeCopy\.stopFailureCode\(result\.reason\)/);
+  assert.match(stop, /noticeFromCode\('STOP_FOLLOWUP_FAILED'\)/);
+  assert.doesNotMatch(stop, /STOP_CANCEL_FAILED|error\.message|refillError/);
+});
+
+test('snooze outcomes use catalog codes and a saved snooze survives a failed read-back', () => {
+  const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
+  assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\)\)/);
+  assert.match(snooze, /presentSnoozeRejected\(result, outcomeEffects\(\)\)/);
+  assert.match(snooze, /noticeFromCode\('SNOOZE_RESET_PENDING'\)/);
+  assert.doesNotMatch(snooze, /error\.message|端末の通知を確認|loadAlarmDefinitions/);
+});
+
+test('reset also cancels every id only memory knows, and recovery maps its outcome by code', () => {
+  const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
+  assert.match(reset, /snoozeService\.unsettledIds\(\)/);
+  assert.match(reset, /schedulingGateway\.unresolvedMainIds\(\)/);
+  assert.match(app, /getSnoozeCopy\.recoveryCode\(outcome\)/);
+});
+
+test('the reconcile pass releases its main ids at the checkpoint and abandons the rest when it ends', () => {
+  assert.match(app, /releaseMain: \(ids\) => schedulingGateway\.releaseProvisional\(ids\)/);
+  const pass = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  assert.match(pass, /gateway: passGateway/);
+  assert.match(pass, /finally \{\s*schedulingGateway\.abandonProvisional\(registered\);/);
 });
