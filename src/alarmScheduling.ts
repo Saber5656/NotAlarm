@@ -4,6 +4,7 @@ import {
   scheduleAlarmNotificationsFailSafe,
 } from './alarmOrchestrator';
 import { getCheckInAtMs } from './alarmPolicy';
+import { classifyDueCycle } from './missedAlarms';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 
 export interface AlarmScheduleFillResult {
@@ -294,12 +295,7 @@ function normalizeCycles(
         (cycle.phase !== 'suppressed' && cycle.phase !== 'dismissed') ||
         cycle.dueAtMs >= nowMs,
     )
-    .map((cycle) =>
-      (cycle.phase === 'armed' || cycle.phase === 'step_candidate') &&
-      cycle.dueAtMs <= nowMs
-        ? { ...cycle, phase: 'ringing' as const }
-        : cycle,
-    );
+    .map((cycle) => classifyDueCycle(cycle, nowMs, 'resume'));
 }
 
 function defaultCycleId(): string {

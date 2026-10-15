@@ -65,6 +65,8 @@ import {
   recordRefillAttempt,
   type RefillAttempt,
 } from './src/alarmScheduling';
+import { acknowledgeMissedAlarms } from './src/missedAcknowledgement';
+import { acknowledgeMissedCycles, getMissedCycles } from './src/missedAlarms';
 import {
   ScheduledNotificationRollbackError,
   withScheduledNotificationRollback,
@@ -656,7 +658,7 @@ function AlarmApp() {
   }, []);
 
   const refreshAfterCycleCompletion = useCallback(
-    async (completedCycle: StoredAlarm): Promise<void> => {
+    async (completedCycle: StoredAlarm): Promise<'none' | 'warning' | 'danger'> => {
       const now = Date.now();
       const issues: AlarmScheduleIssue[] = [];
       const attemptedAlarmIds = [completedCycle.alarmId];
@@ -714,6 +716,7 @@ function AlarmApp() {
               : '次回分の起床確認通知を一部予約できませんでした。',
         });
       }
+      return severity === 'none' ? 'none' : severity === 'danger' ? 'danger' : 'warning';
     },
     [recordRefill, setCurrentAlarms],
   );
@@ -757,7 +760,7 @@ function AlarmApp() {
             reconciled.state === 'ok' ? null : reconciled.state,
           );
         }
-        let restored = await markDueCyclesRinging(Date.now());
+        let restored = await markDueCyclesRinging(Date.now(), 'launch');
 
         if (
           Platform.OS !== 'web' &&
@@ -813,12 +816,12 @@ function AlarmApp() {
         setSuppressionWarning(
           reconciled.state === 'ok' ? null : reconciled.state,
         );
-        if (reconciled.recovered > 0) {
-          try {
-            setCurrentAlarms(await loadAlarmDefinitions());
-          } catch {
-            // Keep the in-memory list; the next load will show the result.
-          }
+        try {
+          // Cycles that came due while the app was away are classified here,
+          // before the 1-second tick could treat them as freshly due.
+          setCurrentAlarms(await markDueCyclesRinging(Date.now(), 'resume'));
+        } catch {
+          // Keep the in-memory list; the next load will show the result.
         }
         if (alarmsRef.current.some((alarm) => alarm.enabled)) {
           const next = await refillEnabledSchedules(
@@ -887,6 +890,7 @@ function AlarmApp() {
   }, [keepScreenAwake]);
 
   const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
+  const missedCycles = useMemo(() => getMissedCycles(alarms), [alarms]);
   const monitoringCycle = useMemo(
     () => (ringingCycle ? null : getNextMonitoringCycle(alarms, nowMs)),
     [alarms, nowMs, ringingCycle],
@@ -1691,6 +1695,55 @@ function AlarmApp() {
       ],
     );
   }, [isBusy, loadFailed, performStorageReset]);
+  const acknowledgeMissed = useCallback(async () => {
+    if (isBusy || missedCycles.length === 0) {
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const result = await acknowledgeMissedAlarms(missedCycles, {
+        persist: async (cycleIds) => {
+          let changed: StoredAlarm[] = [];
+          const next = await mutateAlarmDefinitions((current) => {
+            const wanted = new Set(cycleIds);
+            changed = getMissedCycles(current).filter((cycle) =>
+              wanted.has(cycle.cycleId),
+            );
+            return acknowledgeMissedCycles(current, cycleIds);
+          });
+          setCurrentAlarms(next);
+          return changed;
+        },
+        // Only each cycle's own delivered notification is dismissed.
+        dismissDelivered: dismissDeliveredNotification,
+        refill: refreshAfterCycleCompletion,
+      });
+      if (result.status === 'persist_failed') {
+        setNotice({
+          tone: 'danger',
+          text: '確認済みにできませんでした。もう一度お試しください。',
+        });
+      } else if (result.status === 'refill_failed') {
+        setNotice({
+          tone: 'danger',
+          text: '確認済みにしましたが、次回分のアラームを予約できませんでした。アラーム状態を確認してください。',
+        });
+      } else if (
+        result.status === 'acknowledged' &&
+        result.refillSeverity === 'none'
+      ) {
+        setNotice({ tone: 'neutral', text: '見逃したアラームを確認済みにしました。' });
+      }
+    } catch {
+      setNotice({
+        tone: 'danger',
+        text: '確認済みにできませんでした。もう一度お試しください。',
+      });
+    } finally {
+      setIsBusy(false);
+    }
+  }, [isBusy, missedCycles, refreshAfterCycleCompletion, setCurrentAlarms]);
 
   const stopRinging = useCallback(async () => {
     if (!ringingCycle || isBusy) {
@@ -1923,6 +1976,9 @@ function AlarmApp() {
                 new Date(ringingCycle.dueAtMs).getMinutes(),
               )}
             </Text>
+            <Text style={styles.ringingDate}>
+              {formatNextDate(ringingCycle.dueAtMs)}
+            </Text>
             <Text style={styles.ringingTitle}>起きる時間です</Text>
             <Pressable
               accessibilityHint={RINGING_STOP_HINT}
@@ -1942,6 +1998,39 @@ function AlarmApp() {
               ]}
             >
               <Text style={styles.stopButtonText}>{RINGING_STOP_LABEL}</Text>
+            </Pressable>
+          </View>
+        ) : missedCycles.length > 0 ? (
+          <View style={styles.ringingCard} testID="missed-alarms">
+            <Text accessibilityRole="header" style={styles.ringingLabel}>
+              見逃したアラーム
+            </Text>
+            <Text style={styles.ringingTitle}>
+              音は鳴らしません。起きたかどうかは判断していません。
+            </Text>
+            {missedCycles.map((cycle) => (
+              <Text key={cycle.cycleId} style={styles.missedItem}>
+                {formatNextDate(cycle.dueAtMs)}{' '}
+                {formatAlarmTime(
+                  new Date(cycle.dueAtMs).getHours(),
+                  new Date(cycle.dueAtMs).getMinutes(),
+                )}
+              </Text>
+            ))}
+            <Pressable
+              accessibilityHint="見逃したアラームをすべて確認済みにします。繰り返しの今後の予定は残ります。"
+              accessibilityLabel={`見逃した${missedCycles.length}件をすべて確認済みにする`}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: isBusy }}
+              disabled={isBusy}
+              hitSlop={4}
+              onPress={() => void acknowledgeMissed()}
+              style={({ pressed }) => [
+                styles.stopButton,
+                (isBusy || pressed) && styles.buttonDimmed,
+              ]}
+            >
+              <Text style={styles.stopButtonText}>すべて確認済みにする</Text>
             </Pressable>
           </View>
         ) : loadFailed ? (
@@ -2634,6 +2723,17 @@ const styles = StyleSheet.create({
     fontSize: 41,
     fontWeight: '900',
     letterSpacing: -1.5,
+  },
+  ringingDate: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  missedItem: {
+    marginTop: 4,
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
   },
   ringingTitle: {
     marginTop: 2,
