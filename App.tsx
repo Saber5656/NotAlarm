@@ -134,6 +134,7 @@ import {
   cancelScheduledNotificationById,
   listScheduledNotificationSnapshots,
   listScheduledNotificationIds,
+  readScheduledNotificationQueue,
   dismissDeliveredNotification,
   installForegroundNotificationHandler,
   prepareNotifications,
@@ -178,11 +179,33 @@ import {
 import { createStorageResetService } from './src/storageReset';
 import {
   advanceStorageEpoch,
+  assertNoPendingReset,
   installStorageResetGate,
   isStaleStorageResult,
   isStorageResetPendingError,
 } from './src/storageResetGate';
 import { suppressionJournal } from './src/suppressionJournalStorage';
+import {
+  currentPlanningZone,
+  didPlanningZoneChange,
+  loadPlanningZone,
+  savePlanningZone,
+} from './src/planningZone';
+import { createOrphanStore } from './src/orphanedNotifications';
+import {
+  assessReconciledState,
+  isObsoleteReconcileResult,
+  type ReconciledState,
+  type ScheduleReconcileResult,
+} from './src/reconcileGate';
+import {
+  reconcileAlarmSchedules,
+  recoverAbortedReconciliation,
+  summarizeReconciliation,
+  type AlarmQueueStatus,
+  type ReconcileGateway,
+  type ReconcileOutcome,
+} from './src/scheduleReconciliation';
 import {
   describeScheduleCoverage,
   getScheduleCoverageLine,
@@ -320,6 +343,139 @@ function reconcileSuppressions(): Promise<SuppressionReconcileResult> {
     reconcileInFlight = null;
   });
   reconcileInFlight = run;
+  return run;
+}
+
+const orphanStore = createOrphanStore(AsyncStorage);
+
+const reconcileGateway: ReconcileGateway = {
+  ...schedulingGateway,
+  cancelScheduled: cancelNotificationIfPresent,
+};
+
+/**
+ * Compares the stored future schedule with the OS queue and repairs it.
+ * Lock order is fixed: the suppression lock (a stop in progress), then the
+ * storage queue (user cancels and refills), and only inside that turn the OS
+ * queue is read, so the snapshot cannot go stale against a cancellation.
+ * Alarms with an unfinished cancel or stop are excluded and never recreated.
+ */
+async function reconcileScheduleWithQueueOnce(
+  knownAlarms: readonly StoredAlarmDefinition[],
+): Promise<ScheduleReconcileResult | null> {
+  if (Platform.OS === 'web') {
+    return null;
+  }
+  const zone = currentPlanningZone();
+  try {
+    return await suppressionJournal.exclusive(async () => {
+      if (await storageReset.hasPendingReset()) {
+        // An unfinished reset owns the notifications: touch nothing.
+        return {
+          alarms: null,
+          statuses: {},
+          repaired: 0,
+          replanned: 0,
+          zoneChanged: false,
+          unrecoveredNotificationIds: [],
+          aborted: false,
+          queueVerified: false,
+          orphansUnreadable: false,
+        };
+      }
+      let canSchedule = false;
+      try {
+        canSchedule = await prepareNotificationsIfGranted();
+      } catch {
+        canSchedule = false;
+      }
+      const zoneChanged = didPlanningZoneChange(
+        await loadPlanningZone(AsyncStorage),
+        zone,
+      );
+      let outcome: ReconcileOutcome | null = null;
+      const alarms = await transactAlarmDefinitions(
+        async (current, checkpoint) => {
+          await assertNoPendingReset();
+          const excludedAlarmIds = new Set(
+            (await loadPendingAlarmCancellations()).map(
+              (pending) => pending.alarmId,
+            ),
+          );
+          for (const pending of await suppressionJournal.load()) {
+            excludedAlarmIds.add(pending.alarmId);
+          }
+          outcome = await reconcileAlarmSchedules({
+            alarms: current,
+            excludedAlarmIds,
+            readQueue: readScheduledNotificationQueue,
+            orphans: orphanStore,
+            canSchedule,
+            nowMs: Date.now,
+            gateway: reconcileGateway,
+            checkpoint,
+          });
+          return outcome.alarms;
+        },
+      );
+      const done = outcome as ReconcileOutcome | null;
+      const statuses = done?.statuses ?? {};
+      const settled = Object.values(statuses).every(
+        (status) => status === 'verified' || status === 'repaired',
+      );
+      if (settled && !isStaleStorageResult(alarms)) {
+        // Remembered only once the schedule matches this zone.
+        await savePlanningZone(AsyncStorage, zone).catch(() => undefined);
+      }
+      return {
+        alarms,
+        statuses,
+        repaired: done?.repaired ?? 0,
+        replanned: done?.replanned ?? 0,
+        zoneChanged,
+        unrecoveredNotificationIds: [],
+        aborted: false,
+        queueVerified: done?.queueKnown ?? false,
+        orphansUnreadable: done?.orphansUnreadable ?? false,
+      };
+    });
+  } catch (error) {
+    // A journal, storage or save failed part way. Earlier checkpoints are on
+    // disk, so the durable state is read back instead of trusting the caller's
+    // copy; ids a failed rollback could not cancel are reported and tracked.
+    const aborted = await recoverAbortedReconciliation(
+      error,
+      loadAlarmDefinitions,
+      knownAlarms,
+    );
+    return {
+      alarms: aborted.alarms,
+      statuses: aborted.statuses,
+      repaired: 0,
+      replanned: 0,
+      zoneChanged: false,
+      unrecoveredNotificationIds: aborted.unrecoveredNotificationIds,
+      aborted: true,
+      queueVerified: false,
+      orphansUnreadable: false,
+    };
+  }
+}
+
+let scheduleReconcileInFlight: Promise<ScheduleReconcileResult | null> | null =
+  null;
+
+/** Concurrent callers (startup, foreground, repeated taps) share one run. */
+function reconcileScheduleWithQueue(
+  knownAlarms: readonly StoredAlarmDefinition[],
+): Promise<ScheduleReconcileResult | null> {
+  if (scheduleReconcileInFlight) {
+    return scheduleReconcileInFlight;
+  }
+  const run = reconcileScheduleWithQueueOnce(knownAlarms).finally(() => {
+    scheduleReconcileInFlight = null;
+  });
+  scheduleReconcileInFlight = run;
   return run;
 }
 
@@ -587,6 +743,11 @@ function AlarmApp() {
   const [refillFailedAlarmIds, setRefillFailedAlarmIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
+  // What the latest comparison with the OS queue found, per alarm.
+  const [queueStatuses, setQueueStatuses] = useState<
+    Record<string, AlarmQueueStatus>
+  >({});
+  const reportedQueueProblemsRef = useRef<ReadonlySet<string>>(new Set());
   // Saved alarms could not be read: this is not the same as having none.
   const [loadFailed, setLoadFailed] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -704,6 +865,45 @@ function AlarmApp() {
     });
   }, []);
 
+  const reconcileWithQueue = useCallback(
+    async (
+      knownAlarms: StoredAlarmDefinition[],
+      options: { cancellationPending?: boolean } = {},
+    ): Promise<ReconciledState> => {
+      const result = await reconcileScheduleWithQueue(knownAlarms);
+      const state = assessReconciledState(result, knownAlarms, options);
+      if (!result || isObsoleteReconcileResult(result)) {
+        return state;
+      }
+      setQueueStatuses(result.statuses);
+      const summary = summarizeReconciliation({
+        ...result,
+        unrecoveredNotificationIds: result.unrecoveredNotificationIds,
+      });
+      const reconciled = reconcileReportedScheduleProblems(
+        reportedQueueProblemsRef.current,
+        summary.problemKeys,
+      );
+      reportedQueueProblemsRef.current = reconciled.reported;
+      const isRepairNotice = summary.problemKeys.length === 0;
+      if (summary.notice && (isRepairNotice || reconciled.hasNew)) {
+        setNotice(summary.notice);
+      }
+      return state;
+    },
+    [],
+  );
+
+  const clearQueueStatus = useCallback((alarmId: string) => {
+    setQueueStatuses((previous) => {
+      if (!(alarmId in previous)) {
+        return previous;
+      }
+      const { [alarmId]: _cleared, ...rest } = previous;
+      return rest;
+    });
+  }, []);
+
   const refreshAfterCycleCompletion = useCallback(
     async (completedCycle: StoredAlarm): Promise<'none' | 'warning' | 'danger'> => {
       const now = Date.now();
@@ -809,12 +1009,24 @@ function AlarmApp() {
         }
         let restored = await markDueCyclesRinging(Date.now(), 'launch');
 
+        // A refill adds reservations without reading the OS queue, so it only
+        // follows a fresh, verified reconciliation; otherwise it waits for the
+        // next launch or return to the app.
+        let safeToRefill = !cancellationRecoveryFailed;
+        if (Platform.OS !== 'web' && !cancellationRecoveryFailed) {
+          // Compare with the OS queue before any refill adds new reservations.
+          const state = await reconcileWithQueue(restored);
+          if (state.freshness === 'fresh') {
+            restored = state.alarms;
+          }
+          safeToRefill = state.safeToRefill;
+        }
+
         if (
           Platform.OS !== 'web' &&
           restored.some((definition) => definition.enabled)
         ) {
-          if (cancellationRecoveryFailed) {
-            // Startup does not refill until the stop is finished.
+          if (!safeToRefill) {
             recordRefill(getSkippedRefillAttempt(restored));
           } else {
             restored =
@@ -842,7 +1054,7 @@ function AlarmApp() {
     return () => {
       mounted = false;
     };
-  }, [recordRefill, refillEnabledSchedules, setCurrentAlarms]);
+  }, [reconcileWithQueue, recordRefill, refillEnabledSchedules, setCurrentAlarms]);
 
   useEffect(() => {
     if (Platform.OS === 'web' || !isLoaded) {
@@ -859,6 +1071,14 @@ function AlarmApp() {
       // Occurrences stopped from a notification are only replaced while the
       // app runs, so returning to it tops the schedule back up.
       void (async () => {
+        // An unfinished reset is checked before any recovery or refill.
+        try {
+          if (await storageReset.hasPendingReset()) {
+            return;
+          }
+        } catch {
+          return;
+        }
         const reconciled = await reconcileSuppressions();
         setSuppressionWarning(
           reconciled.state === 'ok' ? null : reconciled.state,
@@ -871,12 +1091,20 @@ function AlarmApp() {
           // Keep the in-memory list; the next load will show the result.
         }
         if (alarmsRef.current.some((alarm) => alarm.enabled)) {
-          const next = await refillEnabledSchedules(
-            'foreground',
-            alarmsRef.current,
-          );
-          if (next) {
-            setCurrentAlarms(next);
+          const state = await reconcileWithQueue(alarmsRef.current);
+          if (state.freshness === 'fresh') {
+            setCurrentAlarms(state.alarms);
+          }
+          if (state.safeToRefill) {
+            const next = await refillEnabledSchedules(
+              'foreground',
+              state.alarms,
+            );
+            if (next) {
+              setCurrentAlarms(next);
+            }
+          } else {
+            recordRefill(getSkippedRefillAttempt(state.alarms));
           }
         }
       })();
@@ -884,6 +1112,8 @@ function AlarmApp() {
     return () => subscription.remove();
   }, [
     isLoaded,
+    reconcileWithQueue,
+    recordRefill,
     refillEnabledSchedules,
     refreshNotificationDelivery,
     setCurrentAlarms,
@@ -1465,6 +1695,7 @@ function AlarmApp() {
         cancellationGateway,
       );
       recordRefill({ attemptedAlarmIds: [definition.id], issues: fillIssues });
+      clearQueueStatus(definition.id);
       setCurrentAlarms(next);
       setIsComposerOpen(false);
       const firstRingLabel = `${formatNextDate(nextAtMs)} ${formatAlarmTime(
@@ -1498,6 +1729,7 @@ function AlarmApp() {
       void refreshNotificationDelivery();
     }
   }, [
+    clearQueueStatus,
     customWeekdays,
     isBusy,
     recordRefill,
@@ -1571,6 +1803,7 @@ function AlarmApp() {
           attemptedAlarmIds: [definition.id],
           issues: fillIssues,
         });
+        clearQueueStatus(definition.id);
         setCurrentAlarms(next);
         const severity = getAlarmScheduleIssueSeverity(fillIssues);
         if (severity !== 'none') {
@@ -1607,6 +1840,7 @@ function AlarmApp() {
       }
     },
     [
+      clearQueueStatus,
       isBusy,
       recordRefill,
       refreshNotificationDelivery,
@@ -1703,6 +1937,8 @@ function AlarmApp() {
   const applyLocalDataDeleted = useCallback(() => {
     // Warnings remembered for the deleted alarms must not mute new ones.
     reportedScheduleProblemsRef.current = new Set();
+    reportedQueueProblemsRef.current = new Set();
+    setQueueStatuses({});
     setCurrentAlarms([]);
     setRefillFailedAlarmIds(new Set());
     setSuppressionWarning(null);
@@ -2522,7 +2758,10 @@ function AlarmApp() {
               const coverageLine = getScheduleCoverageLine(
                 describeScheduleCoverage(definition, nowMs),
                 formatNextDate,
-                { refillFailed: refillFailedAlarmIds.has(definition.id) },
+                {
+                  refillFailed: refillFailedAlarmIds.has(definition.id),
+                  queueStatus: queueStatuses[definition.id],
+                },
               );
               const todayExpiry = describeTodayOnlyExpiry(
                 definition,

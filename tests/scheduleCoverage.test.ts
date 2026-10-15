@@ -295,3 +295,73 @@ describe('getScheduleCoverageLine', () => {
     );
   });
 });
+
+describe('getScheduleCoverageLine with OS queue verification', () => {
+  const scheduled = describeScheduleCoverage(
+    definition([cycle(MONDAY_7), cycle(TUESDAY_7), cycle(WEDNESDAY_7)]),
+    NOW,
+  );
+  const fmt = (ms: number) => `D${new Date(ms).getDate()}`;
+
+  test('an unverifiable queue is never shown as reserved', () => {
+    const line = getScheduleCoverageLine(scheduled, fmt, {
+      queueStatus: 'unverified',
+    });
+    assert.equal(line.isWarning, true);
+    assert.doesNotMatch(line.text, /予約済み/);
+    assert.match(line.text, /確認できません/);
+  });
+
+  test('a main missing from the OS queue is shown as not reserved', () => {
+    const line = getScheduleCoverageLine(scheduled, fmt, {
+      queueStatus: 'missing',
+    });
+    assert.equal(line.isWarning, true);
+    assert.doesNotMatch(line.text, /予約済み/);
+  });
+
+  test('a full queue and a duplicated reservation are named, never shown as reserved', () => {
+    const full = getScheduleCoverageLine(scheduled, fmt, {
+      queueStatus: 'capacity_full',
+    });
+    assert.equal(full.isWarning, true);
+    assert.doesNotMatch(full.text, /予約済み/);
+    assert.match(full.text, /上限/);
+    const duplicated = getScheduleCoverageLine(scheduled, fmt, {
+      queueStatus: 'duplicated',
+    });
+    assert.equal(duplicated.isWarning, true);
+    assert.doesNotMatch(duplicated.text, /予約済み/);
+    assert.match(duplicated.text, /2回/);
+  });
+
+  test('a missing check-in keeps the reserved range but warns', () => {
+    const line = getScheduleCoverageLine(scheduled, fmt, {
+      queueStatus: 'check_in_missing',
+    });
+    assert.equal(line.isWarning, true);
+    assert.match(line.text, /予約済み/);
+    assert.match(line.text, /起床確認/);
+  });
+
+  test('verified and repaired states do not change the line', () => {
+    const plain = getScheduleCoverageLine(scheduled, fmt);
+    for (const queueStatus of ['verified', 'repaired'] as const) {
+      assert.deepEqual(
+        getScheduleCoverageLine(scheduled, fmt, { queueStatus }),
+        plain,
+      );
+    }
+  });
+
+  test('an off alarm is not affected by a stale status', () => {
+    const off = describeScheduleCoverage(
+      definition([cycle(MONDAY_7)], { enabled: false }),
+      NOW,
+    );
+    assert.deepEqual(
+      getScheduleCoverageLine(off, fmt, { queueStatus: 'missing' }),
+      { text: '通知は予約されていません', isWarning: false },
+    );
+  });
+});

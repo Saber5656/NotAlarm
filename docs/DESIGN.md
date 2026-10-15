@@ -91,6 +91,14 @@ interface StoredAlarm {
 | 平日 | 月〜金だけ |
 | 曜日指定 | 選択した1曜日以上だけ |
 
+### 4.1 時刻の意味（ALR-008）
+
+- 繰り返し（毎日・平日・曜日指定）の `HH:mm` は**端末のローカル壁時計**で解釈する。保存する `dueAtMs` は計画時点のタイムゾーンで確定した絶対時刻であり、タイムゾーンを変えると壁時計と一致しなくなる。
+- 「今日だけ」は保存した `dateKey`（元のローカル日付）に固定する。タイムゾーンが変わっても別の日付へ移さない。
+- `isDueTimeWallClockAligned` が、保存した `dueAtMs` を計画と同じ構築子でローカル日付の `HH:mm` へ直した値と比べ、ずれた周期を「別タイムゾーンで計画された」と判定する。DST で存在しない時刻は計画側と同じ位置になるため、ずれとは判定しない。
+- 計画時のタイムゾーン（IANA 名）を `already-up/planning-zone/v1` に保存する（`src/planningZone.ts`）。ずれの判定は保存値に依存せず、保存値は「タイムゾーンの変更に合わせて組み直した」旨の notice を選ぶためだけに使う。再照合が全件成功したときだけ更新する。
+- 手動の時刻変更: 壁時計とのずれ（タイムゾーン変更）は上記の判定で検出する。同じタイムゾーンでの手動変更は保存済み `dueAtMs` が絶対時刻のままなので判定では検出できない。代わりに iOS の予約を絶対 UTC の CALENDAR トリガーにし、OS キューから読み戻した絶対時刻と保存値を照合する（6.1）。実機で手動時計変更後に正しく鳴るかは**未確認**（DEVICE_TEST 16③）。
+
 全て one-off `DATE` trigger とする。同じ recurring request を使わないのは、1周期だけを安全に cancel し、古い応答が将来周期へ波及することを防ぐためである。
 
 ## 5. 通知予算
@@ -135,6 +143,39 @@ iOS は保留 local notification を直近64件まで保持する。AlreadyUp �
 5. definition と cycle を AsyncStorage v2 に保存する。
 
 main を必ず先に登録する。check-in の登録に失敗しても main を残し、警告を返す。main の登録に失敗した周期は「予約済み」と表示しない。
+
+### 6.1 OS キューとの照合（ALR-003 / ALR-008、`src/scheduleReconciliation.ts`）
+
+保存した未来の周期と OS の保留通知を、起動時（`markDueCyclesRinging` の後、補充の前）と `active` 復帰時（補充の前）に照合する。保存済みであることは OS に予約されていることを意味しない。
+
+**決定した順序（決定的）**
+
+1. `suppressionJournal.exclusive`（進行中の停止・回復）→ `transactAlarmDefinitions`（ユーザーの cancel・補充と同じ保存キュー）の順にロックを取り、OS キューは保存キューの順番を得た後に読む。ユーザーの停止は照合の前か後に直列化され、照合が消された通知を作り直すことはない。
+2. 照合の対象外: オフの alarm、未完了の cancel journal または suppression journal が残る alarm、`suppressed` / `dismissed` / `ringing` の周期（再作成しない）、期限を過ぎた周期。
+3. OS キューを読めない場合は `unknown` とし、何も予約も取消もしない。権限がない場合も同様で、`prepareNotificationsIfGranted()`（prompt なし）が false のとき修復しない。いずれも行に「予約を確認できません」/「通知が端末に見つかりません」を表示し、「…まで予約済み」と表示しない。
+4. 別タイムゾーンで計画された周期は、**古い周期を 1 件ずつ**、容量確認（main + check-in の 2 件が空いているか）→ 新規予約 → checkpoint → OS キューを読み直して新しい ID が内容つきで存在することを確認 → 対応する古い周期の正確な ID を cancel → 古い周期を保存から削除、の順で置き換える。古い周期と新しい周期は明示的に対にし（`ReplacementPair`）、途中で止まった後の再実行は既に作った新しい周期を再利用して、2 つ目のコピーを作らない。確認できない（OS が成功を返しても保持していない、読み直せない）間は古い周期を残す。`suppressed` などが占める時刻は空けたままにする。「今日だけ」の元日付・壁時計が既に過去なら、元の予約を残す。新規予約に失敗した場合は古い周期を残す（鳴らないより別時刻に鳴るほうを選ぶ）。確認済みの置換が既にある古い周期は「置換済み」とし、cancel 後の保存に失敗しても main の再作成対象にしない（古い時刻の再作成を防ぐ）。古い周期の期限（`dueAtMs`）に達したら、非同期の修復中でも cancel も削除もせず鳴動経路に任せる。
+5. main が OS に無い周期は、まず同じ周期の内容を持つ未追跡の通知（保存前にクラッシュして残ったもの）を採用し、無ければ空きを確認して同じ `cycleId` で main を再予約 → OS キューで内容を確認 → 旧 check-in（旧 main を指す）を正確な ID で cancel → checkpoint → 新 main を指す check-in を再予約（空きを確認）→ 確認 → checkpoint。空きが無く自分の旧 check-in があるときだけ、それを先に cancel して 1 件空ける。
+6. check-in だけ無い周期は、確認済みの main を残して check-in だけ再予約する（空きが無ければ `capacity_full`）。check-in の時刻を過ぎている場合は再作成しない。
+7. 各 checkpoint の保存に失敗したら、直前に予約した ID を cancel して元の例外を返す。cancel できなかった ID があれば `OrphanStore`（`src/orphanedNotifications.ts`）に永続し、`ScheduledNotificationRollbackError` を返す。次の照合の最初に、その ID が OS キューに自分の内容で残っていれば cancel し、消えている・別内容なら追跡を外す。
+8. 照合が途中で例外になった場合、App は caller の古い配列を使わず、`recoverAbortedReconciliation` で保存済みの最新 checkpoint を読み直して App state へ反映する。読み直せなければ `alarms: null` を返し、何も保存済みと主張しない。解除できなかった ID は notice（danger）で知らせる。
+9. **補充の可否は `assessReconciledState`（`src/reconcileGate.ts`）が決める**。補充は OS キューも orphan 一覧も読まないため、`freshness: 'fresh'`（保存済み状態を読めた）、OS キューを読めた（`queueVerified`）、中断していない、解除できていない ID が無い、未完了の停止が無い、のすべてを満たす `safeToRefill` のときだけ起動時・前面復帰の補充を行う。満たさないときは補充せず `getSkippedRefillAttempt` で「未補充」と記録し、警告 notice のまま次の起動・前面復帰で再試行する。`stale` の alarms は表示用で、補充には使わない。
+10. **orphan の解放は生きている ID に触れない**。`OrphanStore` にある ID でも、保存済みのどの周期の `mainAlarmId` / `checkInNotificationId` にも参照されていれば cancel せず追跡だけ外す。採用（未追跡の同一周期の通知を保存した）時と、旧 ID の cancel 完了時にも追跡から外す。
+
+**容量**: iOS のローカル通知は 64 件までで、Expo Go では他プロジェクトの通知も同じ枠を使う。OS が超過分のどれを捨てるかは仕様で定まっていないため、アプリは外部通知を含む保留件数（`QueueIndex.size`）に必要件数を足して 64 以下のときだけ予約する。足りなければ予約も cancel もせず、古い予約を残して `capacity_full`（「通知の上限に達しており、再予約できませんでした」）を表示する。
+
+**所有の判定と保存済み旧 ID・読めない journal（リセット時）**: 通知の所有は、まず名前空間の印（`owner` など）で厳密に判定する。印のない旧 main は名前空間では見つけられないため、(1) 検証できる保存データ、(2) version 1 として厳密に検証できた orphan journal（`parseOrphanJournal`）に残る正確な ID だけを、リセットの durable intent（`ownedIds`）に先に書いてから解除する。カレンダー移行で保存済み周期が新 ID に変わった後の旧 main も、journal が有効ならここで解除できる。journal が壊れている・別版・不正な ID を含む場合は信頼せず ID を一切使わない: 名前空間の印のある通知だけ解除し、印のない旧通知は残して「判別できない通知」の警告に数える。planning zone（`PLANNING_ZONE_KEY`）も全消去の対象で、無くても問題ない。通常の照合で orphan journal が読めない間（`orphansUnreadable`）は補充を止め（`orphans_unreadable`）、`summarizeReconciliation` が alarm 数に関係なく danger の notice（`queue_orphans_unreadable`）を毎回の未解決問題として出す。OS キューを確認できない（`queueVerified: false`）ときも、「予約済み」とは表示せず警告する（`queue_unverified`）。
+
+**iOS の予約と旧予約の移行**: SDK 57 の iOS は DATE 入力を相対秒の `UNTimeIntervalNotificationTrigger` に変換し、絶対時刻を読み戻せない。そこで iOS だけ文書化された CALENDAR 入力（`timezone: 'UTC'`、year〜second を全て明示、`repeats: false`）で予約する（`src/notificationTrigger.ts`、Android は DATE のまま）。時刻は秒単位で、早く鳴らさないため**秒へ切り上げ**て予約・照合する。読み戻した `dateComponents` / `timeZone`（`UTC` または `GMT`）は全項目の範囲と実在日を検査して絶対 ms にし、欠落・範囲外・別ゾーンの形は `unverifiable`（verified にしない）。旧ビルドが残した相対トリガーの自アプリ通知は `legacy` とし、権限があれば移行する: 空き確認（旧と新が共存するため +1 件、無ければ `capacity_full` で旧を残す）→ 同じ `cycleId` で新 main を予約し読み戻して確認 → 旧 ID を orphan に永続 → 関連付けを checkpoint（`cycleId` / `armedAtMs` / 歩数 / phase を保持）→ 旧 check-in・旧 main を正確な ID で cancel（自分の内容と確認できた場合のみ）→ 新 check-in を再予約。期限に達した・保存失敗・確認失敗のいずれでも旧予約を残す。
+
+**キューの照合は通知の内容で行う**（`src/queueInspection.ts`）: `kind` / `alarmId` / `cycleId` / check-in の `mainAlarmId` が保存値と一致する通知だけを「自分のもの」とする（`alarmId` は契約上 optional なので、明示的な不一致のみ除外）。同じ ID で内容が違う・読めない通知は foreign として触らず、その alarm を `unverified` にする。cancel も、キュー上の内容が自分のものと確認できた ID だけに行う（不在は完了扱い）。トリガー時刻は SDK 57（`expo-notifications` 57.0.23 のネイティブ serializer と型を確認）で、Android は `{ type: 'date', value: <epoch ms> }` として読めるため一致を確認し、不一致なら `unverified`。iOS は DATE 入力が `UNTimeIntervalNotificationTrigger`（予約時点の相対秒）に変換され `{ type: 'timeInterval', seconds }` としてしか読めず、絶対時刻を取得できないため、iOS では時刻は検証せず内容のみで verified とする。
+
+**Rollback / 再入防止**: 実行中の照合は module で 1 つに共有し（`scheduleReconcileInFlight`）、同時の呼び出しは同じ結果を受け取る。再実行は冪等で、2 回目は何も予約しない。cancel は保存した ID のみを対象にし、OS キューにある無関係な ID は触らない。期限に達した周期は修復中も `nowMs()` で再確認し、鳴動経路に任せる。
+
+**結果の表示**: 行ごとに `verified` / `repaired` / `check_in_missing` / `unverified` / `duplicated`（古い予約と新しい予約が両方残り、2 回鳴る可能性）/ `missing` / `capacity_full` を `getScheduleCoverageLine` の `queueStatus` として既存の警告行（11章）に渡す。notice は `summarizeReconciliation` が 1 つ選び、未解決の問題は `alarmId` 単位で 1 回だけ出す。追加・オンにした alarm の状態は予約直後なので消す。
+
+**ゲートウェイ境界**: 照合は `ReconcileGateway`（`scheduleMain` / `scheduleCheckIn` / `cancelScheduled`）と `readQueue`（`QueueInspection`）だけに依存し、`expo-notifications` を直接参照しない。将来の native AlarmKit は別 issue でこの境界の背後に追加できる。
+
+**制限**: アプリが動いていない間（再起動後、通知削除後、時刻変更後）は検知できず、次の起動・前面復帰で照合する。iOS の CALENDAR 予約は絶対時刻を読み戻せる設計だが、Expo Go での読み戻し（`timeZone` の表記を含む）と、手動で時計を変えた後に実際に正時に鳴るかは**実機で未検証**。旧ビルドの相対予約は時刻を検証できないため移行する。64 件超過時の OS の破棄順は実機で未検証で、アプリは超過を避けることだけで対処する。cancel 後に古い周期の削除保存が失敗した場合の「置換済み」は同一プロセス内でのみ記憶し、再起動後は置換先が OS で確認できたときに限り古い周期を削除する（確認できなければ古い周期は壁時計とずれたまま `missing` / `duplicated` と表示される）。
 
 ## 7. 起床証拠と抑止
 
@@ -444,6 +485,16 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | SCH-04 | 同じ予約失敗が続く状態でアプリへ繰り返し戻る | notice は最初の1回だけ。解消後の再発は再通知する |
 | SCH-05 | 残り1周期の繰り返しアラームで、直近の補充が問題を報告した・停止 journal のため補充しなかった / 補充に成功した | `…まで予約済み・先の分を予約できませんでした` / `…まで予約済み・アプリを開くと先の分を予約します`。今回の補充の対象外だった definition は前回の結果を保つ（`recordRefillAttempt`） |
 | SCH-06 | `today` / 毎日・平日・曜日指定の main 通知 | 本文に「アプリを開くと次回以降の予約を続けます。」を添えない / 添える（`repeats`） |
+| REC-01 | OS キューから main だけ消えた周期 | 同じ `cycleId` で main を再予約し、旧 check-in を cancel して新 main を指す check-in を作る |
+| REC-02 | check-in だけ消えた周期 | main は変更せず check-in だけ再予約。時刻を過ぎた check-in は作らない |
+| REC-03 | OS キューを読めない / 権限なし | 予約も取消もせず `unverified` / `missing`。「予約済み」を出さない |
+| REC-04 | 権限を戻した後の照合 / 照合の繰り返し | 修復し、2 回目は何も予約しない |
+| REC-05 | `suppressed` / `dismissed` / `ringing`、未完了 cancel・suppression のある alarm、オフの alarm | 再作成も変更もしない |
+| REC-06 | OS キューに無関係な ID | 取消しない（cancel は保存した ID のみ） |
+| REC-07 | 修復中に期限へ到達 / checkpoint 保存失敗 | 再予約せず鳴動経路へ / 直前に予約した ID を cancel して例外 |
+| REC-08 | タイムゾーン変更（繰り返し） | 壁時計 HH:mm に合わせて組み直し、新規予約 → cancel の順。`suppressed` の時刻は空ける |
+| REC-09 | タイムゾーン変更（今日だけ） | 元の日付に固定。元の壁時計が過去なら元の予約を残す |
+| REC-10 | 同じタイムゾーン（DST 境界を含む） | 組み直さない |
 | BED-01 | 鳴動中（オフの定義を含む） / オンで23時間59分後・ちょうど24時間後の監視周期 / 期限を過ぎた監視周期 / `step_candidate` | `shouldKeepScreenAwake` が true |
 | BED-02 | アラームなし / オフの定義だけ / 24時間より1ms以上先だけ / `suppressed`・`dismissed` だけ | false |
 | BED-03 | `AppState` が `background` / `active` / `inactive` / 不明 | `background` だけ画面スリープ防止を解除する |

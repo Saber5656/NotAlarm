@@ -60,7 +60,7 @@ test('foreground return reconciles before refilling', () => {
   );
   assert.ok(
     foreground.indexOf('reconcileSuppressions()') <
-      foreground.indexOf("refillEnabledSchedules(\n            'foreground'"),
+      foreground.indexOf("'foreground'"),
   );
 });
 
@@ -180,4 +180,113 @@ test('a refused stop stops sound first and never rewrites the alarm list', () =>
   const refused = block('if (isStorageResetPendingError(error)) {\n        // Fail-safe', '} else {');
   assert.doesNotMatch(refused, /setCurrentAlarms/);
   assert.match(refused, /音と通知は止めました/);
+});
+
+test('queue reconciliation serialises against stops and user cancellations', () => {
+  const fn = block(
+    'async function reconcileScheduleWithQueueOnce',
+    'let scheduleReconcileInFlight',
+  );
+  // Order: suppression lock, then the storage queue, then the OS queue read.
+  const exclusive = fn.indexOf('suppressionJournal.exclusive(');
+  const transact = fn.indexOf('transactAlarmDefinitions(');
+  const inspect = fn.indexOf('readScheduledNotificationQueue');
+  assert.ok(exclusive !== -1 && exclusive < transact);
+  assert.ok(transact < inspect, 'the OS queue is read inside the storage turn');
+  // Unfinished cancels and half-done stops exclude their alarm.
+  assert.match(fn, /loadPendingAlarmCancellations\(\)/);
+  assert.match(fn, /suppressionJournal\.load\(\)/);
+  assert.match(fn, /excludedAlarmIds/);
+  // The queue is read through the content-aware reader, again after each step.
+  assert.match(fn, /readQueue: readScheduledNotificationQueue/);
+  assert.doesNotMatch(fn, /listScheduledNotificationIds/);
+  assert.match(fn, /orphans: orphanStore/);
+});
+
+test('an aborted reconciliation re-reads the durable checkpoint before any refill', () => {
+  const fn = block(
+    'async function reconcileScheduleWithQueueOnce',
+    'let scheduleReconcileInFlight',
+  );
+  const catchBlock = fn.slice(fn.lastIndexOf('} catch (error)'));
+  assert.match(catchBlock, /recoverAbortedReconciliation\(/);
+  assert.match(catchBlock, /loadAlarmDefinitions/);
+  assert.match(catchBlock, /unrecoveredNotificationIds/);
+  // The recovered state flows into App state; the stale input is not reused.
+  const reconcile = block('const reconcileWithQueue = useCallback', 'const clearQueueStatus');
+  assert.match(reconcile, /unrecoveredNotificationIds/);
+  // The refill decision comes from the tested gate, never from `?? restored`.
+  const startup = block('await recoverPendingAlarmCancellations()', 'await refillEnabledSchedules');
+  assert.doesNotMatch(startup, /\?\? restored/);
+  assert.match(startup, /safeToRefill = state\.safeToRefill/);
+  assert.match(reconcile, /assessReconciledState\(/);
+  assert.match(fn, /aborted: true/);
+});
+
+test('queue reconciliation is not re-entered and shares the in-flight run', () => {
+  const shared = block('let scheduleReconcileInFlight', 'const ALARM_SUMMARY_CARD_HEIGHT');
+  assert.match(shared, /if \(scheduleReconcileInFlight\)/);
+  assert.match(shared, /return scheduleReconcileInFlight/);
+  assert.match(shared, /scheduleReconcileInFlight = null/);
+});
+
+test('startup and foreground reconcile with the OS queue before refilling', () => {
+  const startup = block(
+    'await recoverPendingAlarmCancellations()',
+    'await refillEnabledSchedules',
+  );
+  assert.ok(
+    startup.indexOf('markDueCyclesRinging(') <
+      startup.indexOf('reconcileWithQueue('),
+  );
+  const foreground = block(
+    "const subscription = AppState.addEventListener('change', (state) => {\n      if (state !== 'active')",
+    'return () => subscription.remove();',
+  );
+  assert.ok(
+    foreground.indexOf('reconcileWithQueue(') <
+      foreground.indexOf("'foreground'"),
+  );
+});
+
+test('rows show the OS-queue verification instead of claiming a reservation', () => {
+  assert.match(app, /queueStatus: queueStatuses\[definition\.id\]/);
+  assert.match(app, /testID="queue-verification-warning"|queueStatuses/);
+});
+
+test('a pending storage reset is checked before any reconcile, recovery or refill', () => {
+  const reconcile = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  assert.ok(
+    reconcile.indexOf('storageReset.hasPendingReset()') <
+      reconcile.indexOf('prepareNotificationsIfGranted()'),
+  );
+  assert.ok(
+    reconcile.lastIndexOf('storageReset.hasPendingReset()') <
+      reconcile.indexOf('reconcileAlarmSchedules('),
+  );
+  const refill = block('async function refillEnabledSchedulesOnce', 'fillEnabledSchedules(');
+  assert.match(refill, /storageReset\.hasPendingReset\(\)/);
+  const foreground = block(
+    "const subscription = AppState.addEventListener('change', (state) => {\n      if (state !== 'active')",
+    'return () => subscription.remove();',
+  );
+  assert.ok(
+    foreground.indexOf('storageReset.hasPendingReset()') <
+      foreground.indexOf('reconcileSuppressions()'),
+  );
+});
+
+test('an obsolete reconciliation never restores queue status or warnings after a deletion', () => {
+  const reconcile = block('const reconcileWithQueue = useCallback', 'const clearQueueStatus');
+  assert.ok(
+    reconcile.indexOf('isObsoleteReconcileResult(result)') <
+      reconcile.indexOf('setQueueStatuses(result.statuses)'),
+  );
+  const applied = block('const applyLocalDataDeleted', 'setCurrentAlarms([])');
+  assert.match(applied, /reportedQueueProblemsRef\.current = new Set\(\)/);
+  assert.match(applied, /setQueueStatuses\(\{\}\)/);
+  const fn = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  const zoneSave = fn.slice(fn.indexOf('if (settled'), fn.indexOf('if (settled') + 120);
+  assert.match(zoneSave, /isStaleStorageResult\(alarms\)/);
+  assert.match(fn, /await assertNoPendingReset\(\)/);
 });
