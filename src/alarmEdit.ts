@@ -8,7 +8,7 @@ import {
 import type { AlarmScheduleIssue } from './alarmScheduling';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 import { findAlarmListLock } from './homeStatus';
-import { readOccurrenceIdentity, stampOccurrence } from './occurrenceIdentity';
+import { stampOccurrence, withTrustedOccurrenceMetadata } from './occurrenceIdentity';
 import { currentPlanningZone } from './planningZone';
 
 export const MAX_PENDING_NOTIFICATIONS = 64;
@@ -184,21 +184,6 @@ function withoutCheckIn(cycle: StoredAlarm): StoredAlarm {
   return rest;
 }
 
-/**
- * A journaled cycle's occurrence metadata is advisory: a half-written or
- * malformed pair is dropped (the cycle becomes legacy), never repaired.
- */
-function withTrustedOccurrenceMetadata(cycle: StoredAlarm): StoredAlarm {
-  if (cycle.logicalDateKey === undefined && cycle.planningZone === undefined) {
-    return cycle;
-  }
-  if (readOccurrenceIdentity(cycle)) {
-    return cycle;
-  }
-  const { logicalDateKey: _date, planningZone: _zone, ...rest } = cycle;
-  return rest;
-}
-
 function replaceDefinition(
   alarms: StoredAlarmDefinition[],
   next: StoredAlarmDefinition,
@@ -265,9 +250,6 @@ export async function editAlarmDefinition(
 ): Promise<AlarmEditResult> {
   const { alarms, alarmId, hour, minute, repeat, gateway, journal, now } = input;
   const startMs = now();
-  // Captured before any await: the stamp must describe the zone the plan was
-  // computed in, even if the device zone changes while scheduling.
-  const planningZone = input.planningZone ?? currentPlanningZone();
   const target = alarms.find((alarm) => alarm.id === alarmId);
   if (!target) {
     throw new AlarmEditError(
@@ -335,6 +317,11 @@ export async function editAlarmDefinition(
     return { alarms: next, issues: [], cleanupPending: false };
   }
 
+  // The zone is read in the same synchronous step as the due times, after
+  // every earlier await (journal, settlement), so the stamp always describes
+  // the zone the times were computed in. It then stays fixed for this plan,
+  // whatever the device zone does while the replacements are registered.
+  const planningZone = input.planningZone ?? currentPlanningZone();
   const dueTimes = getUpcomingAlarmTimes(startMs, hour, minute, repeat);
   if (dueTimes.length === 0 || dueTimes[0] - startMs < MIN_ARM_LEAD_MS) {
     throw new AlarmEditError(

@@ -218,7 +218,7 @@ test('an expired today-only alarm is disabled without creating tomorrow work', a
   assert.deepEqual(calls, []);
 });
 
-test('a completed occurrence is pruned after due and the rolling window refills', async () => {
+test('a completed occurrence stays as day evidence until its day cannot recur, and the rolling window refills', async () => {
   const createdAt = new Date(2026, 7, 20, 6, 0, 0).getTime();
   const gateway: AlarmSchedulingGateway = {
     scheduleMain: async ({ cycleId }) => `main-${cycleId}`,
@@ -255,9 +255,10 @@ test('a completed occurrence is pruned after due and the rolling window refills'
     () => `cycle-${++sequence}`,
   );
 
-  assert.equal(refilled.definition.cycles.length, 3);
+  // The stopped Aug 20 occurrence is kept: its day is still within reach.
+  assert.equal(refilled.definition.cycles.length, 4);
   assert.deepEqual(
-    refilled.definition.cycles.map((cycle) => cycle.dueAtMs),
+    refilled.definition.cycles.filter((c) => c.phase === 'armed').map((cycle) => cycle.dueAtMs),
     [
       new Date(2026, 7, 21, 7, 0, 0).getTime(),
       new Date(2026, 7, 22, 7, 0, 0).getTime(),
@@ -265,6 +266,20 @@ test('a completed occurrence is pruned after due and the rolling window refills'
     ],
   );
   assert.equal(sequence, 4);
+
+  // Two days on, that day can no longer be the date of any slot ahead.
+  const muchLater = new Date(2026, 7, 23, 8, 0, 0).getTime();
+  const pruned = await fillAlarmDefinitionSchedule(
+    {
+      ...refilled.definition,
+      cycles: refilled.definition.cycles.filter((c) => c.phase !== 'armed'),
+    },
+    muchLater,
+    gateway,
+    () => `cycle-${++sequence}`,
+  );
+  assert.ok(!pruned.definition.cycles.some((c) => c.phase === 'suppressed'));
+  assert.equal(pruned.definition.cycles.length, 3);
 });
 
 test('suppression before due refills three still-active future occurrences', async () => {

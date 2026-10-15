@@ -7,6 +7,9 @@ import { ALREADY_UP_OWNER, CHECK_IN_KIND, MAIN_ALARM_KIND } from '../src/alarmCo
 import { getCheckInAtMs } from '../src/alarmPolicy';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
 import { dropUntrustedOccurrenceMetadata } from '../src/alarmStorage';
+import { fillAlarmDefinitionSchedule } from '../src/alarmScheduling';
+import type { AlarmSchedulingGateway } from '../src/alarmOrchestrator';
+import { dateKeyInZone, readOccurrenceIdentity } from '../src/occurrenceIdentity';
 import { ScheduledNotificationRollbackError } from '../src/alarmScheduleRollback';
 import type {
   AlarmPhase,
@@ -19,6 +22,7 @@ import {
   type QueueInspection,
 } from '../src/queueInspection';
 import {
+  canAdvancePlanningZone,
   reconcileAlarmSchedules,
   recoverAbortedReconciliation,
   summarizeReconciliation,
@@ -272,6 +276,7 @@ function harness(
         canSchedule?: boolean;
         nowMs?: () => number;
         originZone?: string | null;
+        currentZone?: string;
       } = {},
     ) =>
       reconcileAlarmSchedules({
@@ -283,6 +288,7 @@ function harness(
         gateway,
         orphans,
         originZone: extra.originZone,
+        currentZone: extra.currentZone,
         checkpoint: async (next) => {
           calls.push('checkpoint');
           checkpoints += 1;
@@ -1898,7 +1904,7 @@ describe('logical occurrence identity (stamped at creation)', () => {
     const base = cycle(utc(16, 1));
     const defs = [
       definition([
-        { ...base, cycleId: 'ok', logicalDateKey: '2026-10-15', planningZone: 'Asia/Tokyo' },
+        { ...base, cycleId: 'ok', logicalDateKey: '2026-10-16', planningZone: 'Asia/Tokyo' },
         { ...base, cycleId: 'half', logicalDateKey: '2026-10-15' },
         { ...base, cycleId: 'fake-date', logicalDateKey: '2026-02-31', planningZone: 'Asia/Tokyo' },
         { ...base, cycleId: 'empty-zone', logicalDateKey: '2026-10-15', planningZone: '' },
@@ -2102,4 +2108,353 @@ test('legacy migration reads the deadline again before cancelling each old id', 
   assert.ok(!h.calls.includes(`cancel:main-${at(16)}`));
   assert.ok(h.orphanIds.has(`main-${at(16)}`));
   assert.ok(out.pendingOrphanIds.includes(`main-${at(16)}`));
+});
+
+describe('logical dates through the whole workflow (reconcile, fill, restart, prune)', () => {
+  const LA = 'America/Los_Angeles';
+  const TOKYO = 'Asia/Tokyo';
+
+  async function withTimeZone<T>(zone: string, run: () => Promise<T> | T) {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+  const utc = (d: number, h: number, m = 0) => Date.UTC(2026, 9, d, h, m);
+  const tokyoNow = utc(14, 21); // Oct 15 06:00 JST = Oct 14 14:00 PDT
+  const jstDue = (d: number) => utc(d - 1, 22); // 07:00 JST on Oct d
+  const laDue = (d: number) => utc(d, 14); // 07:00 PDT on Oct d
+  const dayIn = (zone: string, c: StoredAlarm) => dateKeyInZone(c.dueAtMs, zone);
+  const armedDays = (alarm: StoredAlarmDefinition, zone: string) =>
+    alarm.cycles.filter((c) => c.phase === 'armed').map((c) => dayIn(zone, c));
+  const restart = (alarms: StoredAlarmDefinition[]) =>
+    dropUntrustedOccurrenceMetadata(JSON.parse(JSON.stringify(alarms)));
+
+  let fillCounter = 0;
+  function fillGateway(os: FakeOs): AlarmSchedulingGateway {
+    return {
+      async scheduleMain(i) {
+        fillCounter += 1;
+        const id = `fill-main-${fillCounter}`;
+        os.add({
+          id,
+          owned: { owner: ALREADY_UP_OWNER, kind: MAIN_ALARM_KIND, alarmId: i.alarmId, cycleId: i.cycleId },
+          atMs: i.dueAtMs,
+        });
+        return id;
+      },
+      async scheduleCheckIn(i) {
+        fillCounter += 1;
+        const id = `fill-checkin-${fillCounter}`;
+        os.add({
+          id,
+          owned: { owner: ALREADY_UP_OWNER, kind: CHECK_IN_KIND, alarmId: i.alarmId, cycleId: i.cycleId, mainAlarmId: i.mainAlarmId },
+          atMs: i.checkInAtMs,
+        });
+        return id;
+      },
+    };
+  }
+  const armedOnly = (alarms: StoredAlarmDefinition[]) =>
+    osFor(alarms.map((a) => ({ ...a, cycles: a.cycles.filter((c) => c.phase === 'armed') })));
+  const fillIds = () => `fill-cycle-${(fillCounter += 1)}`;
+
+  const skippedAlarm = (extra: Partial<StoredAlarm> = {}) =>
+    definition(
+      [
+        cycle(jstDue(16), 'suppressed', { armedAtMs: tokyoNow, suppressedBy: 'user_skip', skippedAtMs: tokyoNow, ...extra }),
+        cycle(jstDue(17), 'armed', { armedAtMs: tokyoNow }),
+        cycle(jstDue(18), 'armed', { armedAtMs: tokyoNow }),
+      ],
+      { repeat: makeAlarmRepeat('daily', tokyoNow) },
+    );
+
+  for (const [label, extra] of [
+    ['a legacy cycle (origin from the stored zone)', {}],
+    ['a stamped cycle', { logicalDateKey: '2026-10-16', planningZone: TOKYO }],
+  ] as const) {
+    test(`reconcile THEN fill never recreates a skipped logical day (${label})`, async () => {
+      await withTimeZone(LA, async () => {
+        const alarms = [skippedAlarm(extra)];
+        const os = osFor(alarms);
+        const h = harness(os);
+        const reconciled = await h.run(alarms, { nowMs: () => tokyoNow, originZone: TOKYO });
+        assert.ok(!armedDays(reconciled.alarms[0], LA).includes('2026-10-16'), 'replan leaves Oct 16 empty');
+
+        const filled = await fillAlarmDefinitionSchedule(
+          reconciled.alarms[0], tokyoNow, fillGateway(os), fillIds, LA, TOKYO,
+        );
+        const days = armedDays(filled.definition, LA);
+        assert.ok(!days.includes('2026-10-16'), `fill must not recreate Oct 16: ${days}`);
+        assert.equal(days.length, 3, 'capacity: the blocked day does not shrink the schedule');
+        assert.equal(new Set(days).size, 3);
+        for (const c of filled.definition.cycles.filter((x) => x.cycleId.startsWith('fill-cycle'))) {
+          assert.equal(c.planningZone, LA);
+          assert.equal(c.logicalDateKey, dayIn(LA, c));
+        }
+      });
+    });
+  }
+
+  test('the blocked day survives repeated passes, a restart, the absolute time passing, and is pruned only once it cannot recur', async () => {
+    await withTimeZone(LA, async () => {
+      let alarms = [skippedAlarm()];
+      let os = osFor(alarms);
+      let storedZone: string | null = TOKYO;
+
+      // Pass 1 (zone just changed): reconcile, then fill.
+      const first = await harness(os).run(alarms, { nowMs: () => tokyoNow, originZone: storedZone, currentZone: LA });
+      const afterFill = await fillAlarmDefinitionSchedule(first.alarms[0], tokyoNow, fillGateway(os), fillIds, LA, storedZone);
+      const skipped = afterFill.definition.cycles.find((c) => c.phase === 'suppressed')!;
+      assert.deepEqual(readOccurrenceIdentity(skipped), { logicalDateKey: '2026-10-16', planningZone: TOKYO },
+        'the legacy evidence is persisted with its true origin before the global zone moves');
+      storedZone = LA; // the origin may now advance
+
+      // Restart + Oct 15 20:00 PDT: the skipped instant (Oct 15 15:00 PDT) is past.
+      const later = utc(16, 3);
+      alarms = restart([{
+        ...afterFill.definition,
+        cycles: afterFill.definition.cycles.map((c) =>
+          c.dueAtMs === laDue(15) ? { ...c, phase: 'dismissed' as const } : c),
+      }]);
+      os = armedOnly(alarms);
+      const second = await harness(os).run(alarms, { nowMs: () => later, originZone: storedZone, currentZone: LA });
+      const refill = await fillAlarmDefinitionSchedule(second.alarms[0], later, fillGateway(os), fillIds, LA, storedZone);
+      assert.ok(refill.definition.cycles.some((c) => c.phase === 'suppressed'),
+        'evidence is not deleted while its day can still recur');
+      assert.ok(!armedDays(refill.definition, LA).includes('2026-10-16'));
+      assert.equal(armedDays(refill.definition, LA).length, 3);
+
+      // Another restart and pass: still blocked.
+      alarms = restart([refill.definition]);
+      os = armedOnly(alarms);
+      const third = await fillAlarmDefinitionSchedule(alarms[0], later + 3_600_000, fillGateway(os), fillIds, LA, storedZone);
+      assert.ok(!armedDays(third.definition, LA).includes('2026-10-16'));
+
+      // More than 48h later the old day can no longer recur: evidence is pruned.
+      const muchLater = utc(19, 3);
+      const pruned = await fillAlarmDefinitionSchedule(
+        { ...third.definition, cycles: third.definition.cycles.filter((c) => c.phase !== 'armed') },
+        muchLater, fillGateway(osFor([])), fillIds, LA, storedZone,
+      );
+      assert.ok(!pruned.definition.cycles.some((c) => c.phase === 'suppressed'));
+      assert.ok(armedDays(pruned.definition, LA).every((day) => day! >= '2026-10-19'));
+    });
+  });
+
+  test('an unknown origin fails closed through reconcile and fill; nothing is guessed', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [skippedAlarm()];
+      const os = osFor(alarms);
+      const h = harness(os);
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: null, currentZone: LA });
+      assert.equal(out.statuses['alarm-1'], 'unverified');
+      assert.equal(mainCallsOf(h.calls).length, 0);
+      for (const origin of [null, undefined, 'Not/AZone']) {
+        const filled = await fillAlarmDefinitionSchedule(
+          out.alarms[0], tokyoNow, fillGateway(os), fillIds, LA, origin,
+        );
+        assert.equal(filled.originUnverified, true, String(origin));
+        assert.deepEqual(filled.scheduledCycles, []);
+      }
+    });
+  });
+
+  test('a blocked today-only occurrence is not re-armed under another date by fill', async () => {
+    await withTimeZone(LA, async () => {
+      const dateKey = dateKeyInZone(laDue(15), LA)!;
+      const todayOnly = definition(
+        [cycle(jstDue(16), 'dismissed', { logicalDateKey: '2026-10-16', planningZone: TOKYO })],
+        { repeat: { kind: 'today', weekdays: [], dateKey: '2026-10-16' } },
+      );
+      assert.notEqual(dateKey, '2026-10-16');
+      const filled = await fillAlarmDefinitionSchedule(todayOnly, tokyoNow, fillGateway(osFor([])), fillIds, LA, TOKYO);
+      assert.deepEqual(filled.scheduledCycles, []);
+      assert.equal(filled.definition.enabled, false);
+    });
+  });
+});
+
+describe('one planning zone for a whole replan', () => {
+  const LA = 'America/Los_Angeles';
+  async function withTimeZone<T>(zone: string, run: () => Promise<T> | T) {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+  const tokyoNow = Date.UTC(2026, 9, 14, 21, 0);
+  const jstDue = (d: number) => Date.UTC(2026, 9, d - 1, 22, 0);
+  const tokyoAlarm = () =>
+    definition(
+      [16, 17, 18].map((d) => cycle(jstDue(d), 'armed', { armedAtMs: tokyoNow })),
+      { repeat: makeAlarmRepeat('daily', tokyoNow) },
+    );
+
+  test('every slot of one plan is stamped in the zone it was planned in, even if the zone changes mid-register', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [tokyoAlarm()];
+      let scheduled = 0;
+      const h = harness(osFor(alarms), {
+        onSchedule: () => {
+          scheduled += 1;
+          if (scheduled === 1) process.env.TZ = 'Europe/London'; // device moves mid-register
+        },
+      });
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: 'Asia/Tokyo' });
+      const created = out.alarms[0].cycles.filter((c) => c.cycleId.startsWith('replan-'));
+      assert.equal(created.length, 3);
+      for (const c of created) {
+        assert.equal(c.planningZone, LA, c.cycleId);
+        assert.equal(c.logicalDateKey, dateKeyInZone(c.dueAtMs, LA));
+        assert.equal(new Intl.DateTimeFormat('en-GB', { timeZone: LA, hour: '2-digit', minute: '2-digit', hour12: false }).format(c.dueAtMs), '07:00');
+      }
+    });
+  });
+
+  test('a caller-captured zone that is not the actual planning clock plans nothing', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [tokyoAlarm()];
+      const h = harness(osFor(alarms));
+      // The caller captured Tokyo before awaits; the clock is now Los Angeles.
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: 'Asia/Tokyo', currentZone: 'Asia/Tokyo' });
+      assert.equal(mainCallsOf(h.calls).length, 0);
+      assert.equal(out.replanned, 0);
+      assert.equal(out.statuses['alarm-1'], 'unverified');
+    });
+  });
+
+  test('a caller-captured zone that matches the clock is used for the stamps', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [tokyoAlarm()];
+      const out = await harness(osFor(alarms)).run(alarms, { nowMs: () => tokyoNow, originZone: 'Asia/Tokyo', currentZone: LA });
+      assert.ok(out.alarms[0].cycles.filter((c) => c.cycleId.startsWith('replan-')).every((c) => c.planningZone === LA));
+    });
+  });
+});
+
+describe('the stored origin zone does not advance past excluded alarms', () => {
+  const LA = 'America/Los_Angeles';
+  const TOKYO = 'Asia/Tokyo';
+  async function withTimeZone<T>(zone: string, run: () => Promise<T> | T) {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+  const tokyoNow = Date.UTC(2026, 9, 14, 21, 0);
+  const jstDue = (d: number) => Date.UTC(2026, 9, d - 1, 22, 0);
+  const two = (due: number, phase: AlarmPhase) =>
+    cycle(due, phase, {
+      alarmId: 'alarm-2',
+      cycleId: `two-cycle-${due}`,
+      mainAlarmId: `two-main-${due}`,
+      checkInNotificationId: `two-checkin-${due}`,
+      armedAtMs: tokyoNow,
+    });
+  const alarmTwo = () =>
+    definition(
+      [two(jstDue(16), 'suppressed'), two(jstDue(17), 'armed'), two(jstDue(18), 'armed')],
+      { id: 'alarm-2', repeat: makeAlarmRepeat('daily', tokyoNow) },
+    );
+  const alarmOne = () =>
+    definition(
+      [17, 18].map((d) => cycle(jstDue(d), 'armed', { armedAtMs: tokyoNow })),
+      { repeat: makeAlarmRepeat('daily', tokyoNow) },
+    );
+  const gate = (out: Awaited<ReturnType<ReturnType<typeof harness>['run']>> | null, excluded: string[]) =>
+    canAdvancePlanningZone({
+      outcome: out,
+      excludedAlarmIds: new Set(excluded),
+      nowMs: tokyoNow,
+    });
+
+  test('a pending edit / suppression / cancellation alarm keeps the old origin; the second pass recovers without recreating the stopped date', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [alarmOne(), alarmTwo()];
+      const os = osFor(alarms);
+      // Pass 1: alarm-2 has an unfinished operation, so it is excluded.
+      const first = await harness(os).run(alarms, {
+        nowMs: () => tokyoNow, originZone: TOKYO, currentZone: LA, excluded: ['alarm-2'],
+      });
+      assert.ok(first.statuses['alarm-1'] === 'repaired');
+      assert.equal(first.statuses['alarm-2'], undefined, 'the excluded alarm contributes no status');
+      assert.equal(gate(first, ['alarm-2']), false, 'the origin must not advance');
+
+      // Pass 2: the operation finished; the stored origin is still Tokyo.
+      const second = await harness(osFor(first.alarms)).run(first.alarms, {
+        nowMs: () => tokyoNow, originZone: TOKYO, currentZone: LA,
+      });
+      const two = second.alarms.find((a) => a.id === 'alarm-2')!;
+      const days = two.cycles.filter((c) => c.phase === 'armed').map((c) => dateKeyInZone(c.dueAtMs, LA));
+      assert.ok(!days.includes('2026-10-16'), `stopped Tokyo date stays blocked: ${days}`);
+      assert.deepEqual(readOccurrenceIdentity(two.cycles.find((c) => c.phase === 'suppressed')!),
+        { logicalDateKey: '2026-10-16', planningZone: TOKYO });
+      assert.equal(gate(second, []), true, 'now everything is handled, the origin may advance');
+    });
+  });
+
+  test('an excluded alarm whose cycles all carry their own identity does not hold the origin back', async () => {
+    await withTimeZone(LA, async () => {
+      const stamped = alarmTwo();
+      stamped.cycles = stamped.cycles.map((c) => ({
+        ...c, logicalDateKey: dateKeyInZone(c.dueAtMs, TOKYO)!, planningZone: TOKYO,
+      }));
+      const out = await harness(osFor([alarmOne(), stamped])).run([alarmOne(), stamped], {
+        nowMs: () => tokyoNow, originZone: TOKYO, currentZone: LA, excluded: ['alarm-2'],
+      });
+      assert.equal(gate(out, ['alarm-2']), true);
+    });
+  });
+
+  test('a new empty alarm does not hold back verified schedules from another zone', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [alarmOne(), definition([], { id: 'new-empty' })];
+      const out = await harness(osFor(alarms)).run(alarms, {
+        nowMs: () => tokyoNow, originZone: TOKYO, currentZone: LA,
+      });
+      assert.equal(out.statuses['alarm-1'], 'repaired');
+      assert.equal(out.statuses['new-empty'], undefined);
+      assert.equal(gate(out, []), true, 'no old occurrences rely on the previous origin');
+    });
+  });
+
+  test('an empty result never certifies "all processed"', async () => {
+    await withTimeZone(LA, async () => {
+      const alarms = [alarmOne()];
+      const h = harness(osFor(alarms));
+      // Everything excluded or nothing run: no statuses at all.
+      const none = await h.run(alarms, { nowMs: () => tokyoNow, originZone: TOKYO, currentZone: LA, excluded: ['alarm-1'] });
+      assert.deepEqual(none.statuses, {});
+      assert.equal(gate(none, ['alarm-1']), false, 'an enabled alarm that was not reconciled is not certified');
+      assert.equal(gate(null, []), false, 'no outcome at all');
+      assert.equal(gate({ ...none, alarms: [] }, []), true, 'no alarms: nothing to certify');
+      const unverified = { ...none, statuses: { 'alarm-1': 'unverified' as const } };
+      assert.equal(gate(unverified, []), false);
+      assert.equal(gate({ ...none, queueKnown: false, statuses: { 'alarm-1': 'verified' as const } }, []), false);
+    });
+  });
+
+  test('a disabled alarm with unstamped evidence still in reach holds the origin; expired evidence does not', async () => {
+    await withTimeZone(LA, async () => {
+      const disabled = (due: number) =>
+        definition([cycle(due, 'dismissed')], { enabled: false });
+      const base = await harness(osFor([])).run([disabled(jstDue(16))], { nowMs: () => tokyoNow, originZone: TOKYO });
+      assert.equal(gate(base, []), false);
+      const old = await harness(osFor([])).run([disabled(tokyoNow - 3 * 86_400_000)], { nowMs: () => tokyoNow, originZone: TOKYO });
+      assert.equal(gate(old, []), true);
+    });
+  });
 });

@@ -16,7 +16,7 @@ import {
 } from '../src/alarmEdit';
 import { getCheckInAtMs } from '../src/alarmPolicy';
 import { localDateKey, makeAlarmRepeat } from '../src/alarmSchedule';
-import { readOccurrenceIdentity } from '../src/occurrenceIdentity';
+import { dateKeyInZone, readOccurrenceIdentity } from '../src/occurrenceIdentity';
 import { currentPlanningZone } from '../src/planningZone';
 import type {
   AlarmPhase,
@@ -1302,7 +1302,7 @@ describe('PR40 review fixes', () => {
 describe('per-occurrence metadata through edits', () => {
   const stamped = (c: StoredAlarm): StoredAlarm => ({
     ...c,
-    logicalDateKey: localDateKey(c.dueAtMs),
+    logicalDateKey: dateKeyInZone(c.dueAtMs, 'Asia/Tokyo')!,
     planningZone: 'Asia/Tokyo',
   });
 
@@ -1312,7 +1312,7 @@ describe('per-occurrence metadata through edits', () => {
     const result = await editAlarmDefinition(h.input([a1], { planningZone: 'Asia/Tokyo' }));
     for (const c of result.alarms[0].cycles) {
       assert.deepEqual(readOccurrenceIdentity(c), {
-        logicalDateKey: localDateKey(c.dueAtMs),
+        logicalDateKey: dateKeyInZone(c.dueAtMs, 'Asia/Tokyo'),
         planningZone: 'Asia/Tokyo',
       });
     }
@@ -1430,5 +1430,85 @@ describe('per-occurrence metadata through edits', () => {
       assert.equal('planningZone' in c, false, c.cycleId);
     }
     assert.equal(result[0].cycles.length, 2);
+  });
+});
+
+describe('the edit plan zone is captured with the synchronous due-time calculation', () => {
+  async function withTimeZone<T>(zone: string, run: () => Promise<T>) {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+  const LA = 'America/Los_Angeles';
+
+  const assertPlannedIn = (result: Awaited<ReturnType<typeof editAlarmDefinition>>, zone: string) => {
+    const cycles = result.alarms[0].cycles;
+    assert.ok(cycles.length > 0);
+    for (const c of cycles) {
+      assert.deepEqual(readOccurrenceIdentity(c), {
+        logicalDateKey: dateKeyInZone(c.dueAtMs, zone),
+        planningZone: zone,
+      });
+    }
+  };
+
+  test('a zone change while the journal is read is planned and stamped in the new zone', async () => {
+    await withTimeZone('Asia/Tokyo', async () => {
+      const a1 = definition('a1');
+      const h = harness([a1]);
+      const input = h.input([a1]);
+      const load = input.journal.load.bind(input.journal);
+      input.journal = {
+        ...input.journal,
+        async load() {
+          process.env.TZ = LA; // the device moves during this await
+          return load();
+        },
+      };
+      const result = await editAlarmDefinition(input);
+      // 06:30 in the zone the due times were computed in.
+      for (const c of result.alarms[0].cycles) {
+        assert.equal(new Date(c.dueAtMs).getHours(), 6);
+        assert.equal(new Date(c.dueAtMs).getMinutes(), 30);
+      }
+      assertPlannedIn(result, LA);
+    });
+  });
+
+  test('a zone change while unsettled work is checked is planned and stamped in the new zone', async () => {
+    await withTimeZone('Asia/Tokyo', async () => {
+      const a1 = definition('a1');
+      const h = harness([a1]);
+      const result = await editAlarmDefinition(
+        h.input([a1], {
+          async hasUnsettledWork() {
+            process.env.TZ = LA;
+            return false;
+          },
+        }),
+      );
+      assertPlannedIn(result, LA);
+    });
+  });
+
+  test('the zone stays fixed for the plan when it changes during later registration awaits', async () => {
+    await withTimeZone('Asia/Tokyo', async () => {
+      const a1 = definition('a1');
+      const h = harness([a1]);
+      let main = 0;
+      const scheduleMain = h.gateway.scheduleMain.bind(h.gateway);
+      h.gateway.scheduleMain = async (request) => {
+        main += 1;
+        if (main === 1) process.env.TZ = 'Europe/London';
+        return scheduleMain(request);
+      };
+      const result = await editAlarmDefinition(h.input([a1]));
+      assertPlannedIn(result, 'Asia/Tokyo');
+    });
   });
 });

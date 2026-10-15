@@ -575,3 +575,26 @@ test('a failed delivery save reports a pending deletion instead of a generic fai
   );
   assert.match(app, /\[handleAwakeResponse, isLoaded, reportResetPending, setCurrentAlarms\]/);
 });
+
+test('the stored origin zone advances only through the shared gate, in the zone the run planned for', () => {
+  const reconcile = block(
+    'async function reconcileScheduleWithQueueOnce',
+    'let scheduleReconcileInFlight',
+  );
+  assert.match(reconcile, /currentZone: zone,/);
+  assert.match(reconcile, /originZone: storedZone,/);
+  assert.match(reconcile, /canAdvancePlanningZone\(\{/);
+  assert.match(reconcile, /currentPlanningZone\(\) === zone/);
+  // Not the old "every status settled" test, which an empty result satisfies.
+  assert.doesNotMatch(reconcile, /Object\.values\(statuses\)\.every/);
+});
+
+test('every refill path hands the stored origin zone to the fill', () => {
+  const calls = app.match(/fillAlarmDefinitionSchedule\(/g)?.length ?? 0;
+  const withOrigin = app.match(/await loadPlanningZone\(AsyncStorage\)/g)?.length ?? 0;
+  // refill (via fillEnabledSchedules), completion refill, enable; a new alarm has no history.
+  assert.equal(calls, 4);
+  assert.ok(withOrigin >= 4, `origin zone read ${withOrigin} times`);
+  const refill = block('async function refillEnabledSchedulesOnce', 'interface ScreenFrameProps');
+  assert.match(refill, /unverifiedAlarmIds/);
+});

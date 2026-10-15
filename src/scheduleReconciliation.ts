@@ -12,7 +12,6 @@ import { getCheckInAtMs } from './alarmPolicy';
 import {
   getUpcomingAlarmTimes,
   isDueTimeWallClockAligned,
-  localDateKey,
   SCHEDULED_OCCURRENCES_PER_ALARM,
 } from './alarmSchedule';
 import {
@@ -21,7 +20,11 @@ import {
 } from './alarmScheduleRollback';
 import { currentPlanningZone } from './planningZone';
 import {
+  applyEvidenceStamps,
+  collectLogicalDateEvidence,
   dateKeyInZone,
+  isLogicalDateEvidence,
+  legacyEvidenceNeedsOrigin,
   readOccurrenceIdentity,
   stampOccurrence,
 } from './occurrenceIdentity';
@@ -120,7 +123,12 @@ export interface ReconcileInput {
    * logical local date; without it the origin is never guessed.
    */
   originZone?: string | null;
-  /** The zone new cycles are planned in; defaults to the device zone. */
+  /**
+   * The zone the caller captured for this run. A replan reads the real
+   * planning clock in the same synchronous step as its due times; when that
+   * differs from this value the device moved in between, and nothing is
+   * planned (the next pass starts clean). Defaults to the device zone.
+   */
   currentZone?: string;
   makeCycleId?: () => string;
 }
@@ -1012,42 +1020,39 @@ class Run {
     const kept = definition.cycles.filter(
       (cycle) => !misalignedIds.has(cycle.cycleId),
     );
+    // One zone for the whole plan: read here, in the same synchronous step as
+    // the due times below, and used for every slot, stamp and date comparison.
+    // Nothing before the first await after this point can see another zone.
+    const planningZone = currentPlanningZone();
+    if (
+      this.input.currentZone !== undefined &&
+      this.input.currentZone !== planningZone
+    ) {
+      // The caller's zone is not the clock the times would be computed on.
+      this.mark(alarmId, 'unverified');
+      return;
+    }
     // A terminal occurrence is matched by its logical calendar date, not by
     // the absolute time it had: after a westward move, one whose instant has
     // already passed can still correspond to a future date here.
-    const terminalFutureCycles = kept.filter(
-      (cycle) =>
-        !isMonitoring(cycle) &&
-        cycle.dueAtMs > nowMs - LOGICAL_DATE_REACH_MS,
-    );
-    const terminalFuture = terminalFutureCycles.length;
-    const blockedDates = new Set<string>();
-    for (const terminal of terminalFutureCycles) {
-      const identity = readOccurrenceIdentity(terminal);
-      if (identity) {
-        // Stamped at creation: authoritative, no global zone involved.
-        blockedDates.add(identity.logicalDateKey);
-        continue;
-      }
-      if (
-        isDueTimeWallClockAligned(
-          terminal.dueAtMs,
-          definition.hour,
-          definition.minute,
-          definition.repeat,
-        )
-      ) {
-        continue;
-      }
-      // Legacy cycle (no metadata): the stored planning zone is only evidence.
-      const dateKey = dateKeyInZone(terminal.dueAtMs, this.input.originZone);
-      if (dateKey === null) {
-        // Unknown origin: not guessed. Nothing new is created for this alarm.
-        this.mark(alarmId, 'unverified');
-        return;
-      }
-      blockedDates.add(dateKey);
+    const terminalFuture = kept.filter((cycle) =>
+      isLogicalDateEvidence(cycle, nowMs),
+    ).length;
+    const evidence = collectLogicalDateEvidence({
+      cycles: kept,
+      nowMs,
+      hour: definition.hour,
+      minute: definition.minute,
+      repeat: definition.repeat,
+      planningZone,
+      originZone: this.input.originZone,
+    });
+    if (evidence.originUnknown) {
+      // Unknown origin: not guessed. Nothing new is created for this alarm.
+      this.mark(alarmId, 'unverified');
+      return;
     }
+    const blockedDates = evidence.blockedDates;
     let expected: number[] = [];
     try {
       expected = getUpcomingAlarmTimes(
@@ -1070,8 +1075,14 @@ class Run {
     );
     const slots = expected
       .filter(
-        (dueAtMs) =>
-          !blocked.has(dueAtMs) && !blockedDates.has(localDateKey(dueAtMs)),
+        (dueAtMs) => {
+          if (blocked.has(dueAtMs)) {
+            return false;
+          }
+          const dateKey = dateKeyInZone(dueAtMs, planningZone);
+          // A date that cannot be read cannot be compared: not used.
+          return dateKey !== null && !blockedDates.has(dateKey);
+        },
       )
       .slice(0, misaligned.length);
     const oldest = [...misaligned].sort(
@@ -1095,6 +1106,18 @@ class Run {
       }),
     );
 
+    if (evidence.stamps.size > 0) {
+      // The stopped days are written onto their cycles now, while the origin
+      // zone that dates them is still the stored one: later passes, refills and
+      // restarts then read the day from the cycle itself.
+      await this.save(
+        this.withCycles(alarmId, (cycles) =>
+          applyEvidenceStamps(cycles, evidence.stamps),
+        ),
+        [],
+      );
+    }
+
     for (const pair of this.pairs.get(alarmId)!) {
       if (!this.queue) {
         break;
@@ -1103,7 +1126,11 @@ class Run {
         if (pair.slot === undefined) {
           continue; // surplus: retired once every pair has been
         }
-        const created = await this.createReplacement(alarmId, pair.slot);
+        const created = await this.createReplacement(
+          alarmId,
+          pair.slot,
+          planningZone,
+        );
         if (created === 'stop') {
           break;
         }
@@ -1119,6 +1146,7 @@ class Run {
   private async createReplacement(
     alarmId: string,
     dueAtMs: number,
+    planningZone: string,
   ): Promise<string | 'stop'> {
     const definition = this.definition(alarmId);
     if (dueAtMs <= this.input.nowMs()) {
@@ -1131,8 +1159,6 @@ class Run {
     }
     const cycleId = (this.input.makeCycleId ?? defaultCycleId)();
     const armedAtMs = this.input.nowMs();
-    // Captured before the registration await, with the slot's own plan.
-    const planningZone = this.input.currentZone ?? currentPlanningZone();
     let created: StoredAlarm;
     try {
       const scheduled = await scheduleAlarmNotificationsFailSafe(
@@ -1323,11 +1349,6 @@ class Run {
   }
 }
 
-/**
- * Zones differ by at most 26 hours, so an occurrence whose instant is older
- * than this cannot share a calendar date with any slot still ahead.
- */
-const LOGICAL_DATE_REACH_MS = 48 * 60 * 60 * 1000;
 
 function defaultCycleId(): string {
   return `cycle-${Date.now().toString(36)}-${Math.random()
@@ -1517,4 +1538,49 @@ export function summarizeReconciliation(
     };
   }
   return { notice: null, problemKeys };
+}
+
+/**
+ * Whether the stored origin zone may move to the zone this pass planned in.
+ * The origin is the only evidence for stopped occurrences that predate their
+ * own identity, so it advances only when no such evidence is left behind:
+ *  - the pass must have run, with a readable queue;
+ *  - every enabled alarm that was not excluded must have ended verified or
+ *    repaired (an empty set of statuses certifies nothing);
+ *  - no alarm, excluded or not, may still hold stopped occurrences inside the
+ *    logical-date reach that carry no identity of their own, and an excluded
+ *    alarm may hold no unstamped cycle at all (a pending stop or edit will turn
+ *    it into such evidence after the origin has moved).
+ * Otherwise the old origin is kept; the next pass dates the evidence with it.
+ */
+export function canAdvancePlanningZone(input: {
+  outcome: ReconcileOutcome | null;
+  excludedAlarmIds: ReadonlySet<string>;
+  nowMs: number;
+}): boolean {
+  const { outcome, excludedAlarmIds, nowMs } = input;
+  if (outcome === null || !outcome.queueKnown) {
+    return false;
+  }
+  for (const alarm of outcome.alarms) {
+    if (legacyEvidenceNeedsOrigin(alarm.cycles, nowMs)) {
+      return false;
+    }
+    if (excludedAlarmIds.has(alarm.id)) {
+      if (alarm.cycles.some((cycle) => readOccurrenceIdentity(cycle) === null)) {
+        return false;
+      }
+      continue;
+    }
+    // An empty new definition has no occurrences whose origin could be lost.
+    // Reconciliation has no status to report for it; refill plans it afterwards.
+    if (!alarm.enabled || alarm.cycles.length === 0) {
+      continue;
+    }
+    const status = outcome.statuses[alarm.id];
+    if (status !== 'verified' && status !== 'repaired') {
+      return false;
+    }
+  }
+  return true;
 }
