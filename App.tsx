@@ -223,6 +223,7 @@ import {
 } from './src/snoozeOutcome';
 import { createSnoozeTransaction } from './src/snoozeTransaction';
 import { createStorageResetService } from './src/storageReset';
+import { getScreenScrollPolicy } from './src/screenScroll';
 import {
   advanceStorageEpoch,
   assertNoPendingReset,
@@ -2904,11 +2905,12 @@ function AlarmApp() {
     (notice.tone === 'danger' || notice.tone === 'warning')
       ? { text: notice.text, tone: notice.tone }
       : undefined;
-  const useAccessibilityScreenScroll = fontScale > 1.3;
-  const accessibilityScreenMinHeight = Math.max(
+  const screenScroll = getScreenScrollPolicy({
+    fontScale,
     viewportHeight,
-    Math.round(720 * Math.min(fontScale, 2)),
-  );
+    loadFailed,
+    ringing: ringingCycle !== null,
+  });
 
   const toggleCustomWeekday = (weekday: Weekday) => {
     setCustomWeekdays((current) =>
@@ -2937,8 +2939,8 @@ function AlarmApp() {
       <CircadianBackground theme={circadianTheme} />
 
       <ScreenFrame
-        accessibilityMinHeight={accessibilityScreenMinHeight}
-        useAccessibilityScroll={useAccessibilityScreenScroll}
+        accessibilityMinHeight={screenScroll.minHeight}
+        useAccessibilityScroll={screenScroll.scroll}
       >
         <View style={styles.brandRow}>
           <Text maxFontSizeMultiplier={1.4} numberOfLines={1} style={styles.brandName}>
@@ -3307,7 +3309,7 @@ function AlarmApp() {
             reducedTransparencyColor="#173A68"
             style={[
               styles.nextAlarmCard,
-              (useAccessibilityScreenScroll || !stepGuidance.showProgress) &&
+              (screenScroll.scroll || !stepGuidance.showProgress) &&
                 styles.alarmSummaryCardAccessible,
             ]}
             testID="next-alarm-summary"
@@ -3423,7 +3425,7 @@ function AlarmApp() {
             reducedTransparencyColor="#173A68"
             style={[
               styles.idleCard,
-              useAccessibilityScreenScroll &&
+              screenScroll.scroll &&
                 styles.alarmSummaryCardAccessible,
             ]}
             testID="next-alarm-summary"
