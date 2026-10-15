@@ -10,6 +10,7 @@ import {
   describeScheduleIssuesLocalized,
   type AlarmScheduleIssue,
 } from '../src/alarmScheduling';
+import { getMainAlarmNotificationBody } from '../src/alarmNotificationContent';
 import { noticeFromCodeIn, noticeFromCodesIn } from '../src/i18n/errorText';
 import { localizedNotice, relocalizeNotice } from '../src/i18n/localizedNotice';
 import { EN_TEXT, JA_TEXT, en, ja } from './support/text';
@@ -118,4 +119,21 @@ test('the foreground locale refresh re-renders stateful notices and the settings
   assert.match(app, /setNotice\(\(previous\) => relocalizeNotice\(previous, nextText\)\)/);
   assert.match(app, /useState<SettingsNotice \| null>\(null\)/);
   assert.doesNotMatch(app, /useState<string \| null>\(null\);\s*const \[pedometerState/);
+});
+
+test('an English repeating-alarm notification separates its two sentences', () => {
+  const body = getMainAlarmNotificationBody({ repeats: true }, en);
+
+  assert.equal(
+    body,
+    'Your wake-up was not confirmed, so the alarm is ringing. ' + en.notifications.keepReservingHint,
+  );
+  assert.doesNotMatch(body, /\.[A-Z]/);
+});
+
+test('the Japanese repeating-alarm notification keeps no extra space', () => {
+  assert.equal(
+    getMainAlarmNotificationBody({ repeats: true }, ja),
+    ja.notifications.mainBody + ja.notifications.keepReservingHint,
+  );
 });
