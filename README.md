@@ -185,7 +185,7 @@ npx expo start --no-dev --minify
 - 通知アクションを押した時に JavaScript 実行環境が終了している場合、取消処理が走らずアラームが鳴る可能性があります。これは安全側の失敗ですが、UX として未解決です。
 - アプリを開かない間の先3周期を越える予約補充（現在はアプリ起動時と前面へ戻った時だけ補充）、端末再起動、timezone / 手動時刻変更との整合は本番リリース前の gate です。
 - Expo Go は開発確認用です。App Store / Google Play 配布では development build と native alarm 能力を含む別の配布設計が必要です。
-- iOS / Android のアプリ識別子は現在 `app.alreadyup.prototype` のままです。既存インストールとの同一性や署名に影響するため、本番識別子は人間承認後に変更します。
+- iOS / Android のアプリ識別子は現在 `app.alreadyup.prototype` のままです。既存インストールとの同一性や署名に影響するため、本番識別子は人間承認後に変更します。`APP_VARIANT=production` の設定機構と所有者待ちの項目は [docs/RELEASE_PROFILES.md](docs/RELEASE_PROFILES.md) を参照してください。
 
 詳細な契約と状態遷移は [docs/DESIGN.md](docs/DESIGN.md)、本番リリースまでの残項目は [docs/REMAINING_ISSUES.md](docs/REMAINING_ISSUES.md) を参照してください。
 
