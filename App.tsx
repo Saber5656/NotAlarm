@@ -1038,6 +1038,10 @@ function AlarmApp() {
   const [isAppForeground, setIsAppForeground] = useState(() =>
     isForegroundAppState(AppState.currentState),
   );
+  // Stricter than keep-awake: `inactive` is not active for announcements.
+  const [isAppActive, setIsAppActive] = useState(
+    () => AppState.currentState === 'active',
+  );
 
   const alarmsRef = useRef<StoredAlarmDefinition[]>([]);
   const responseInFlightRef = useRef<string | null>(null);
@@ -1441,6 +1445,7 @@ function AlarmApp() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       setIsAppForeground(isForegroundAppState(state));
+      setIsAppActive(state === 'active');
     });
     return () => subscription.remove();
   }, []);
@@ -1573,6 +1578,11 @@ function AlarmApp() {
   // Polite announcement per newly missed cycle id; focus is never moved. The
   // string key changes only when the id set does, so the clock tick is silent.
   useEffect(() => {
+    // New ids stay pending (not recorded as announced) until the app is
+    // active; becoming active re-runs this effect once.
+    if (!isAppActive) {
+      return;
+    }
     const plan = planMissedAnnouncement({
       announced: missedAnnouncedRef.current,
       missedCycleIds: missedCycles.map((cycle) => cycle.cycleId),
@@ -1580,9 +1590,17 @@ function AlarmApp() {
     });
     missedAnnouncedRef.current = plan.announced;
     if (plan.announce && Platform.OS !== 'web') {
-      AccessibilityInfo.announceForAccessibility(MISSED_CARD_ANNOUNCEMENT);
+      if (Platform.OS === 'ios') {
+        // Queue behind current VoiceOver speech instead of interrupting it.
+        AccessibilityInfo.announceForAccessibilityWithOptions(
+          MISSED_CARD_ANNOUNCEMENT,
+          { queue: true },
+        );
+      } else {
+        AccessibilityInfo.announceForAccessibility(MISSED_CARD_ANNOUNCEMENT);
+      }
     }
-  }, [missedCycleIdsKey, ringingCycle !== null]);
+  }, [missedCycleIdsKey, ringingCycle !== null, isAppActive]);
 
   const handleComposerDismissed = useCallback(() => {
     if (!ringFocusPendingRef.current) {
