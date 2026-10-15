@@ -443,3 +443,76 @@ export function describeTodayOnlyExpiry(
       'この日の分は終了しました。もう一度使うには、新しいアラームを追加してください',
   };
 }
+
+export interface ComposerValues {
+  selectedTime: Date;
+  repeatKind: RepeatKind;
+  customWeekdays: Weekday[];
+}
+
+/**
+ * Add always starts from the defaults; edit keeps what was loaded from the
+ * alarm. Leaving edit mode must not leak its values into the next new alarm.
+ */
+export function resolveComposerValues(input: {
+  mode: 'add' | 'edit';
+  current: ComposerValues;
+  defaultWakeTime: Date;
+}): ComposerValues {
+  if (input.mode === 'edit') {
+    return input.current;
+  }
+  return {
+    selectedTime: input.defaultWakeTime,
+    repeatKind: 'weekdays',
+    customWeekdays: [1, 2, 3, 4, 5],
+  };
+}
+
+interface ComposerAvailabilityInput {
+  ringing: boolean;
+  loadFailed: boolean;
+  /** Deletion recovery owns storage: every alarm write is rejected. */
+  deletionPending: boolean;
+  isBusy: boolean;
+  isWeb: boolean;
+}
+
+export function canEditAlarm(
+  input: Omit<ComposerAvailabilityInput, 'ringing' | 'loadFailed'> & {
+    listLocked: boolean;
+  },
+): boolean {
+  return !input.isBusy && !input.listLocked && !input.deletionPending && !input.isWeb;
+}
+
+export function canSubmitComposer(
+  input: ComposerAvailabilityInput & {
+    isEditing: boolean;
+    listFull: boolean;
+    canAdd: boolean;
+  },
+): boolean {
+  return (
+    !input.isWeb &&
+    !input.ringing &&
+    !input.loadFailed &&
+    !input.deletionPending &&
+    !input.isBusy &&
+    // Editing does not add an alarm, so a full list must not block it.
+    (input.isEditing || !input.listFull) &&
+    input.canAdd
+  );
+}
+
+/** Drops one alarm's verification once its notifications were replaced. */
+export function withoutQueueStatus<T>(
+  statuses: Record<string, T>,
+  alarmId: string,
+): Record<string, T> {
+  if (!(alarmId in statuses)) {
+    return statuses;
+  }
+  const { [alarmId]: _cleared, ...rest } = statuses;
+  return rest;
+}

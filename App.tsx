@@ -180,10 +180,14 @@ import {
   describeSuppressedOccurrence,
   describeTodayOnlyExpiry,
   getRingingStopA11yLabel,
+  canEditAlarm,
+  canSubmitComposer,
   getStepGuidance,
   isAlarmListLocked,
+  resolveComposerValues,
   runUnlessAlarmListLocked,
   summarizeNewAlarm,
+  withoutQueueStatus,
 } from './src/homeStatus';
 import {
   LOCAL_DATA_COPY,
@@ -1020,13 +1024,7 @@ function AlarmApp() {
   );
 
   const clearQueueStatus = useCallback((alarmId: string) => {
-    setQueueStatuses((previous) => {
-      if (!(alarmId in previous)) {
-        return previous;
-      }
-      const { [alarmId]: _cleared, ...rest } = previous;
-      return rest;
-    });
+    setQueueStatuses((previous) => withoutQueueStatus(previous, alarmId));
   }, []);
 
   const refreshAfterCycleCompletion = useCallback(
@@ -2164,6 +2162,8 @@ function AlarmApp() {
         });
         recordRefill({ attemptedAlarmIds: [alarmId], issues: result.issues });
         setCurrentAlarms(result.alarms);
+        // Every notification id was replaced: the old verification is void.
+        clearQueueStatus(alarmId);
         setIsComposerOpen(false);
         setEditingAlarmId(null);
 
@@ -2206,6 +2206,7 @@ function AlarmApp() {
         }
         if (error instanceof AlarmEditError && !error.rolledBack) {
           // The edit is half done and journaled; the form has nothing to fix.
+          clearQueueStatus(alarmId);
           setIsComposerOpen(false);
           setEditingAlarmId(null);
         }
@@ -2271,6 +2272,9 @@ function AlarmApp() {
         nowMs: Date.now,
         onBlocked: notifyListLocked,
         run: async () => {
+          if (deletionPending) {
+            return;
+          }
           const time = new Date();
           time.setHours(definition.hour, definition.minute, 0, 0);
           setSelectedTime(time);
@@ -2635,13 +2639,22 @@ function AlarmApp() {
     customWeekdays,
     formatDate: formatNextDate,
   });
-  // Editing does not add an alarm, so a full list must not block it.
-  const canSubmitAlarm =
-    Platform.OS !== 'web' &&
-    (isEditing
-      ? !ringingCycle && !loadFailed && !isBusy
-      : canOpenComposer) &&
-    newAlarmSummary.canAdd;
+  const editAvailable = canEditAlarm({
+    isBusy,
+    listLocked,
+    deletionPending,
+    isWeb: Platform.OS === 'web',
+  });
+  const canSubmitAlarm = canSubmitComposer({
+    isEditing,
+    ringing: ringingCycle !== null,
+    loadFailed,
+    deletionPending,
+    isBusy,
+    isWeb: Platform.OS === 'web',
+    listFull: alarms.length >= MAX_ALARM_COUNT,
+    canAdd: newAlarmSummary.canAdd,
+  });
   const composerNotice =
     isComposerOpen &&
     notice &&
@@ -2767,13 +2780,16 @@ function AlarmApp() {
                 disabled={!canOpenComposer}
                 onPress={() => {
                   setNotice(null);
-                  if (editingAlarmId !== null) {
-                    // Leaving an edit: do not carry its values into a new alarm.
-                    setEditingAlarmId(null);
-                    setSelectedTime(defaultWakeTime());
-                    setRepeatKind('weekdays');
-                    setCustomWeekdays([1, 2, 3, 4, 5]);
-                  }
+                  // Always start from the defaults, whatever the form held before.
+                  const values = resolveComposerValues({
+                    mode: 'add',
+                    current: { selectedTime, repeatKind, customWeekdays },
+                    defaultWakeTime: defaultWakeTime(),
+                  });
+                  setEditingAlarmId(null);
+                  setSelectedTime(values.selectedTime);
+                  setRepeatKind(values.repeatKind);
+                  setCustomWeekdays(values.customWeekdays);
                   setIsComposerOpen(true);
                 }}
                 style={({ pressed }) => [
@@ -3288,10 +3304,8 @@ function AlarmApp() {
                         definition.minute,
                       )}、${formatRepeatLabel(definition.repeat)}のアラームを編集`}
                       accessibilityRole="button"
-                      accessibilityState={{
-                        disabled: isBusy || listLocked || Platform.OS === 'web',
-                      }}
-                      disabled={isBusy || listLocked || Platform.OS === 'web'}
+                      accessibilityState={{ disabled: !editAvailable }}
+                      disabled={!editAvailable}
                       onPress={() => void openEditComposer(definition)}
                       style={styles.editButton}
                     >

@@ -450,3 +450,11 @@ test('an edit refused by a pending reset surfaces the deletion state', () => {
   const perform = block('const performEditAlarm = useCallback', 'const openEditComposer');
   assert.match(perform, /reportResetPending\(error\)/);
 });
+
+test('edit success and add open are wired to the composer/queue state helpers', () => {
+  const perform = block('const performEditAlarm', 'const openEditComposer');
+  assert.match(perform, /clearQueueStatus\(alarmId\)/);
+  assert.match(app, /resolveComposerValues\(\{\s*mode: 'add'/);
+  assert.match(app, /canSubmitComposer\(\{/);
+  assert.match(app, /disabled=\{!editAvailable\}/);
+});

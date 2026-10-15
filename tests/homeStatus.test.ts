@@ -7,7 +7,7 @@ import {
   SuppressionCancelUnknownError,
   SuppressionSaveError,
 } from '../src/alarmOrchestrator';
-import { makeAlarmRepeat } from '../src/alarmSchedule';
+import { makeAlarmRepeat, type Weekday } from '../src/alarmSchedule';
 import type {
   AlarmPhase,
   StoredAlarm,
@@ -17,6 +17,8 @@ import {
   STORAGE_LOAD_FAILED_COPY,
   RINGING_STOP_LABEL,
   SUPPRESSION_WARNING_COPY,
+  canEditAlarm,
+  canSubmitComposer,
   classifySuppressionFailure,
   describeAlarmRemains,
   describeSuppressedOccurrence,
@@ -26,7 +28,9 @@ import {
   runUnlessAlarmListLocked,
   getStepGuidance,
   isAlarmListLocked,
+  resolveComposerValues,
   summarizeNewAlarm,
+  withoutQueueStatus,
 } from '../src/homeStatus';
 
 const NOW = new Date(2026, 9, 2, 22, 0, 0).getTime(); // Fri 10/2 22:00
@@ -526,5 +530,80 @@ describe('summarizeNewAlarm when editing an existing alarm', () => {
       formatDate,
     });
     assert.equal(summary.canAdd, false);
+  });
+});
+
+describe('composer state and commands', () => {
+  const open = {
+    ringing: false,
+    loadFailed: false,
+    deletionPending: false,
+    isBusy: false,
+    listFull: false,
+  };
+
+  test('opening the add composer always starts from the defaults, never an edited alarm', () => {
+    const edited = {
+      selectedTime: new Date(2026, 9, 15, 5, 45),
+      repeatKind: 'custom' as const,
+      customWeekdays: [0, 6] as Weekday[],
+    };
+    const wake = new Date(2026, 9, 15, 7, 0);
+    const next = resolveComposerValues({ mode: 'add', current: edited, defaultWakeTime: wake });
+    assert.deepEqual(next, {
+      selectedTime: wake,
+      repeatKind: 'weekdays',
+      customWeekdays: [1, 2, 3, 4, 5],
+    });
+    assert.notEqual(next.customWeekdays, edited.customWeekdays);
+  });
+
+  test('editing keeps the values loaded from the alarm', () => {
+    const current = {
+      selectedTime: new Date(2026, 9, 15, 5, 45),
+      repeatKind: 'daily' as const,
+      customWeekdays: [1] as Weekday[],
+    };
+    assert.deepEqual(
+      resolveComposerValues({ mode: 'edit', current, defaultWakeTime: new Date() }),
+      current,
+    );
+  });
+
+  test('editing is unavailable while deletion recovery owns storage', () => {
+    assert.equal(canEditAlarm({ ...open, listLocked: false, isWeb: false }), true);
+    assert.equal(
+      canEditAlarm({ ...open, deletionPending: true, listLocked: false, isWeb: false }),
+      false,
+    );
+    assert.equal(canEditAlarm({ ...open, isBusy: true, listLocked: false, isWeb: false }), false);
+    assert.equal(canEditAlarm({ ...open, listLocked: true, isWeb: false }), false);
+    assert.equal(canEditAlarm({ ...open, listLocked: false, isWeb: true }), false);
+  });
+
+  test('submit respects deletionPending for edit and add, and a full list only blocks add', () => {
+    const base = { ...open, isWeb: false, canAdd: true };
+    assert.equal(canSubmitComposer({ ...base, isEditing: true }), true);
+    assert.equal(canSubmitComposer({ ...base, isEditing: true, listFull: true }), true);
+    assert.equal(canSubmitComposer({ ...base, isEditing: false, listFull: true }), false);
+    for (const isEditing of [true, false]) {
+      assert.equal(
+        canSubmitComposer({ ...base, isEditing, deletionPending: true }),
+        false,
+      );
+      assert.equal(canSubmitComposer({ ...base, isEditing, canAdd: false }), false);
+      assert.equal(canSubmitComposer({ ...base, isEditing, ringing: true }), false);
+      assert.equal(canSubmitComposer({ ...base, isEditing, loadFailed: true }), false);
+      assert.equal(canSubmitComposer({ ...base, isEditing, isBusy: true }), false);
+      assert.equal(canSubmitComposer({ ...base, isEditing, isWeb: true }), false);
+    }
+  });
+
+  test('replacing a schedule drops only that alarm\'s queue status', () => {
+    const statuses = { a1: 'verified', a2: 'verified' } as const;
+    const next = withoutQueueStatus(statuses, 'a1');
+    assert.deepEqual(next, { a2: 'verified' });
+    assert.deepEqual(statuses, { a1: 'verified', a2: 'verified' });
+    assert.equal(withoutQueueStatus(next, 'a1'), next);
   });
 });
