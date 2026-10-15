@@ -5,7 +5,7 @@ export type RefillSeverity = 'none' | 'warning' | 'danger';
 export interface MissedAcknowledgementGateway {
   /** Marks the still-missed cycles among `cycleIds` handled; returns those changed. */
   persist(cycleIds: readonly string[]): Promise<StoredAlarm[]>;
-  dismissDelivered(mainAlarmId: string): Promise<void>;
+  dismissDelivered(notificationId: string): Promise<void>;
   /** Reserves the next cycles; rejects when nothing could be reserved. */
   refill(completed: StoredAlarm): Promise<RefillSeverity>;
 }
@@ -39,11 +39,22 @@ export async function acknowledgeMissedAlarms(
     return { status: 'nothing' };
   }
 
+  // Only the persisted cycles' own delivered ids: the main notification and
+  // the accepted current snooze (a late snooze keeps its id on the missed
+  // cycle). Future or stray notifications are never touched.
+  const deliveredIds = new Set<string>();
   for (const cycle of acknowledged) {
+    deliveredIds.add(cycle.mainAlarmId);
+    if (cycle.snooze?.notificationId) {
+      deliveredIds.add(cycle.snooze.notificationId);
+    }
+  }
+  for (const id of deliveredIds) {
     try {
-      await gateway.dismissDelivered(cycle.mainAlarmId);
+      await gateway.dismissDelivered(id);
     } catch {
-      // The cycle is already acknowledged; a stale delivered row is harmless.
+      // The cycle is already acknowledged; a stale delivered row is harmless
+      // and must not stop the other dismissals.
     }
   }
 
