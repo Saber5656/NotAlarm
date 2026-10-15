@@ -81,6 +81,8 @@ export function shouldKeepScreenAwake(
       (cycle) =>
         // The ringing card and sound do not depend on `enabled`.
         cycle.phase === 'ringing' ||
+        // The in-app sound can only start while the app stays on screen.
+        cycle.phase === 'snoozed' ||
         (alarm.enabled &&
           (cycle.phase === 'armed' || cycle.phase === 'step_candidate') &&
           cycle.dueAtMs <= horizonMs),

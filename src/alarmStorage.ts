@@ -14,6 +14,7 @@ import {
 } from './alarmSchedule';
 import { type ClassificationSource, classifyOverdueCycles } from './missedAlarms';
 import { assertNoPendingReset, stampStorageResult } from './storageResetGate';
+import { hasValidSnoozeState, type SnoozeRecord } from './snooze';
 
 export const ACTIVE_ALARM_STORAGE_KEY = 'already-up/active-alarm/v1';
 export const ALARM_DEFINITIONS_STORAGE_KEY = 'already-up/alarm-definitions/v2';
@@ -38,6 +39,8 @@ export type AlarmPhase =
   | 'ringing'
   /** Overdue past the recovery window; silent until acknowledged. */
   | 'missed'
+  /** Waiting for a scheduled snooze delivery; never wake evidence. */
+  | 'snoozed'
   | 'dismissed';
 
 export interface StoredAlarm {
@@ -57,6 +60,7 @@ export interface StoredAlarm {
   suppressedBy?: 'user_skip';
   skippedAtMs?: number;
   stepCandidateRecorded: boolean;
+  snooze?: SnoozeRecord;
 }
 
 export interface StoredAlarmDefinition {
@@ -509,7 +513,7 @@ function isStoredAlarm(value: unknown, expectedAlarmId: string): value is Stored
     typeof alarm.dueAtMs === 'number' &&
     Number.isFinite(alarm.dueAtMs) &&
     typeof alarm.phase === 'string' &&
-    ['armed', 'step_candidate', 'suppressed', 'ringing', 'missed', 'dismissed'].includes(
+    ['armed', 'step_candidate', 'suppressed', 'ringing', 'missed', 'snoozed', 'dismissed'].includes(
       alarm.phase,
     ) &&
     typeof alarm.stepCount === 'number' &&
@@ -521,7 +525,8 @@ function isStoredAlarm(value: unknown, expectedAlarmId: string): value is Stored
     (alarm.suppressedBy === undefined ||
       (alarm.suppressedBy === 'user_skip' &&
         typeof alarm.skippedAtMs === 'number' &&
-        Number.isFinite(alarm.skippedAtMs)))
+        Number.isFinite(alarm.skippedAtMs))) &&
+    hasValidSnoozeState(alarm as StoredAlarm)
   );
 }
 

@@ -11,7 +11,11 @@ import {
   type AlarmNotificationData,
 } from './alarmContracts';
 import type { ScheduledNotificationSnapshot } from './alarmNotificationOwnership';
-import { getMainAlarmNotificationBody } from './alarmNotificationContent';
+import {
+  SNOOZE_NOTIFICATION_BODY,
+  SNOOZE_NOTIFICATION_TITLE,
+  getMainAlarmNotificationBody,
+} from './alarmNotificationContent';
 import {
   describeScheduledRequest,
   type QueueInspection,
@@ -199,6 +203,37 @@ export async function scheduleMainAlarmNotification(input: {
         kind: MAIN_ALARM_KIND,
         alarmId: input.alarmId,
         cycleId: input.cycleId,
+      } satisfies AlarmNotificationData,
+    },
+    trigger: dateTrigger(input.dueAtMs, ALARM_CHANNEL_ID),
+  });
+}
+
+/**
+ * Schedules a snooze under the caller's identifier, which was stored before
+ * this call, so the notification is never one the app cannot name.
+ */
+export async function scheduleSnoozeNotification(input: {
+  identifier: string;
+  alarmId: string;
+  cycleId: string;
+  dueAtMs: number;
+  snoozeNumber: number;
+}): Promise<string> {
+  return Notifications.scheduleNotificationAsync({
+    identifier: input.identifier,
+    content: {
+      title: SNOOZE_NOTIFICATION_TITLE,
+      body: SNOOZE_NOTIFICATION_BODY,
+      sound: 'default',
+      interruptionLevel: 'timeSensitive',
+      priority: Notifications.AndroidNotificationPriority.MAX,
+      data: {
+        owner: ALREADY_UP_OWNER,
+        kind: MAIN_ALARM_KIND,
+        alarmId: input.alarmId,
+        cycleId: input.cycleId,
+        snooze: input.snoozeNumber,
       } satisfies AlarmNotificationData,
     },
     trigger: dateTrigger(input.dueAtMs, ALARM_CHANNEL_ID),

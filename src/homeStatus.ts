@@ -23,7 +23,7 @@ export function isAlarmListLocked(ringingCycle: StoredAlarm | null): boolean {
   return ringingCycle !== null;
 }
 
-export type AlarmListLockReason = 'ringing' | 'due';
+export type AlarmListLockReason = 'ringing' | 'snoozed' | 'due';
 
 /**
  * Reads the latest alarms and clock, not a render-time snapshot, so a dialog
@@ -36,10 +36,16 @@ export function findAlarmListLock(
   nowMs: number,
 ): AlarmListLockReason | null {
   let due = false;
+  let snoozed = false;
   for (const alarm of alarms) {
     for (const cycle of alarm.cycles) {
       if (cycle.phase === 'ringing') {
         return 'ringing';
+      }
+      // A waiting snooze still owns a scheduled notification and rings again;
+      // editing, switching off or deleting around it is not supported.
+      if (cycle.phase === 'snoozed') {
+        snoozed = true;
       }
       if (
         (cycle.phase === 'armed' || cycle.phase === 'step_candidate') &&
@@ -49,7 +55,7 @@ export function findAlarmListLock(
       }
     }
   }
-  return due ? 'due' : null;
+  return snoozed ? 'snoozed' : due ? 'due' : null;
 }
 
 /** Runs a list mutation only if the list is unlocked at execution time. */

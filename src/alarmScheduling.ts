@@ -149,7 +149,9 @@ export async function fillAlarmDefinitionSchedule(
   if (
     dueTimes.length === 0 &&
     definition.repeat.kind === 'today' &&
-    !normalizedCycles.some((cycle) => cycle.phase === 'ringing')
+    !normalizedCycles.some(
+      (cycle) => cycle.phase === 'ringing' || cycle.phase === 'snoozed',
+    )
   ) {
     return {
       definition: {

@@ -11,3 +11,8 @@ export function getMainAlarmNotificationBody(input: {
     ? `${MAIN_ALARM_BODY}${KEEP_RESERVING_HINT}`
     : MAIN_ALARM_BODY;
 }
+
+/** Delivered by the snooze; says why the alarm is ringing again. */
+export const SNOOZE_NOTIFICATION_TITLE = '⏰ スヌーズの時間です';
+export const SNOOZE_NOTIFICATION_BODY =
+  'スヌーズした時間になりました。アラームを止めるにはアプリを開いてください。';

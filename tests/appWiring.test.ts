@@ -174,12 +174,18 @@ test('a finished deletion clears warning memory owned by the deleted alarms', ()
   assert.match(applied, /reportedScheduleProblemsRef\.current = new Set\(\)/);
 });
 
-test('a refused stop stops sound first and never rewrites the alarm list', () => {
-  const stop = block('const stopRinging', 'const orderedAlarms');
-  assert.ok(stop.indexOf('stopForegroundAlarmSound()') < stop.indexOf('saveStoredAlarm(dismissed)'));
-  const refused = block('if (isStorageResetPendingError(error)) {\n        // Fail-safe', '} else {');
+test('a refused stop stops sound and the banner itself and never rewrites the alarm list', () => {
+  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  const refused = block('if (isStorageResetPendingError(error)) {\n          // Fail-safe', '} else {');
+  assert.ok(
+    refused.indexOf('stopForegroundAlarmSound()') <
+      refused.indexOf('setDeletionPending(true)'),
+  );
+  assert.match(refused, /dismissDeliveredNotification\(cycle\.mainAlarmId\)/);
   assert.doesNotMatch(refused, /setCurrentAlarms/);
-  assert.match(refused, /音と通知は止めました/);
+  assert.match(refused, /音と通知は止めましたが/);
+  // The stop record itself is only written by the locked snooze service.
+  assert.doesNotMatch(stop, /saveStoredAlarm\(/);
 });
 
 test('queue reconciliation serialises against stops and user cancellations', () => {
@@ -408,7 +414,8 @@ test('requested notification ids reach expo-notifications as `identifier`', () =
     new URL('../src/notificationService.ts', import.meta.url),
     'utf8',
   );
-  assert.equal(service.match(/identifier: input\.identifier/g)?.length, 2);
+  // Main, check-in and snooze requests all pass their stored id through.
+  assert.equal(service.match(/identifier: input\.identifier/g)?.length, 3);
 });
 
 test('a pending reset blocks edit recovery and new edits', () => {
@@ -457,4 +464,73 @@ test('edit success and add open are wired to the composer/queue state helpers', 
   assert.match(app, /resolveComposerValues\(\{\s*mode: 'add'/);
   assert.match(app, /canSubmitComposer\(\{/);
   assert.match(app, /disabled=\{!editAvailable\}/);
+});
+
+test('startup re-arms snoozes before overdue cycles are classified, on launch and resume', () => {
+  const startup = block(
+    'await recoverPendingAlarmCancellations()',
+    'await refillEnabledSchedules',
+  );
+  assert.ok(
+    startup.indexOf('recoverPendingAlarmEdits()') <
+      startup.indexOf('recoverSnoozes()'),
+  );
+  assert.ok(
+    startup.indexOf('recoverSnoozes()') < startup.indexOf('markDueCyclesRinging('),
+  );
+  assert.ok(
+    startup.indexOf('recoverSnoozes()') < startup.indexOf('reconcileWithQueue('),
+  );
+  const resume = block(
+    "const reconciled = await reconcileSuppressions();\n        setSuppressionWarning(",
+    "if (alarmsRef.current.some((alarm) => alarm.enabled))",
+  );
+  assert.ok(
+    resume.indexOf('recoverSnoozes()') < resume.indexOf('markDueCyclesRinging('),
+  );
+});
+
+test('stop and snooze go through the shared snooze service, never raw cancellation', () => {
+  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  assert.match(stop, /snoozeService\.stop\(cycle\.cycleId\)/);
+  const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
+  assert.match(snooze, /snoozeService\.snooze\(ringingCycle\.cycleId/);
+  // Success is announced only on the snoozed result.
+  assert.ok(
+    snooze.indexOf("result.status === 'snoozed'") <
+      snooze.indexOf('スヌーズしました'),
+  );
+  // A refused snooze keeps the alarm ringing and surfaces the deletion state.
+  assert.match(snooze, /isStorageResetPendingError\(error\)/);
+});
+
+test('snooze, stop and recovery run in one suppression-then-storage transaction', () => {
+  const service = block('const snoozeService = createSnoozeService', '// Order matches the stop path');
+  assert.match(service, /transact: createSnoozeTransaction\(\{/);
+  assert.match(service, /exclusive: \(run\) => suppressionJournal\.exclusive\(run\)/);
+  assert.match(service, /transact: transactAlarmDefinitions/);
+  // The storage queue is never re-entered from the service.
+  assert.doesNotMatch(service, /runExclusiveAlarmStorage/);
+  assert.match(app, /snoozeService\.recover\(\)/);
+});
+
+test('a delivered alarm notification is applied to the latest stored state', () => {
+  const received = block('addNotificationReceivedListener', 'const lastResponse');
+  assert.match(received, /transactAlarmDefinitions\(/);
+  assert.match(received, /markDeliveredCycleRinging\(/);
+  assert.match(received, /notification\.request\.identifier/);
+  // No copy of the cycle read earlier is written back.
+  assert.doesNotMatch(received, /saveStoredAlarm|loadStoredAlarmByCycleId/);
+});
+
+test('the list lock covers a waiting snooze and says so', () => {
+  assert.match(app, /isAlarmListLocked\(ringingCycle \?\? snoozedCycle\)/);
+  const notify = block('const notifyListLocked', 'Both read the latest alarms');
+  assert.match(notify, /reason === 'snoozed'/);
+});
+
+test('the ringing card keeps stop first and snooze second, both pressable', () => {
+  const card = block('{ringingCycle ? (', 'missedCycles.length > 0 ? (');
+  assert.ok(card.indexOf('stopRinging()') < card.indexOf('snoozeRinging()'));
+  assert.match(card, /minHeight|styles\.snoozeButton/);
 });

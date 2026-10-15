@@ -47,12 +47,13 @@ export function parseOwnedNotificationData(
   if (typeof data !== 'object' || data === null) {
     return null;
   }
-  const { owner, kind, alarmId, cycleId, mainAlarmId } = data as Record<
+  const { owner, kind, alarmId, cycleId, mainAlarmId, snooze } = data as Record<
     string,
     unknown
   >;
   if (
     (owner !== undefined && typeof owner !== 'string') ||
+    (snooze !== undefined && !Number.isInteger(snooze)) ||
     (kind !== MAIN_ALARM_KIND && kind !== CHECK_IN_KIND) ||
     typeof cycleId !== 'string' ||
     cycleId.length === 0 ||
@@ -61,7 +62,14 @@ export function parseOwnedNotificationData(
   ) {
     return null;
   }
-  return { owner, kind, alarmId, cycleId, mainAlarmId };
+  return {
+    owner,
+    kind,
+    alarmId,
+    cycleId,
+    mainAlarmId,
+    ...(snooze === undefined ? {} : { snooze: snooze as number }),
+  };
 }
 
 function parseTrigger(trigger: unknown): QueueTrigger {

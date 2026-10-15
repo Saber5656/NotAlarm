@@ -1,3 +1,4 @@
+import { getSnoozeIds } from './snooze';
 import type {
   AlarmCancellationCompletion,
   StoredAlarmDefinition,
@@ -106,6 +107,29 @@ export async function cancelAlarmDefinitionWithCheckpoints({
       }));
       await checkpoint(next);
       await dismissBestEffort(gateway, cycle.checkInNotificationId);
+    }
+
+    const snoozeIds = getSnoozeIds(cycle);
+    if (snoozeIds.length > 0) {
+      // The snooze would otherwise ring for an alarm the user removed. Once
+      // it is cancelled the occurrence must not look snoozed any more.
+      for (const snoozeId of snoozeIds) {
+        await gateway.cancelScheduled(snoozeId);
+      }
+      next = updateTarget(next, alarmId, (alarm) => ({
+        ...alarm,
+        cycles: alarm.cycles.map((candidate) => {
+          if (candidate.cycleId !== cycleId) {
+            return candidate;
+          }
+          const { snooze: _snooze, ...rest } = candidate;
+          return { ...rest, phase: 'dismissed' as const };
+        }),
+      }));
+      await checkpoint(next);
+      for (const snoozeId of snoozeIds) {
+        await dismissBestEffort(gateway, snoozeId);
+      }
     }
 
     await gateway.cancelScheduled(cycle.mainAlarmId);

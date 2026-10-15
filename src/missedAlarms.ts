@@ -28,12 +28,23 @@ export function classifyDueCycle(
       phase: lateMs > RECOVERY_WINDOW_MS ? 'missed' : 'ringing',
     };
   }
-  if (
-    cycle.phase === 'ringing' &&
-    source === 'launch' &&
-    lateMs > RECOVERY_WINDOW_MS
-  ) {
-    return { ...cycle, phase: 'missed' };
+  if (cycle.phase === 'snoozed') {
+    // A snooze is judged from its own delivery time, never the original one.
+    const snoozeLateMs = nowMs - (cycle.snooze?.dueAtMs ?? cycle.dueAtMs);
+    if (snoozeLateMs < 0) {
+      return cycle;
+    }
+    return {
+      ...cycle,
+      phase: snoozeLateMs > RECOVERY_WINDOW_MS ? 'missed' : 'ringing',
+    };
+  }
+  if (cycle.phase === 'ringing' && source === 'launch') {
+    // After a snooze rang again, the lateness counts from that snooze.
+    const ringingLateMs = nowMs - (cycle.snooze?.dueAtMs ?? cycle.dueAtMs);
+    if (ringingLateMs > RECOVERY_WINDOW_MS) {
+      return { ...cycle, phase: 'missed' };
+    }
   }
   return cycle;
 }
