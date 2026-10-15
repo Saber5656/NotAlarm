@@ -139,6 +139,8 @@ test('P0: OS scheduled + list throws + retry + reset leaves no orphaned and no d
   const reset = createStorageResetService({
     store,
     gateway: {
+      listPresented: async () => [],
+      dismissPresented: async () => {},
       listScheduled: async () => [...os.scheduled.values()],
       cancelScheduled: (id) => os.cancel(id),
     },
