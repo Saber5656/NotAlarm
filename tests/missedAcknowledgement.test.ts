@@ -149,3 +149,83 @@ test('an empty selection does nothing', async () => {
   assert.equal(result.status, 'nothing');
   assert.deepEqual(gateway.calls, []);
 });
+
+test('a late missed snooze is acknowledged and both of its delivered ids are dismissed after persisting', async () => {
+  const { markCycleRinging } = await import('../src/alarmDefinitionMutations');
+  const { acknowledgeMissedCycles, getMissedCycles } = await import('../src/missedAlarms');
+  const { RECOVERY_WINDOW_MS } = await import('../src/missedAlarms');
+  const snoozed: StoredAlarm = {
+    ...cycle('late'),
+    phase: 'snoozed',
+    dueAtMs: 1_000,
+    snooze: { count: 1, notificationId: 'snooze-late', dueAtMs: 2_000 },
+  };
+  const definition = {
+    id: 'alarm-1',
+    cycles: [snoozed],
+  } as unknown as Parameters<typeof markCycleRinging>[0][number];
+  const lateMs = 2_000 + RECOVERY_WINDOW_MS + 1;
+  const transition = markCycleRinging(
+    [definition],
+    { alarmId: 'alarm-1', cycleId: 'late', mainAlarmId: 'snooze-late', dueAtMs: 2_000 },
+    lateMs,
+  );
+  assert.equal(transition.status, 'missed');
+  const missed = getMissedCycles(transition.alarms);
+  assert.equal(missed.length, 1);
+
+  const gateway = makeGateway({
+    persist: async (ids) => {
+      gateway.calls.push(`persist:${ids.join(',')}`);
+      return getMissedCycles(acknowledgeMissedCycles(transition.alarms, ids)).length === 0
+        ? missed
+        : [];
+    },
+  });
+  const result = await acknowledgeMissedAlarms(missed, gateway);
+  assert.equal(result.status, 'acknowledged');
+  assert.deepEqual(gateway.calls, [
+    'persist:late',
+    'dismiss:main-late',
+    'dismiss:snooze-late',
+    'refill:alarm-1',
+  ]);
+});
+
+test('delivered ids are de-duplicated and a failed dismissal does not stop the others', async () => {
+  const a: StoredAlarm = { ...cycle('a'), snooze: { count: 1, notificationId: 'main-a' } };
+  const b: StoredAlarm = { ...cycle('b'), snooze: { count: 1, notificationId: 'snooze-b' } };
+  const gateway = makeGateway({
+    persist: async (ids) => {
+      gateway.calls.push(`persist:${ids.join(',')}`);
+      return [a, b];
+    },
+    dismissDelivered: async (id) => {
+      gateway.calls.push(`dismiss:${id}`);
+      if (id === 'main-a') {
+        throw new Error('dismiss');
+      }
+    },
+  });
+  const result = await acknowledgeMissedAlarms([a, b], gateway);
+  assert.equal(result.status, 'acknowledged');
+  assert.deepEqual(gateway.calls, [
+    'persist:a,b',
+    'dismiss:main-a',
+    'dismiss:main-b',
+    'dismiss:snooze-b',
+    'refill:alarm-1',
+  ]);
+});
+
+test('only persisted cycles are dismissed: a cycle that was not changed keeps its notifications', async () => {
+  const kept: StoredAlarm = { ...cycle('kept'), snooze: { count: 1, notificationId: 'snooze-kept' } };
+  const gateway = makeGateway({
+    persist: async (ids) => {
+      gateway.calls.push(`persist:${ids.join(',')}`);
+      return [cycle('a')];
+    },
+  });
+  await acknowledgeMissedAlarms([cycle('a'), kept], gateway);
+  assert.deepEqual(gateway.calls, ['persist:a,kept', 'dismiss:main-a', 'refill:alarm-1']);
+});
