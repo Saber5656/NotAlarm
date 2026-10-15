@@ -475,6 +475,11 @@ Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` �
 - [ ] prototype 識別子や仮素材が production build に含まれない
 - [ ] clean install と upgrade の両経路で通知・モーション権限を確認できる
 
+### 進捗（2026-10-15）
+
+- 実装済み（コード・自動テスト）: `app.config.ts` の development / preview / production 切替と、production で prototype 識別子・未設定/不正な所有者入力を拒否する検証。[docs/RELEASE_PROFILES.md](RELEASE_PROFILES.md) に記載。
+- 未完了: 上の受け入れ条件は所有者の識別子・URL・アイコン承認待ちのため未チェック。clean install / upgrade の実機確認は未実行。署名・ストア登録・native 移行は対象外。
+
 ---
 
 ## ALR-017: 実地点の日の出・日の入りを任意反映する
