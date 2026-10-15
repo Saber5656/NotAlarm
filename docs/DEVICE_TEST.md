@@ -2,10 +2,10 @@
 
 この手順は Expo Go での前面表示・充電運用を確認するためのもの。本番配布やロック中の鳴動保証の合格判定とは分ける。**ここに書かれた挙動はすべて「実機で未確認」**であり、Simulator・自動テストの結果で代替しない。
 
-## SDK について（未確定）
+## SDK について
 
-- 使用する Expo SDK の番号は**未確定**。このアプリを実機で動かす前に、iPhone にインストール済みの Expo Go が対応する SDK を確認し、それを見て決める。
-- 依存は現在 Expo SDK 57 系のまま。この作業では変更しない。
+- プロジェクトの SDK は Expo SDK 57 に固定済み（`AGENTS.md` の方針）。SDK メジャーは変更しない。`expo` / `expo-asset` / `expo-notifications` などの 57.0.x パッチ更新は、`expo install --check` と CI に合わせる定例作業として行う。
+- 一方、**物理 iPhone の Expo Go が対応する SDK は未確認**。パッチ更新やマージはこの確認を待たないが、実機へ引き渡す前に必ず確認する。
 - 開始前に、iPhone の Expo Go が対応する SDK、`package.json` の実依存、配信 manifest の SDK を照合して記録する。不一致なら開始しない。
 - `expo doctor` / `expo export` / HTTP 200 は実機起動の証明ではない。
 
