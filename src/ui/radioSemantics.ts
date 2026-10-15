@@ -11,3 +11,17 @@ export function radioSemantics(selected: boolean, disabled: boolean) {
     marker: selected ? '✓ 選択中' : null,
   };
 }
+
+/**
+ * The current-location control is one more choice in the same exclusive set,
+ * so it reports the same checked state. Its label carries the selected state
+ * too, because an explicit label would otherwise hide the visible text.
+ */
+export function deviceChoiceSemantics(selected: boolean, disabled: boolean) {
+  return {
+    ...radioSemantics(selected, disabled),
+    accessibilityLabel: selected
+      ? '現在地を使用中（約10km単位）'
+      : '現在地を使う',
+  };
+}
