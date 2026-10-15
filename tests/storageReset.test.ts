@@ -18,6 +18,7 @@ import {
 } from "../src/storageReset";
 import { ORPHANED_NOTIFICATIONS_KEY } from "../src/orphanedNotifications";
 import { PLANNING_ZONE_KEY } from "../src/planningZone";
+import { SUN_PREFERENCE_KEY } from "../src/sunPreference";
 import { SUPPRESSION_JOURNAL_KEY } from "../src/suppressionJournal";
 
 const OWNED_KEYS = [
@@ -25,6 +26,7 @@ const OWNED_KEYS = [
   ACTIVE_ALARM_STORAGE_KEY,
   ALARM_CANCELLATION_JOURNAL_KEY,
   SUPPRESSION_JOURNAL_KEY,
+  SUN_PREFERENCE_KEY,
 ];
 
 function ownedMain(identifier: string, cycleId = `cycle-${identifier}`) {

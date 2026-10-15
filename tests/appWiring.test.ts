@@ -290,3 +290,60 @@ test('an obsolete reconciliation never restores queue status or warnings after a
   assert.match(zoneSave, /isStaleStorageResult\(alarms\)/);
   assert.match(fn, /await assertNoPendingReset\(\)/);
 });
+
+test('sun background hook is called unconditionally and feeds the theme', () => {
+  const hook = app.indexOf('useSunBackground(nowMs, sunStorageCoordination)');
+  assert.notEqual(hook, -1);
+  const theme = block('const circadianTheme = useMemo', 'const setCurrentAlarms');
+  assert.match(theme, /getCircadianTheme\(new Date\(nowMs\), sun\.schedule\)/);
+  assert.match(theme, /\[localMinuteKey, sun\.schedule\]/);
+  // Not inside any condition, loop or callback: the line is a top-level const.
+  assert.match(app, /\n  const sun = useSunBackground\(/);
+  // The shared storage lock/gate is one module-level object (stable identity).
+  assert.match(
+    app,
+    /\nconst sunStorageCoordination = \{[^}]*assertWritable: assertNoPendingReset/s,
+  );
+});
+
+test('sunrise settings live inside the shared settings modal', () => {
+  const modal = block('<SettingsModal', '</SettingsModal>');
+  assert.match(modal, /<SunriseSettings/);
+  assert.equal(app.match(/<SettingsModal/g)?.length, 1);
+});
+
+test('confirmed deletion invalidates the sun lookup before awaiting and settles it after', () => {
+  for (const [start, end, call] of [
+    ['const performStorageReset = useCallback', 'const performLocalDataDeletion', 'await storageReset.reset()'],
+    ['const performLocalDataDeletion = useCallback', 'const confirmLocalDataDeletion', 'await deleteAllLocalData(storageReset)'],
+  ] as const) {
+    const body = block(start, end);
+    const begin = body.indexOf('sun.beginDeletion()');
+    assert.notEqual(begin, -1, start);
+    assert.ok(begin < body.indexOf(call), `${start}: invalidate before reset`);
+    assert.match(body, /sun\.completeDeletion\(\)/);
+    assert.match(body, /sun\.failDeletion\(\)/);
+  }
+});
+
+test('sun callbacks are stable so effects and permission never loop', () => {
+  const hook = readFileSync(
+    new URL('../src/useSunBackground.ts', import.meta.url),
+    'utf8',
+  );
+  for (const name of [
+    'chooseFixed',
+    'chooseRegion',
+    'useDeviceLocation',
+    'beginDeletion',
+    'completeDeletion',
+    'failDeletion',
+  ]) {
+    assert.match(hook, new RegExp(`const ${name} = useCallback`), name);
+  }
+  // Loading never requests a permission or position.
+  assert.doesNotMatch(
+    hook.slice(hook.indexOf('const reload'), hook.indexOf('useEffect')),
+    /useDeviceLocation|requestPermission/,
+  );
+});
