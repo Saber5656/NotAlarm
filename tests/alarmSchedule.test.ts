@@ -9,6 +9,7 @@ import {
   isAlarmRepeat,
   makeAlarmRepeat,
 } from '../src/alarmSchedule';
+import { JA_TEXT } from './support/text';
 
 test('today only never rolls a past time into tomorrow', () => {
   const now = new Date(2026, 7, 20, 8, 0, 0).getTime();
@@ -48,7 +49,8 @@ test('custom repeat normalizes weekdays and formats a release-facing label', () 
   const repeat = makeAlarmRepeat('custom', now, [5, 1, 3, 1]);
 
   assert.deepEqual(repeat.weekdays, [1, 3, 5]);
-  assert.equal(formatRepeatLabel(repeat), '月・水・金');
+  assert.equal(formatRepeatLabel(repeat, JA_TEXT.messages, JA_TEXT.formatter),
+    '月・水・金');
 });
 
 test('custom repeat rejects an empty weekday selection', () => {

@@ -1,6 +1,8 @@
 import type { StoredAlarm } from './alarmStorage';
 import { describeScheduleIssues, type AlarmScheduleIssue } from './alarmScheduling';
-import { noticeFromCode, type ErrorNotice } from './errorCatalog';
+import type { ErrorNotice } from './errorCatalog';
+import type { Messages } from './i18n/messages';
+import { noticeFromCodeIn } from './i18n/errorText';
 
 export type RefillSeverity = 'none' | 'warning' | 'danger';
 
@@ -93,23 +95,24 @@ export async function acknowledgeMissedAlarms(
 export function getMissedAcknowledgementNotice(
   result: MissedAcknowledgementResult,
   refillIssues: readonly AlarmScheduleIssue[],
+  messages: Messages,
 ): ErrorNotice | { tone: 'neutral'; text: string } | null {
   switch (result.status) {
     case 'nothing':
       return null;
     case 'persist_failed':
-      return noticeFromCode('MISSED_ACK_FAILED');
+      return noticeFromCodeIn(messages, 'MISSED_ACK_FAILED');
     case 'refill_failed':
       return {
         tone: 'danger',
         code: 'REFILL_FAILED',
-        text: '確認済みにしましたが、次回分のアラームを予約できませんでした。アラーム状態を確認してください。',
+        text: messages.missed.acknowledgeRefillFailed,
       };
     case 'acknowledged':
       return (
-        describeScheduleIssues(refillIssues, '次回分: ') ?? {
+        describeScheduleIssues(refillIssues, messages.scheduleIssue.nextLead, messages) ?? {
           tone: 'neutral',
-          text: '見逃したアラームを確認済みにしました。',
+          text: messages.missed.acknowledged,
         }
       );
   }

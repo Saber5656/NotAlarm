@@ -19,6 +19,7 @@ import {
   describeErrorCode,
   errorCodeOf,
 } from './errorCatalog';
+import type { Messages } from './i18n/messages';
 import { classifyDueCycle } from './missedAlarms';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 
@@ -71,17 +72,20 @@ export function getAlarmScheduleIssueSeverity(
 export function describeScheduleIssues(
   issues: readonly AlarmScheduleIssue[],
   lead: string,
+  messages: Messages,
 ): ErrorNotice | null {
   const main = issues.find((issue) => issue.kind === 'main_schedule_failed');
   const first = main ?? issues[0];
   if (!first) {
     return null;
   }
-  const { tone, message, recovery } = describeErrorCode(first.code);
+  const { tone } = describeErrorCode(first.code);
+  const { message, recovery } = messages.errors[first.code];
+  const gap = messages.common.sentenceGap;
   return {
     tone,
     code: first.code,
-    text: `${lead}${main ? '予約が完了していない回があります。' : ''}${message}${recovery}`,
+    text: `${lead}${main ? messages.scheduleIssue.incomplete + gap : ''}${message}${gap}${recovery}`,
   };
 }
 

@@ -24,6 +24,7 @@ import {
 } from '../src/missedAlarms';
 import { getSnoozeCopy } from '../src/snoozeCopy';
 import { createStorageResetService } from '../src/storageReset';
+import { ja, JA_TEXT } from './support/text';
 
 const MINUTE = 60_000;
 const DUE = new Date(2026, 9, 15, 7, 0, 0).getTime();
@@ -314,7 +315,7 @@ describe('snooze wording', () => {
   const at = (hour: number, minute: number) => new Date(2026, 9, 15, hour, minute).getTime();
 
   test('ringing card names the next time and how many are left', () => {
-    const copy = getSnoozeCopy({ phase: 'ringing', used: 0, nextAtMs: at(7, 5) });
+    const copy = getSnoozeCopy({ phase: 'ringing', used: 0, nextAtMs: at(7, 5) }, JA_TEXT);
     assert.equal(copy.actionLabel, '5分後にもう一度鳴らす');
     assert.match(copy.detail, /7:05/);
     assert.match(copy.detail, /あと3回/);
@@ -322,13 +323,13 @@ describe('snooze wording', () => {
   });
 
   test('says when the limit is reached and disables the action', () => {
-    const copy = getSnoozeCopy({ phase: 'ringing', used: 3, nextAtMs: at(7, 5) });
+    const copy = getSnoozeCopy({ phase: 'ringing', used: 3, nextAtMs: at(7, 5) }, JA_TEXT);
     assert.equal(copy.actionDisabled, true);
     assert.match(copy.detail, /3回まで/);
   });
 
   test('waiting card names the time and the round', () => {
-    const copy = getSnoozeCopy({ phase: 'snoozed', used: 2, nextAtMs: at(7, 10) });
+    const copy = getSnoozeCopy({ phase: 'snoozed', used: 2, nextAtMs: at(7, 10) }, JA_TEXT);
     assert.match(copy.title, /スヌーズ中/);
     assert.match(copy.detail, /7:10/);
     assert.match(copy.detail, /2回目/);
@@ -336,10 +337,10 @@ describe('snooze wording', () => {
 
   test('avoids implementation words', () => {
     for (const phase of ['ringing', 'snoozed'] as const) {
-      const copy = getSnoozeCopy({ phase, used: 1, nextAtMs: at(7, 5) });
+      const copy = getSnoozeCopy({ phase, used: 1, nextAtMs: at(7, 5) }, JA_TEXT);
       const all = Object.values(copy).join(' ');
       assert.doesNotMatch(all, /ID|通知予約|キュー|cycle|phase/i);
     }
-    assert.match(getSnoozeCopy.failure('CAPACITY_FULL'), /鳴ったまま|鳴り続け/);
+    assert.match(getSnoozeCopy.failure('CAPACITY_FULL', ja), /鳴ったまま|鳴り続け/);
   });
 });

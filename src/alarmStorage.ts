@@ -248,7 +248,7 @@ export async function loadPendingAlarmEdits(): Promise<PendingAlarmEdit[]> {
   }
   const parsed: unknown = JSON.parse(raw);
   if (!isAlarmEditJournalV1(parsed)) {
-    throw new Error('未完了のアラーム編集を読み取れません。');
+    throw new AppError('STORAGE_JOURNAL_CORRUPT');
   }
   return stampStorageResult(
     parsed.entries.map((entry) => ({
@@ -268,7 +268,7 @@ function mutatePendingAlarmEdits(
     const entries = mutator(current);
     const journal: AlarmEditJournalV1 = { version: 1, entries };
     if (!isAlarmEditJournalV1(journal)) {
-      throw new Error('アラーム編集を保存できません。');
+      throw new AppError('STORAGE_JOURNAL_SAVE_FAILED');
     }
     if (entries.length === 0) {
       await AsyncStorage.removeItem(ALARM_EDIT_JOURNAL_KEY);

@@ -29,13 +29,23 @@
           "isAndroidBackgroundLocationEnabled": false,
           "isIosBackgroundLocationEnabled": false
         }
+      ],
+      [
+        "expo-localization",
+        {
+          "supportedLocales": [
+            "ja",
+            "en"
+          ]
+        }
       ]
     ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "app.alreadyup.prototype",
       "infoPlist": {
-        "NSMotionUsageDescription": "起床確認のため、アプリを開いている間の歩数を計測します。"
+        "NSMotionUsageDescription": "起床確認のため、アプリを開いている間の歩数を計測します。",
+        "CFBundleAllowMixedLocalizations": true
       }
     },
     "android": {
@@ -54,6 +64,10 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "locales": {
+      "ja": "./locales/ja.json",
+      "en": "./locales/en.json"
     }
   }
 }

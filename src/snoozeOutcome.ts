@@ -1,5 +1,7 @@
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
-import { type ErrorCode, noticeFromCodes } from './errorCatalog';
+import type { ErrorCode } from './errorCatalog';
+import { noticeFromCodesIn } from './i18n/errorText';
+import type { TextContext } from './i18n/context';
 import type { NoticeTone } from './noticeTone';
 import type { CleanupReport, CommittedSnapshot, SnoozeResult } from './snooze';
 import { getSnoozeCopy } from './snoozeCopy';
@@ -72,11 +74,6 @@ export interface OutcomeEffects extends AdoptEffects {
   isResetPending(error: unknown): boolean;
 }
 
-function clock(ms: number): string {
-  const date = new Date(ms);
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-}
-
 /**
  * A durable stop reaches the screen in a fixed order: sound, committed
  * snapshot, then the fallible refill. The notice names the operation outcome
@@ -86,6 +83,7 @@ function clock(ms: number): string {
 export async function presentStopped(
   result: { cycle: StoredAlarm } & CleanupReport & CommittedSnapshot,
   effects: OutcomeEffects,
+  { messages }: TextContext,
 ): Promise<{ notice: OutcomeNotice; deletionPending: boolean }> {
   presentCommittedOutcome(result, effects);
   let refillError: unknown = null;
@@ -111,17 +109,18 @@ export async function presentStopped(
   const [first, ...rest] = codes;
   if (!first) {
     return {
-      notice: { tone: 'neutral', text: 'アラームを停止しました。' },
+      notice: { tone: 'neutral', text: messages.ringing.stopped },
       deletionPending,
     };
   }
-  return { notice: noticeFromCodes([first, ...rest]), deletionPending };
+  return { notice: noticeFromCodesIn(messages, [first, ...rest]), deletionPending };
 }
 
 /** An accepted snooze: sound and snapshot first, nothing fallible between. */
 export async function presentSnoozed(
   result: Extract<SnoozeResult, { status: 'snoozed' }>,
   effects: OutcomeEffects,
+  { messages, formatter }: TextContext,
 ): Promise<OutcomeNotice> {
   const applied = presentCommittedOutcome(result, effects);
   if (!applied) {
@@ -129,11 +128,11 @@ export async function presentSnoozed(
   }
   const cleanup = getSnoozeCopy.acceptedCleanupCode(result);
   if (cleanup) {
-    return noticeFromCodes([cleanup]);
+    return noticeFromCodesIn(messages, [cleanup]);
   }
   return {
     tone: 'neutral',
-    text: `スヌーズしました。${clock(result.dueAtMs)}にもう一度鳴ります。`,
+    text: messages.snooze.snoozed(formatter.clockAt(result.dueAtMs)),
   };
 }
 
@@ -144,7 +143,10 @@ export async function presentSnoozed(
 export async function presentSnoozeRejected(
   result: Extract<SnoozeResult, { status: 'rejected' }>,
   effects: AdoptEffects,
+  { messages }: TextContext,
 ): Promise<OutcomeNotice> {
   await adoptStoredAlarms({}, effects);
-  return noticeFromCodes([getSnoozeCopy.failureCode(result.reason, result)]);
+  return noticeFromCodesIn(messages, [
+    getSnoozeCopy.failureCode(result.reason, result),
+  ]);
 }

@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 
 import { GlassSurface } from './GlassSurface';
+import { useText } from './I18nContext';
 import { UI_COLORS } from './tokens';
 import { useReducedMotion } from './useReducedMotion';
 
@@ -23,10 +24,7 @@ interface LiquidComposerTabsProps {
   value: ComposerSection;
 }
 
-const OPTIONS: Array<{ label: string; section: ComposerSection }> = [
-  { label: '時刻', section: 'time' },
-  { label: '繰り返し', section: 'repeat' },
-];
+const SECTIONS: readonly ComposerSection[] = ['time', 'repeat'];
 
 export function LiquidComposerTabs({
   disabled,
@@ -36,12 +34,20 @@ export function LiquidComposerTabs({
   value,
 }: LiquidComposerTabsProps) {
   const reduceMotion = useReducedMotion();
-  const selectedIndex = OPTIONS.findIndex(
+  const { messages } = useText();
+  const options = useMemo(
+    () => [
+      { label: messages.composer.tabTime, section: SECTIONS[0] },
+      { label: messages.composer.tabRepeat, section: SECTIONS[1] },
+    ],
+    [messages],
+  );
+  const selectedIndex = options.findIndex(
     (option) => option.section === value,
   );
   const selection = useRef(new Animated.Value(selectedIndex)).current;
   const [trackWidth, setTrackWidth] = useState(0);
-  const segmentWidth = Math.max((trackWidth - 8) / OPTIONS.length, 0);
+  const segmentWidth = Math.max((trackWidth - 8) / options.length, 0);
   const translateX = useMemo(
     () =>
       selection.interpolate({
@@ -69,7 +75,7 @@ export function LiquidComposerTabs({
 
   return (
     <View
-      accessibilityLabel="設定項目"
+      accessibilityLabel={messages.composer.tabsLabel}
       onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
       style={[styles.track, style]}
       testID="composer-section-tabs"
@@ -96,7 +102,7 @@ export function LiquidComposerTabs({
         </Animated.View>
       ) : null}
 
-      {OPTIONS.map((option) => {
+      {options.map((option) => {
         const selected = option.section === value;
         const optionDisabled =
           disabled || (option.section === 'repeat' && repeatDisabled);
@@ -105,15 +111,12 @@ export function LiquidComposerTabs({
           <Pressable
             accessibilityHint={
               option.section === 'repeat' && repeatDisabled
-                ? '時刻を確定またはキャンセルしてから切り替えられます'
+                ? messages.composer.tabLockedHint
                 : undefined
             }
             accessibilityLabel={option.label}
             accessibilityRole="button"
-            accessibilityState={{
-              disabled: optionDisabled,
-              selected,
-            }}
+            accessibilityState={{ disabled: optionDisabled, selected }}
             disabled={optionDisabled}
             key={option.section}
             onPress={() => onChange(option.section)}

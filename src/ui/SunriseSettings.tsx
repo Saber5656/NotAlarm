@@ -4,6 +4,7 @@ import { SUN_REGIONS } from '../sunRegions';
 import { sunStatusText } from '../sunStatusText';
 import type { SunBackgroundState } from '../useSunBackground';
 import { deviceChoiceSemantics, radioSemantics } from './radioSemantics';
+import { useText } from './I18nContext';
 import { UI_COLORS } from './tokens';
 
 interface SunriseSettingsProps {
@@ -21,38 +22,39 @@ export function SunriseSettings({
   state,
   resetPending = false,
 }: SunriseSettingsProps) {
+  const { messages } = useText();
   const { preference, isBusy } = state;
   const disabled = isBusy || state.writesBlocked || resetPending;
   const status = resetPending ? 'reset-pending' : state.status;
   const deviceSelected = preference.mode === 'device';
-  const device = deviceChoiceSemantics(deviceSelected, disabled);
+  const device = deviceChoiceSemantics(deviceSelected, disabled, messages);
 
   return (
     <View style={styles.section} testID="sunrise-settings">
       <Text accessibilityRole="header" style={styles.heading}>
-        背景の日の出・日の入り
+        {messages.sun.heading}
       </Text>
       <Text style={styles.body}>
-        背景の明るさを切り替える時刻だけに使います。アラームの時刻や鳴動には影響しません。
+        {messages.sun.body}
       </Text>
 
       <Row
-        detail="日の出 6:00・日の入り 18:00（初期設定）"
+        detail={messages.sun.fixedDetail}
         disabled={disabled}
-        label="固定の時刻"
+        label={messages.sun.fixedLabel}
         onPress={() => void state.chooseFixed()}
         selected={preference.mode === 'fixed'}
         testID="sun-fixed"
       />
 
-      <Text style={styles.subheading}>地域を選ぶ（位置情報は使いません）</Text>
+      <Text style={styles.subheading}>{messages.sun.regionHeading}</Text>
       <View style={styles.regionGrid}>
         {SUN_REGIONS.map((region) => (
           <Row
             compact
             disabled={disabled}
             key={region.id}
-            label={region.label}
+            label={messages.sun.regions[region.id as keyof typeof messages.sun.regions]}
             onPress={() => void state.chooseRegion(region.id)}
             selected={
               preference.mode === 'region' && preference.regionId === region.id
@@ -63,7 +65,7 @@ export function SunriseSettings({
       </View>
 
       <Pressable
-        accessibilityHint="押したときだけ、おおよその現在地を一度使います。"
+        accessibilityHint={messages.sun.deviceHint}
         accessibilityLabel={device.accessibilityLabel}
         accessibilityRole={device.accessibilityRole}
         accessibilityState={{ ...device.accessibilityState, busy: isBusy }}
@@ -79,13 +81,13 @@ export function SunriseSettings({
         testID="sun-device"
       >
         <Text style={[styles.label, deviceSelected && styles.labelSelected]}>
-          {deviceSelected ? '現在地を使用中（約10km単位）' : '現在地を使う'}
+          {deviceSelected ? messages.sun.deviceInUse : messages.sun.deviceUse}
         </Text>
         {device.marker ? (
           <Text style={styles.marker}>{device.marker}</Text>
         ) : null}
         <Text style={styles.detail}>
-          ボタンを押したときだけ、おおよその位置を一度確認します。位置は約10km単位に丸めて端末内にだけ保存し、追跡や送信はしません。
+          {messages.sun.deviceDetail}
         </Text>
       </Pressable>
 
@@ -95,7 +97,7 @@ export function SunriseSettings({
           style={styles.status}
           testID="sun-status"
         >
-          {sunStatusText(status, {
+          {sunStatusText(status, messages, {
             scheduleActive: state.schedule !== undefined,
           })}
         </Text>
@@ -123,7 +125,8 @@ function Row({
   selected,
   testID,
 }: RowProps) {
-  const semantics = radioSemantics(selected, disabled);
+  const { messages } = useText();
+  const semantics = radioSemantics(selected, disabled, messages);
   return (
     <Pressable
       accessibilityLabel={label}

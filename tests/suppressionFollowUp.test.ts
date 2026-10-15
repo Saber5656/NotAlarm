@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { en, ja } from '../src/i18n';
+import { JA_TEXT, withFormatter } from './support/text';
+
 import {
   processUserSkipFailSafe,
   type AwakeResponseDependencies,
@@ -19,8 +22,6 @@ import { createSuppressionJournal } from '../src/suppressionJournal';
 import {
   buildUserSkipTarget,
   captureUserSkipTarget,
-  USER_SKIP_DONE_NOTICE,
-  USER_SKIP_HINT,
 } from '../src/userSkip';
 
 const DUE = 10_000_000;
@@ -193,7 +194,7 @@ test('skip just before due forges no wakeup or step evidence', async () => {
 });
 
 test('skip copy makes no promise about later days (today-only safe)', () => {
-  for (const text of [USER_SKIP_DONE_NOTICE, USER_SKIP_HINT]) {
+  for (const text of [ja.skip.done, ja.skip.hint, en.skip.done, en.skip.hint]) {
     assert.doesNotMatch(text, /次の日|翌日|以降は鳴/);
   }
   const status = describeSuppressedOccurrence(
@@ -204,7 +205,7 @@ test('skip copy makes no promise about later days (today-only safe)', () => {
       ),
     ],
     START,
-    () => '10/16',
+    withFormatter(JA_TEXT, { day: () => '10/16', clockAt: () => '07:00' }),
   );
   assert.match(status!.text, /今回分だけ止めた/);
   assert.doesNotMatch(status!.text, /次の日|翌日|以降は鳴/);

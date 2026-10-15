@@ -31,6 +31,7 @@ import { withMainVerification } from '../src/mainAlarmVerification';
 import { ensureNotificationPermission } from '../src/notificationPermission';
 import { resolvePedometerAccess } from '../src/pedometerAccess';
 import { prepareAlarmEnable } from '../src/alarmDefinitionMutations';
+import { ja } from '../src/i18n';
 
 const SECRET = 'EACCES /var/mobile/Containers/abc token=sk-live-123';
 
@@ -150,7 +151,7 @@ test('an unreadable schedule list is also MAIN_UNVERIFIED, never a success', asy
   assert.equal(result.scheduledCycles.length, 0);
   // No journal and no cancel were provided: the id is held in memory only.
   assert.equal(result.issues[0]?.code, 'MAIN_UNVERIFIED_MEMORY_ONLY');
-  const notice = describeScheduleIssues(result.issues, 'アラームは追加しました。');
+  const notice = describeScheduleIssues(result.issues, 'アラームは追加しました。', ja);
   assert.equal(notice?.tone, 'danger');
   assert.equal(notice?.code, 'MAIN_UNVERIFIED_MEMORY_ONLY');
   assert.match(notice?.text ?? '', /確認できず/);
@@ -188,7 +189,7 @@ test('a verified main alarm is recorded with no issue', async () => {
 
   assert.equal(result.issues.length, 0);
   assert.ok(result.scheduledCycles.length > 0);
-  assert.equal(describeScheduleIssues(result.issues, ''), null);
+  assert.equal(describeScheduleIssues(result.issues, '', ja), null);
 });
 
 // --- Check-in only failure ---------------------------------------------
@@ -210,7 +211,7 @@ test('a check-in-only failure keeps the main alarm and warns with its own code',
   assert.equal(result.issues[0]?.code, 'CHECKIN_REGISTER_FAILED');
   assert.ok(!JSON.stringify(result.issues).includes('token='));
 
-  const notice = describeScheduleIssues(result.issues, 'アラームは追加しました。');
+  const notice = describeScheduleIssues(result.issues, 'アラームは追加しました。', ja);
   assert.equal(notice?.tone, 'warning');
   assert.match(notice?.text ?? '', /メインのアラームは予約済み/);
 });
@@ -235,6 +236,7 @@ test('when main and check-in both have issues the main failure leads', () => {
       },
     ],
     '',
+    ja,
   );
   assert.equal(notice?.code, 'MAIN_UNVERIFIED');
   assert.match(notice?.text ?? '', /予約が完了していない回があります/);
@@ -293,7 +295,7 @@ test('each sensor failure maps to a distinct state and code', async () => {
 
   const codes = (
     ['unavailable', 'availability_unknown', 'denied', 'permission_unknown', 'error'] as const
-  ).map((state) => getStepGuidance(state).code);
+  ).map((state) => getStepGuidance(state, ja).code);
   assert.deepEqual(codes, [
     'SENSOR_UNAVAILABLE',
     'SENSOR_AVAILABILITY_UNKNOWN',
@@ -302,9 +304,9 @@ test('each sensor failure maps to a distinct state and code', async () => {
     'SENSOR_READ_FAILED',
   ]);
   assert.equal(new Set(codes).size, 5);
-  assert.equal(getStepGuidance('counting').code, undefined);
-  assert.equal(getStepGuidance('denied').canOpenSettings, true);
-  assert.equal(getStepGuidance('permission_unknown').canOpenSettings, false);
+  assert.equal(getStepGuidance('counting', ja).code, undefined);
+  assert.equal(getStepGuidance('denied', ja).canOpenSettings, true);
+  assert.equal(getStepGuidance('permission_unknown', ja).canOpenSettings, false);
 });
 
 // --- Storage ------------------------------------------------------------
@@ -396,7 +398,7 @@ test('stop-attempt reasons map to action, deadline and cancel codes', () => {
   assert.equal(getAlarmRemainsCode('JOURNAL_NOT_WRITTEN'), 'SUPPRESSION_JOURNAL_NOT_WRITTEN');
   // Every alarm-remains outcome says the alarm is kept, never that it stopped.
   for (const reason of ['INVALID_RESPONSE', 'WRONG_CYCLE', 'ALARM_DUE_OR_PAST']) {
-    assert.doesNotMatch(describeAlarmRemains(reason).text, /停止しました/);
+    assert.doesNotMatch(describeAlarmRemains(reason, ja).text, /停止しました/);
   }
 });
 
@@ -464,7 +466,7 @@ test('a cancel call that throws is CANCEL_UNKNOWN, keeps the journal and is not 
     RESPONSE,
   ).catch((error: unknown) => error);
 
-  const failure = classifySuppressionFailure(outcome);
+  const failure = classifySuppressionFailure(outcome, ja);
   assert.equal(failure?.warning, 'status_unknown');
   assert.equal(failure?.notice.code, 'CANCEL_UNKNOWN');
   assert.equal(failure?.notice.tone, 'danger');
@@ -490,7 +492,7 @@ test('a save that keeps failing after a confirmed cancel is SUPPRESSION_SAVE_FAI
     RESPONSE,
   ).catch((error: unknown) => error);
 
-  const failure = classifySuppressionFailure(outcome);
+  const failure = classifySuppressionFailure(outcome, ja);
   assert.equal(failure?.warning, 'save_failed');
   assert.equal(failure?.notice.code, 'SUPPRESSION_SAVE_FAILED');
   // The existing bounded retry (2 tries) is all there is; the record remains.
@@ -521,7 +523,7 @@ test('an unwritable journal keeps the alarm and reports JOURNAL_NOT_WRITTEN', as
 
   assert.equal(cancelled, false);
   assert.equal(result.status, 'alarm_remains');
-  const notice = describeAlarmRemains(result.status === 'alarm_remains' ? result.reason : '');
+  const notice = describeAlarmRemains(result.status === 'alarm_remains' ? result.reason : '', ja);
   assert.equal(notice.code, 'SUPPRESSION_JOURNAL_NOT_WRITTEN');
 });
 
@@ -537,7 +539,7 @@ test('a confirmation after the deadline keeps the alarm with DEADLINE_PASSED', a
   );
   assert.equal(result.status, 'alarm_remains');
   assert.equal(
-    describeAlarmRemains(result.status === 'alarm_remains' ? result.reason : '').code,
+    describeAlarmRemains(result.status === 'alarm_remains' ? result.reason : '', ja).code,
     'DEADLINE_PASSED',
   );
 });

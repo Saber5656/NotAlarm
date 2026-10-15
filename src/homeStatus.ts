@@ -13,13 +13,11 @@ import {
   SuppressionSaveError,
 } from './alarmOrchestrator';
 import { MIN_ARM_LEAD_MS } from './alarmPolicy';
-import {
-  type ErrorCode,
-  type ErrorNotice,
-  describeErrorCode,
-  noticeFromCode,
-} from './errorCatalog';
+import type { ErrorCode, ErrorNotice } from './errorCatalog';
+import { noticeFromCodeIn } from './i18n/errorText';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
+import type { Messages } from './i18n/messages';
+import type { TextContext } from './i18n/context';
 
 /**
  * While an alarm rings the list must not be operable: switching a repeating
@@ -79,14 +77,6 @@ export async function runUnlessAlarmListLocked<T>(input: {
   return { ran: true, value: await input.run() };
 }
 
-function formatClock(timestampMs: number): string {
-  const date = new Date(timestampMs);
-  return `${date.getHours().toString().padStart(2, '0')}:${date
-    .getMinutes()
-    .toString()
-    .padStart(2, '0')}`;
-}
-
 /**
  * The next occurrence that was stopped by wake-up evidence and has not yet
  * come due, with the date and the reason, so a stop is never silent.
@@ -94,7 +84,7 @@ function formatClock(timestampMs: number): string {
 export function describeSuppressedOccurrence(
   alarms: readonly StoredAlarmDefinition[],
   nowMs: number,
-  formatDate: (timestampMs: number) => string,
+  { messages, formatter }: TextContext,
 ): { alarmId: string; cycleId: string; dueAtMs: number; text: string } | null {
   let earliest: { alarmId: string; cycle: StoredAlarm } | null = null;
   for (const alarm of alarms) {
@@ -118,19 +108,19 @@ export function describeSuppressedOccurrence(
       alarmId: earliest.alarmId,
       cycleId: cycle.cycleId,
       dueAtMs: cycle.dueAtMs,
-      text: `${formatDate(cycle.dueAtMs)} ${formatClock(
-        cycle.dueAtMs,
-      )} は今回分だけ止めたため鳴りません`,
+      text: messages.suppression.skippedThisTime(
+        `${formatter.day(cycle.dueAtMs)} ${formatter.clockAt(cycle.dueAtMs)}`,
+      ),
     };
   }
-  const reason = cycle.stepCandidateRecorded ? '100歩' : '通知';
   return {
     alarmId: earliest.alarmId,
     cycleId: cycle.cycleId,
     dueAtMs: cycle.dueAtMs,
-    text: `${formatDate(cycle.dueAtMs)} ${formatClock(
-      cycle.dueAtMs,
-    )} は${reason}で起床確認済みのため鳴りません`,
+    text: messages.suppression.suppressedBy(
+      `${formatter.day(cycle.dueAtMs)} ${formatter.clockAt(cycle.dueAtMs)}`,
+      cycle.stepCandidateRecorded,
+    ),
   };
 }
 
@@ -166,26 +156,30 @@ const STEP_FAILURE_CODES = {
 
 // Deliberately does not promise the alarm will ring: notification delivery or
 // a failed cancel save can be unknown at the same time.
-export function getStepGuidance(state: PedometerState): StepGuidance {
+export function getStepGuidance(
+  state: PedometerState,
+  messages: Messages,
+): StepGuidance {
+  const { steps } = messages;
   switch (state) {
     case 'preparing':
       return {
         showProgress: true,
-        message: '歩数計を準備中',
+        message: steps.preparing,
         canOpenSettings: false,
       };
     case 'counting':
       return {
         showProgress: true,
-        message: 'アプリ表示中のみ計測',
+        message: steps.counting,
         canOpenSettings: false,
       };
     default: {
       const code = STEP_FAILURE_CODES[state];
-      const { message, recovery } = describeErrorCode(code);
+      const { message, recovery } = messages.errors[code];
       return {
         showProgress: false,
-        message: message + recovery,
+        message: message + messages.common.sentenceGap + recovery,
         canOpenSettings: state === 'denied',
         code,
       };
@@ -193,70 +187,37 @@ export function getStepGuidance(state: PedometerState): StepGuidance {
   }
 }
 
-/** Shown instead of the normal empty state when saved alarms cannot be read. */
-export const STORAGE_LOAD_FAILED_COPY = {
-  title: 'アラーム情報を読み込めません',
-  body: '以前に設定したアラームは、このあとも鳴ることがあります。予約済みの通知は解除していません。',
-  addDisabledReason:
-    'アラーム情報を読み込めないため、新しいアラームは追加できません。',
-  /** Non-destructive: nothing is deleted or reset by following these. */
-  restartSteps: [
-    'アプリを上にスワイプして完全に終了し、開き直してください。',
-    '直らない場合は、端末を再起動してからアプリを開いてください。',
-    '確認が取れるまで、別の目覚ましも併用してください。',
-  ],
-} as const;
-
-/** Shown only on the load-failed card; every step needs a user tap. */
-export const STORAGE_RESET_COPY = {
-  lastResort:
-    '再起動しても直らない場合の最後の手段として、このアプリの予約通知を解除し、保存データをリセットできます。他のアプリの通知は解除しません。',
-  action: '通知を解除してリセット',
-  hint: 'このアプリのものと確認できる予約済み通知を解除し、保存データを消します。確認が2回あります。',
-  firstConfirmTitle: '通知を解除してリセットしますか？',
-  firstConfirmBody:
-    'このアプリのものと確認できる予約済み通知を解除し、保存されたアラーム情報を消します。リセット後は、アラームを作り直す必要があります。',
-  finalConfirmTitle: '本当にリセットしますか？',
-  finalConfirmBody:
-    '解除した通知と消した情報は元に戻せません。リセットが終わるまで、別の目覚ましを併用してください。',
-  done: 'リセットしました。アラームを追加できます。',
-  ambiguousWarning:
-    'リセットしました。ただし、このアプリのものか判別できない古い形式の通知が残っています。他のアプリの通知の可能性があるため解除していません。判別できない通知は鳴る場合があるので、端末の通知設定やスケジュールを確認してください。',
-  failed:
-    '削除を最後まで完了できませんでした。一部の通知やデータはすでに消えている場合があります。もう一度実行すると続きから再開します。',
-} as const;
-
 export type SuppressionWarningKind = 'save_failed' | 'status_unknown';
 
 /** Persistent warnings for a stop whose outcome is not fully known. */
-export const SUPPRESSION_WARNING_COPY: Record<
-  SuppressionWarningKind,
-  { title: string; body: string }
-> = {
-  save_failed: {
-    title: '停止の記録を保存できません',
-    body: '起床を確認して通知を取り消しましたが、その状態を保存できませんでした。アプリを開き直すと復旧を再試行します。それまで、画面上の予定と実際の通知がずれている可能性があります。',
-  },
-  status_unknown: {
-    title: '停止・予約の状態が未確認です',
-    body: '通知の取り消し結果を確認できませんでした。この回のアラームは、鳴る場合と鳴らない場合があります。別の目覚ましを併用してください。',
-  },
-};
+export function getSuppressionWarningCopy(
+  kind: SuppressionWarningKind,
+  messages: Messages,
+): { title: string; body: string } {
+  const { suppression } = messages;
+  return kind === 'save_failed'
+    ? { title: suppression.saveFailedTitle, body: suppression.saveFailedBody }
+    : {
+        title: suppression.statusUnknownTitle,
+        body: suppression.statusUnknownBody,
+      };
+}
 
 /** Turns a thrown suppression error into a persistent warning and a notice. */
 export function classifySuppressionFailure(
   error: unknown,
+  messages: Messages,
 ): { warning: SuppressionWarningKind; notice: ErrorNotice } | null {
   if (error instanceof SuppressionSaveError) {
     return {
       warning: 'save_failed',
-      notice: noticeFromCode('SUPPRESSION_SAVE_FAILED'),
+      notice: noticeFromCodeIn(messages, 'SUPPRESSION_SAVE_FAILED'),
     };
   }
   if (error instanceof SuppressionCancelUnknownError) {
     return {
       warning: 'status_unknown',
-      notice: noticeFromCode('CANCEL_UNKNOWN'),
+      notice: noticeFromCodeIn(messages, 'CANCEL_UNKNOWN'),
     };
   }
   return null;
@@ -294,24 +255,34 @@ export function getAlarmRemainsCode(reason: string): ErrorCode {
 }
 
 /** Notice for a stop attempt that left the alarm in place. */
-export function describeAlarmRemains(reason: string): ErrorNotice {
-  return noticeFromCode(getAlarmRemainsCode(reason));
+export function describeAlarmRemains(
+  reason: string,
+  messages: Messages,
+): ErrorNotice {
+  return noticeFromCodeIn(messages, getAlarmRemainsCode(reason));
 }
 
 const DISTANT_FIRST_RING_MS = 24 * 60 * 60_000;
 
-function formatLead(milliseconds: number): string {
+/** "in 2 hours 5 minutes": the time left until a due time, rounded up. */
+export function formatLeadTime(
+  milliseconds: number,
+  messages: Messages,
+): string {
+  if (milliseconds <= 0) {
+    return messages.lead.soon;
+  }
   const totalMinutes = Math.max(1, Math.ceil(milliseconds / 60_000));
   const days = Math.floor(totalMinutes / (24 * 60));
   const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
   const minutes = totalMinutes % 60;
   if (days > 0) {
-    return `${days}日${hours}時間後`;
+    return messages.lead.daysHours(days, hours);
   }
   if (hours > 0) {
-    return `${hours}時間${minutes > 0 ? `${minutes}分` : ''}後`;
+    return messages.lead.hoursMinutes(hours, minutes);
   }
-  return `${minutes}分後`;
+  return messages.lead.minutes(minutes);
 }
 
 export interface NewAlarmSummary {
@@ -333,16 +304,15 @@ export function summarizeNewAlarm(input: {
   minute: number;
   repeatKind: RepeatKind;
   customWeekdays: readonly Weekday[];
-  formatDate: (timestampMs: number) => string;
+  text: TextContext;
 }): NewAlarmSummary {
   const { nowMs, hour, minute, repeatKind } = input;
-  const clock = `${hour.toString().padStart(2, '0')}:${minute
-    .toString()
-    .padStart(2, '0')}`;
+  const { messages, formatter } = input.text;
+  const clock = formatter.clock(hour, minute);
 
   if (repeatKind === 'custom' && input.customWeekdays.length === 0) {
     return {
-      text: '曜日を選ぶと初回の日時が表示されます',
+      text: messages.summary.pickWeekdays,
       isDistant: false,
       canAdd: false,
     };
@@ -358,7 +328,7 @@ export function summarizeNewAlarm(input: {
     : makeAlarmRepeat(repeatKind, nowMs, input.customWeekdays);
   if (input.enabled === false) {
     return {
-      text: `${formatRepeatLabel(repeat)}・オフのまま保存します（オンにすると通知を予約します）`,
+      text: messages.summary.savedOff(formatRepeatLabel(repeat, messages, formatter)),
       isDistant: false,
       canAdd: true,
     };
@@ -370,8 +340,10 @@ export function summarizeNewAlarm(input: {
     return {
       text:
         repeatKind === 'today'
-          ? `${keptOriginalDate ? 'この日' : '今日'}の${clock}はすでに過ぎています。時刻を選び直してください`
-          : '初回の日時を計算できません',
+          ? keptOriginalDate
+            ? messages.summary.originalDayPassed(clock)
+            : messages.summary.todayPassed(clock)
+          : messages.summary.cannotCompute,
       isDistant: false,
       canAdd: false,
     };
@@ -380,38 +352,40 @@ export function summarizeNewAlarm(input: {
   const lead = nextAtMs - nowMs;
   if (lead < MIN_ARM_LEAD_MS) {
     return {
-      text: `${clock}は直前すぎて予約できません。時刻を選び直してください`,
+      text: messages.summary.tooSoon(clock),
       isDistant: false,
       canAdd: false,
     };
   }
   return {
-    text: `${formatRepeatLabel(repeat)}・初回 ${input.formatDate(
-      nextAtMs,
-    )} ${clock}（${formatLead(lead)}）`,
+    text: messages.summary.firstRing(
+      formatRepeatLabel(repeat, messages, formatter),
+      formatter.day(nextAtMs),
+      clock,
+      formatLeadTime(lead, messages),
+    ),
     isDistant: lead > DISTANT_FIRST_RING_MS,
     canAdd: true,
   };
 }
 
-/** The stop control stops the sound; it is not a wake-up confirmation. */
-export const RINGING_STOP_LABEL = 'アラームを止める';
-
-export const RINGING_STOP_HINT =
-  '鳴っているアラーム音を止めます。繰り返しの次回以降は残ります';
-
 /**
  * The label VoiceOver reads when focus lands on the stop control. It carries
  * the time and that the alarm is ringing, so it does not depend on a separate
- * announcement that the focus move would cut off.
+ * announcement that the focus move would cut off. The stop control stops the
+ * sound; it is not a wake-up confirmation.
  */
 export function getRingingStopA11yLabel(
   hour: number,
   minute: number,
+  { messages, formatter }: TextContext,
   dateLabel?: string,
 ): string {
-  const date = dateLabel ? `${dateLabel} ` : '';
-  return `${date}${hour}時${minute}分のアラームが鳴っています。${RINGING_STOP_LABEL}`;
+  return messages.ringing.stopSpoken(
+    formatter.clock(hour, minute),
+    messages.ringing.stopLabel,
+    dateLabel,
+  );
 }
 
 /**
@@ -430,9 +404,6 @@ export function getRingingDisplay(cycle: StoredAlarm): {
       : cycle.dueAtMs;
   return { timeMs: ms, dateMs: ms };
 }
-
-export const MISSED_CARD_ANNOUNCEMENT =
-  '見逃したアラームがあります。音は鳴らしていません。確認済みにできます。';
 
 export interface MissedAnnouncementPlan {
   announce: boolean;
@@ -464,7 +435,7 @@ function isTerminalCycle(cycle: StoredAlarm): boolean {
 }
 
 export interface TodayOnlyExpiry {
-  /** Replaces the repeat label in the row, e.g. "今日だけ（10/15） ・ 終了". */
+  /** Replaces the repeat label in the row, e.g. "Today only (10/15) · Ended". */
   rowLabel: string;
   /** Spoken suffix carrying the original date and the Ended state. */
   a11yLabel: string;
@@ -478,7 +449,7 @@ export interface TodayOnlyExpiry {
 export function describeTodayOnlyExpiry(
   definition: StoredAlarmDefinition,
   nowMs: number,
-  formatDate: (timestampMs: number) => string,
+  { messages, formatter }: TextContext,
 ): TodayOnlyExpiry | null {
   const { repeat } = definition;
   if (repeat.kind !== 'today' || !repeat.dateKey) {
@@ -493,14 +464,13 @@ export function describeTodayOnlyExpiry(
     return null;
   }
   const [year, month, day] = repeat.dateKey.split('-').map(Number);
-  const date = formatDate(
+  const date = formatter.day(
     new Date(year, month - 1, day, definition.hour, definition.minute).getTime(),
   );
   return {
-    rowLabel: `今日だけ（${date}） ・ 終了`,
-    a11yLabel: `今日だけ、${date}、終了`,
-    explanation:
-      'この日の分は終了しました。もう一度使うには、新しいアラームを追加してください',
+    rowLabel: messages.repeat.todayOnlyEnded(date),
+    a11yLabel: messages.repeat.todayOnlyEndedSpoken(date),
+    explanation: messages.repeat.todayOnlyEndedExplanation,
   };
 }
 

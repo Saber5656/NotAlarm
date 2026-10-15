@@ -1,3 +1,5 @@
+import type { Messages } from './i18n/messages';
+
 /**
  * Whether a scheduled local notification can wake the user while the app is
  * not in the foreground. Only 'ok' means the OS will play the alarm sound;
@@ -155,11 +157,7 @@ export function shouldWarnNotificationDelivery(
   );
 }
 
-const WARNING_TITLES: Record<Exclude<NotificationDeliveryState, 'ok'>, string> = {
-  off: '通知がオフです',
-  silent: '通知の音がオフです',
-  unknown: '通知の状態を確認できません',
-};
+type WarningState = Exclude<NotificationDeliveryState, 'ok'>;
 
 // Without notifications only the in-app loop sound can ring, and it can only
 // start while the app is on screen: at the due time a closed app, a locked
@@ -167,47 +165,40 @@ const WARNING_TITLES: Record<Exclude<NotificationDeliveryState, 'ok'>, string> =
 // configured to keep playing in the background; unverified on a device in
 // Expo Go). Off / silent therefore name staying on screen,
 // not only closing.
-const WARNING_CONSEQUENCES: Record<
-  Exclude<NotificationDeliveryState, 'ok'>,
-  { reason: string; withNext: string; withoutNext: string }
-> = {
-  off: {
-    reason: '通知がオフのため、',
-    withNext: 'アプリを画面に表示したままにしていないと鳴りません。',
-    withoutNext: 'アプリを画面に表示したままにしていないとアラームが鳴りません。',
-  },
-  silent: {
-    reason: '通知の音がオフのため、',
-    withNext: 'アプリを画面に表示したままにしていないと音が出ません。',
-    withoutNext:
-      'アプリを画面に表示したままにしていないとアラームの音が出ません。',
-  },
-  unknown: {
-    reason: '',
-    withNext: '鳴るか確認できません。',
-    withoutNext: 'アラームが鳴るか確認できません。',
-  },
-};
-
-const WARNING_SCHEDULE_LINES: Record<
-  Exclude<NotificationDeliveryState, 'ok'>,
-  string
-> = {
-  off: '通知オフ・アプリ表示中のみ鳴ります',
-  silent: '通知音オフ・アプリ表示中のみ音が出ます',
-  unknown: '通知の状態を確認できません',
-};
-
 export function getNotificationDeliveryWarningCopy(
-  state: Exclude<NotificationDeliveryState, 'ok'>,
+  state: WarningState,
   nextAlarmLabel: string | null,
+  messages: Messages,
 ): NotificationDeliveryWarningCopy {
-  const consequence = WARNING_CONSEQUENCES[state];
+  const d = messages.delivery;
+  const text = {
+    off: {
+      title: d.titleOff,
+      reason: d.reasonOff,
+      withNext: d.withNextOff,
+      withoutNext: d.withoutNextOff,
+      scheduleLine: d.scheduleLineOff,
+    },
+    silent: {
+      title: d.titleSilent,
+      reason: d.reasonSilent,
+      withNext: d.withNextSilent,
+      withoutNext: d.withoutNextSilent,
+      scheduleLine: d.scheduleLineSilent,
+    },
+    unknown: {
+      title: d.titleUnknown,
+      reason: d.reasonUnknown,
+      withNext: d.withNextUnknown,
+      withoutNext: d.withoutNextUnknown,
+      scheduleLine: d.scheduleLineUnknown,
+    },
+  }[state];
   return {
-    title: WARNING_TITLES[state],
+    title: text.title,
     body: nextAlarmLabel
-      ? `${consequence.reason}次のアラーム ${nextAlarmLabel} は、${consequence.withNext}`
-      : `${consequence.reason}${consequence.withoutNext}`,
-    scheduleLine: WARNING_SCHEDULE_LINES[state],
+      ? d.bodyWithNext(text.reason, nextAlarmLabel, text.withNext)
+      : d.bodyWithoutNext(text.reason, text.withoutNext),
+    scheduleLine: text.scheduleLine,
   };
 }

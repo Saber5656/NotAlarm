@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { en, ja } from '../src/i18n';
+
 // App.tsx cannot be rendered under tsx, so these checks read its source to
 // guard the wiring that pure-function tests cannot see. They are a tripwire,
 // not a substitute for the device checks in docs/DEVICE_TEST.md.
@@ -71,7 +73,10 @@ test('refill skips alarms with unsettled suppressions and fails closed if unread
 });
 
 test('suppression failures are shown through the dedicated warning, not "alarm on"', () => {
-  assert.equal(app.match(/classifySuppressionFailure\(error\)/g)?.length, 3);
+  assert.equal(
+    app.match(/classifySuppressionFailure\(error, messagesNow\(\)\)/g)?.length,
+    3,
+  );
   assert.match(app, /testID="suppression-warning"/);
 });
 
@@ -136,7 +141,7 @@ test('settings deletion confirms twice, reuses the reset service and never runs 
   assert.doesNotMatch(failure, /setCurrentAlarms/);
 
   assert.match(app, /visible=\{isSettingsOpen && !ringingCycle\}/);
-  assert.match(app, /accessibilityLabel=\{LOCAL_DATA_COPY\.settingsLabel\}/);
+  assert.match(app, /accessibilityLabel=\{messages\.settings\.openLabel\}/);
 });
 
 test('an unfinished deletion blocks refill reservations and new alarms', () => {
@@ -169,7 +174,7 @@ test('the reset gate is installed at the storage layer and completion advances t
 test('results read before a finished deletion never reach the screen', () => {
   const setter = block('const setCurrentAlarms', 'alarmsRef.current = next;');
   assert.match(setter, /isStaleStorageResult\(next\)/);
-  const refill = block('await refillEnabledSchedulesOnce(trigger', 'recordRefill(result.attempt)');
+  const refill = block('await refillEnabledSchedulesOnce(', 'recordRefill(result.attempt)');
   assert.match(refill, /isStaleStorageResult\(result\.alarms\)/);
 });
 
@@ -190,7 +195,7 @@ test('a refused stop stops sound and the banner itself and never rewrites the al
   );
   assert.match(refused, /dismissDeliveredNotification\(cycle\.mainAlarmId\)/);
   assert.doesNotMatch(refused, /setCurrentAlarms/);
-  assert.match(refused, /noticeFromCode\('STOP_RESET_PENDING'\)/);
+  assert.match(refused, /noticeFromCodeIn\(messagesNow\(\), 'STOP_RESET_PENDING'\)/);
   // The stop record itself is only written by the locked snooze service.
   assert.doesNotMatch(stop, /saveStoredAlarm\(/);
 });
@@ -391,7 +396,9 @@ test('startup settles unfinished edits before suppressions, and refill skips the
 });
 
 test('the composer is opened for an edit only through the guarded handler', () => {
-  assert.match(app, /のアラームを編集`\}/);
+  assert.match(app, /messages\.edit\.editSpoken\(/);
+  assert.match(ja.edit.editSpoken('7:00', '毎日'), /のアラームを編集/);
+  assert.match(en.edit.editSpoken('7:00', 'Daily'), /Edit the 7:00 alarm/);
   assert.match(app, /onPress=\{\(\) => void openEditComposer\(definition\)\}/);
   const open = block('const openEditComposer = useCallback', 'const editAlarm = useCallback');
   assert.match(open, /runUnlessAlarmListLocked/);
@@ -578,7 +585,7 @@ test('a failed delivery save reports a pending deletion instead of a generic fai
   assert.match(caught, /reportResetPending\(error\)/);
   assert.ok(
     caught.indexOf('reportResetPending(error)') <
-      caught.indexOf('保存できませんでした'),
+      caught.indexOf('ringing.persistFailed'),
   );
   assert.match(app, /\[handleAwakeResponse, isLoaded, reportResetPending, setCurrentAlarms\]/);
 });
@@ -615,8 +622,8 @@ test('unverified main ids are journaled, block retries, and reconcile/reset reso
 test('edit failures and rollbacks go through the catalog and the durable record', () => {
   const perform = block('const performEditAlarm = useCallback', 'const openEditComposer');
   assert.doesNotMatch(perform, /error\.message|error instanceof Error/);
-  assert.match(perform, /describeError\(error\)/);
-  assert.match(perform, /noticeFromCode\('EDIT_CLEANUP_PENDING'\)/);
+  assert.match(perform, /describeErrorIn\(messagesNow\(\), error\)/);
+  assert.match(perform, /noticeFromCodeIn\(messagesNow\(\), 'EDIT_CLEANUP_PENDING'\)/);
   // Every add/enable/refill rollback records ids it could not cancel.
   const callers = app.match(/withScheduledNotificationRollback\(/g)?.length ?? 0;
   assert.equal(
@@ -627,23 +634,26 @@ test('edit failures and rollbacks go through the catalog and the durable record'
 
 test('cancellation failure copy is shown only when the resume record exists', () => {
   assert.match(app, /async function cancellationFailureNotice/);
-  assert.doesNotMatch(app, /setNotice\(noticeFromCode\('DELETE_CANCEL_INCOMPLETE'\)\)/);
-  assert.doesNotMatch(app, /:\s*noticeFromCode\('DISABLE_CANCEL_INCOMPLETE'\)/);
+  assert.doesNotMatch(app, /setNotice\(noticeFromCodeIn\([^)]*'DELETE_CANCEL_INCOMPLETE'\)\)/);
+  assert.doesNotMatch(app, /:\s*noticeFromCodeIn\([^)]*'DISABLE_CANCEL_INCOMPLETE'\)/);
 });
 
 test('a saved stop is shown before the refill, and a refill failure is not a failed stop', () => {
   const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
-  assert.match(stop, /presentStopped\(result,/);
+  assert.match(stop, /presentStopped\(\s*result,/);
   assert.match(stop, /getSnoozeCopy\.stopFailureCode\(result\.reason\)/);
-  assert.match(stop, /noticeFromCode\('STOP_FOLLOWUP_FAILED'\)/);
+  assert.match(stop, /noticeFromCodeIn\(messagesNow\(\), 'STOP_FOLLOWUP_FAILED'\)/);
   assert.doesNotMatch(stop, /STOP_CANCEL_FAILED|error\.message|refillError/);
 });
 
 test('snooze outcomes use catalog codes and a saved snooze survives a failed read-back', () => {
   const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
-  assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\)\)/);
-  assert.match(snooze, /presentSnoozeRejected\(result, outcomeEffects\(\)\)/);
-  assert.match(snooze, /noticeFromCode\('SNOOZE_RESET_PENDING'\)/);
+  assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\), textRef\.current\)/);
+  assert.match(
+    snooze,
+    /presentSnoozeRejected\(result, outcomeEffects\(\), textRef\.current\)/,
+  );
+  assert.match(snooze, /noticeFromCodeIn\(messagesNow\(\), 'SNOOZE_RESET_PENDING'\)/);
   assert.doesNotMatch(snooze, /error\.message|端末の通知を確認|loadAlarmDefinitions/);
 });
 
@@ -664,6 +674,7 @@ test('the reconcile pass releases its main ids at the checkpoint and abandons th
 test('missed acknowledgement shows the aggregate notice, not the last refill side effect', () => {
   const ack = block('const acknowledgeMissed = useCallback', 'const outcomeEffects');
   assert.match(ack, /getMissedAcknowledgementNotice\(/);
+  assert.match(ack, /getMissedAcknowledgementNotice\([^)]*messagesNow\(\)/);
   assert.match(ack, /collectedIssues|refillIssues/);
   assert.doesNotMatch(ack, /result\.refillSeverity === 'none'/);
 });
@@ -671,13 +682,18 @@ test('missed acknowledgement shows the aggregate notice, not the last refill sid
 test('the ringing display and focused label use the occurrence date and current ring time', () => {
   const card = block('{ringingCycle ? (', 'missedCycles.length > 0 ? (');
   assert.match(card, /getRingingDisplay\(ringingCycle\)/);
-  assert.match(card, /getRingingStopA11yLabel\([\s\S]*formatNextDate/);
+  assert.match(card, /getRingingStopA11yLabel\([\s\S]*formatter\.day\(/);
+  assert.doesNotMatch(card, /formatNextDate/);
 });
 
 test('missed cycles are announced by tracked ids without moving focus', () => {
   assert.match(app, /planMissedAnnouncement\(/);
-  assert.match(app, /announceForAccessibility\(MISSED_CARD_ANNOUNCEMENT\)/);
-  const effect = block('planMissedAnnouncement({', 'MISSED_CARD_ANNOUNCEMENT)');
+  assert.match(
+    app,
+    /announceForAccessibility\(\s*messagesNow\(\)\.missed\.cardAnnouncement,?\s*\)/,
+  );
+  assert.doesNotMatch(app, /MISSED_CARD_ANNOUNCEMENT/);
+  const effect = block('planMissedAnnouncement({', 'missed.cardAnnouncement,');
   assert.doesNotMatch(effect, /setAccessibilityFocus/);
   assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
 });
@@ -688,9 +704,9 @@ test('missed announcements queue on iOS and wait for the app to be active', () =
   assert.match(effect, /Platform\.OS === 'ios'/);
   assert.match(
     effect,
-    /announceForAccessibilityWithOptions\(\s*MISSED_CARD_ANNOUNCEMENT,\s*\{\s*queue: true\s*\}/,
+    /announceForAccessibilityWithOptions\(\s*messagesNow\(\)\.missed\.cardAnnouncement,\s*\{\s*queue: true\s*\}/,
   );
-  assert.match(effect, /announceForAccessibility\(MISSED_CARD_ANNOUNCEMENT\)/);
+  assert.match(effect, /announceForAccessibility\(\s*messagesNow\(\)\.missed\.cardAnnouncement,?\s*\)/);
   // Only a real `active` state announces; inactive/background stay pending.
   assert.match(app, /setIsAppActive\(state === 'active'\)/);
   assert.match(app, /useState\(\s*\(\) => AppState\.currentState === 'active',?\s*\)/);
@@ -700,4 +716,20 @@ test('missed announcements queue on iOS and wait for the app to be active', () =
   // Keep-awake policy is unchanged and the AppState subscription is shared.
   assert.match(app, /setIsAppForeground\(isForegroundAppState\(state\)\)/);
   assert.equal(app.match(/setIsAppActive\b/g)?.length, 2);
+});
+
+test('settings close is guarded by the deletion ref and a failed deletion also reaches home in the chosen language', () => {
+  assert.match(app, /canCloseSettings\(\{ deletionInFlight: deletionInFlightRef\.current \}\)/);
+  assert.match(app, /onClose=\{closeSettings\}/);
+  assert.match(app, /setSettingsNotice\(messagesNow\(\)\.settings\.failed\)/);
+  assert.match(app, /text: messagesNow\(\)\.settings\.failedHome/);
+  assert.doesNotMatch(app, /LOCAL_DATA_COPY/);
+});
+
+test('the screen scroll policy still drives the failure-card scroll', () => {
+  assert.match(app, /getScreenScrollPolicy\(/);
+});
+
+test('no conflict markers remain in the app entry', () => {
+  assert.doesNotMatch(app, /^(<<<<<<<|=======|>>>>>>>)/m);
 });

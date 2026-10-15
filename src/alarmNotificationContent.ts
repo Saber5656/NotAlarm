@@ -1,18 +1,11 @@
-const MAIN_ALARM_BODY =
-  '起床が確認できなかったため、アラームを鳴らしています。';
+import type { Messages } from './i18n/messages';
+
 // Later occurrences are only reserved while the app runs, so users who stop a
 // repeating alarm from the notification are told to open the app.
-const KEEP_RESERVING_HINT = 'アプリを開くと次回以降の予約を続けます。';
-
-export function getMainAlarmNotificationBody(input: {
-  repeats: boolean;
-}): string {
-  return input.repeats
-    ? `${MAIN_ALARM_BODY}${KEEP_RESERVING_HINT}`
-    : MAIN_ALARM_BODY;
+export function getMainAlarmNotificationBody(
+  input: { repeats: boolean },
+  messages: Messages,
+): string {
+  const { mainBody, keepReservingHint } = messages.notifications;
+  return input.repeats ? `${mainBody}${keepReservingHint}` : mainBody;
 }
-
-/** Delivered by the snooze; says why the alarm is ringing again. */
-export const SNOOZE_NOTIFICATION_TITLE = '⏰ スヌーズの時間です';
-export const SNOOZE_NOTIFICATION_BODY =
-  'スヌーズした時間になりました。アラームを止めるにはアプリを開いてください。';

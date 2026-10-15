@@ -6,6 +6,7 @@ import { describeErrorCode, isErrorCode, noticeFromCodes } from '../src/errorCat
 import { getSnoozeCopy } from '../src/snoozeCopy';
 import { presentSnoozeRejected, presentSnoozed, presentStopped } from '../src/snoozeOutcome';
 import { stampStorageResult } from '../src/storageResetGate';
+import { EN_TEXT, JA_TEXT } from './support/text';
 
 const CYCLE = { cycleId: 'c1' } as unknown as StoredAlarm;
 const OK = {};
@@ -123,6 +124,7 @@ test('a stop shows sound and the committed snapshot before a refill that then fa
   const out = await presentStopped(
     { cycle: CYCLE, alarms: stampStorageResult([]) },
     h.effects,
+    JA_TEXT,
   );
   assert.deepEqual(h.calls, ['sound', 'apply', 'refill']);
   assert.equal(out.notice.code, 'STOP_FOLLOWUP_FAILED');
@@ -134,6 +136,7 @@ test('a stop with unconfirmed cleanup and a failed refill reports both', async (
   const out = await presentStopped(
     { cycle: CYCLE, alarms: stampStorageResult([]), ...MEMORY },
     h.effects,
+    JA_TEXT,
   );
   assert.ok(out.notice.text.includes(describeErrorCode('STOP_FOLLOWUP_FAILED').message));
   assert.ok(out.notice.text.includes(describeErrorCode('STOP_CLEANUP_MEMORY_ONLY').message));
@@ -144,6 +147,7 @@ test('a successful refill does not hide unconfirmed cleanup', async () => {
   const out = await presentStopped(
     { cycle: CYCLE, alarms: stampStorageResult([]), ...UNCONFIRMED },
     h.effects,
+    JA_TEXT,
   );
   assert.equal(out.notice.code, 'STOP_CLEANUP_UNCONFIRMED');
   assert.equal(out.notice.tone, 'warning');
@@ -153,12 +157,14 @@ test('a clean stop is plain success and a refill blocked by a reset is flagged',
   const clean = await presentStopped(
     { cycle: CYCLE, alarms: stampStorageResult([]) },
     harness().effects,
+    JA_TEXT,
   );
   assert.equal(clean.notice.code, undefined);
   assert.equal(clean.notice.tone, 'neutral');
   const blocked = await presentStopped(
     { cycle: CYCLE, alarms: stampStorageResult([]) },
     harness({ refillThrows: 'reset' }).effects,
+    JA_TEXT,
   );
   assert.equal(blocked.deletionPending, true);
   assert.equal(blocked.notice.code, 'STOP_FOLLOWUP_RESET_PENDING');
@@ -167,7 +173,7 @@ test('a clean stop is plain success and a refill blocked by a reset is flagged',
 
 test('without a committed snapshot the stop reads best effort and a read failure is swallowed', async () => {
   const h = harness({ reloadThrows: true });
-  const out = await presentStopped({ cycle: CYCLE }, h.effects);
+  const out = await presentStopped({ cycle: CYCLE }, h.effects, JA_TEXT);
   assert.deepEqual(h.calls, ['sound', 'refill', 'reload']);
   assert.equal(out.notice.code, undefined);
   assert.doesNotMatch(out.notice.text, /token|private/);
@@ -178,6 +184,7 @@ test('an accepted snooze applies its snapshot first and never reloads over it', 
   const notice = await presentSnoozed(
     { status: 'snoozed', cycle: CYCLE, dueAtMs: Date.UTC(2026, 0, 1, 6, 30), alarms: stampStorageResult([]), ...UNCONFIRMED },
     h.effects,
+    JA_TEXT,
   );
   assert.deepEqual(h.calls, ['sound', 'apply']);
   assert.equal(notice.code, 'SNOOZE_ACCEPTED_CLEANUP_UNCONFIRMED');
@@ -188,6 +195,7 @@ test('a clean accepted snooze announces the time with no error code', async () =
   const notice = await presentSnoozed(
     { status: 'snoozed', cycle: CYCLE, dueAtMs: new Date(2026, 0, 1, 6, 30).getTime(), alarms: stampStorageResult([]) },
     harness().effects,
+    JA_TEXT,
   );
   assert.equal(notice.code, undefined);
   assert.match(notice.text, /06:30|6:30/);
@@ -198,6 +206,7 @@ test('a rejected snooze reads stored state without the sound stopping, then repo
   const notice = await presentSnoozeRejected(
     { status: 'rejected', reason: 'SCHEDULE_FAILED', ...MEMORY },
     h.effects,
+    JA_TEXT,
   );
   assert.deepEqual(h.calls, ['reload']);
   assert.equal(notice.code, 'SNOOZE_CLEANUP_MEMORY_ONLY');

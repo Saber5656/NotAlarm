@@ -1,4 +1,5 @@
 import { errorCodeOf } from './errorCatalog';
+import type { Messages } from './i18n/messages';
 import {
   scheduleAlarmNotificationsFailSafe,
   type AlarmSchedulingGateway,
@@ -1436,7 +1437,9 @@ export interface ReconcileSummary {
 /** Picks the single most important thing to tell the user after a pass. */
 export function summarizeReconciliation(
   input: ReconcileSummaryInput,
+  messages: Messages,
 ): ReconcileSummary {
+  const text = messages.reconcile;
   const open = Object.entries(input.statuses).filter(
     ([, status]) =>
       status === 'missing' ||
@@ -1452,7 +1455,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'danger',
-        text: '保存できなかった予約のうち、端末から解除できていない通知があります。次回の起動時に解除を再試行します。',
+        text: text.unrecoveredNotifications,
       },
     };
   }
@@ -1462,7 +1465,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'danger',
-        text: '解除できていない通知の記録を読めないため、新しい予約の追加を止めています。アラームの状態を確認してください。',
+        text: text.orphansUnreadable,
       },
     };
   }
@@ -1472,7 +1475,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'danger',
-        text: '解除できていない通知が端末に残っています。同じアラームが重複して鳴る可能性があるため、新しい予約の追加を止めています。次回の起動時に解除を再試行します。',
+        text: text.pendingOrphans,
       },
     };
   }
@@ -1482,7 +1485,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'warning',
-        text: '端末の通知予約を確認できません。アラームが鳴る保証がないため、各アラームの状態を確認してください。',
+        text: text.queueUnverified,
       },
     };
   }
@@ -1494,7 +1497,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'danger',
-        text: '端末の通知予約が上限(64件)に近く、アラームを再予約できませんでした。不要なアラームを削除または無効にしてから、アプリを開き直してください。',
+        text: text.capacityFull,
       },
     };
   }
@@ -1503,7 +1506,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'danger',
-        text: '端末に通知が見つからないアラームがあり、再予約できませんでした。各アラームの状態を確認してください。',
+        text: text.missing,
       },
     };
   }
@@ -1512,7 +1515,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'warning',
-        text: '端末の通知予約を確認できません。アラームが鳴る保証がないため、各アラームの状態を確認してください。',
+        text: text.queueUnverified,
       },
     };
   }
@@ -1521,7 +1524,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'warning',
-        text: '古い時刻と新しい時刻の予約が両方残っているため、同じアラームが2回鳴る可能性があります。',
+        text: text.duplicated,
       },
     };
   }
@@ -1530,7 +1533,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'warning',
-        text: '一部の起床確認通知を再予約できませんでした。',
+        text: text.checkInMissing,
       },
     };
   }
@@ -1539,9 +1542,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'warning',
-        text: input.zoneChanged
-          ? 'タイムゾーンの変更に合わせて、今後のアラーム予約を組み直しました。'
-          : '時刻の変更に合わせて、今後のアラーム予約を組み直しました。',
+        text: input.zoneChanged ? text.replannedZone : text.replannedTime,
       },
     };
   }
@@ -1550,7 +1551,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'warning',
-        text: '端末から消えていたアラーム通知を再予約しました。',
+        text: text.repaired,
       },
     };
   }

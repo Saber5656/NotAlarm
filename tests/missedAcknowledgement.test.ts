@@ -10,6 +10,7 @@ import {
 } from '../src/missedAcknowledgement';
 import type { StoredAlarm } from '../src/alarmStorage';
 import type { AlarmScheduleIssue } from '../src/alarmScheduling';
+import { en, ja } from './support/text';
 
 function cycle(cycleId: string, alarmId = 'alarm-1'): StoredAlarm {
   return {
@@ -276,6 +277,7 @@ test('the final notice reflects the aggregate: an earlier danger survives a late
   const notice = getMissedAcknowledgementNotice(
     { status: 'acknowledged', refillSeverity: 'danger' },
     [issue('main_schedule_failed'), issue('check_in_schedule_failed')],
+    ja,
   );
   assert.equal(notice?.tone, 'danger');
   assert.equal(codeOf(notice), 'MAIN_REGISTER_FAILED');
@@ -285,16 +287,45 @@ test('a later main failure also wins over an earlier check-in warning', () => {
   const notice = getMissedAcknowledgementNotice(
     { status: 'acknowledged', refillSeverity: 'danger' },
     [issue('check_in_schedule_failed'), issue('main_schedule_failed')],
+    ja,
   );
   assert.equal(codeOf(notice), 'MAIN_REGISTER_FAILED');
 });
 
 test('clean acknowledgement is neutral; failures map to catalog codes', () => {
   assert.equal(
-    getMissedAcknowledgementNotice({ status: 'acknowledged', refillSeverity: 'none' }, [])?.tone,
+    getMissedAcknowledgementNotice({ status: 'acknowledged', refillSeverity: 'none' }, [], ja)?.tone,
     'neutral',
   );
-  assert.equal(codeOf(getMissedAcknowledgementNotice({ status: 'persist_failed' }, [])), 'MISSED_ACK_FAILED');
-  assert.equal(codeOf(getMissedAcknowledgementNotice({ status: 'refill_failed' }, [])), 'REFILL_FAILED');
-  assert.equal(getMissedAcknowledgementNotice({ status: 'nothing' }, []), null);
+  assert.equal(codeOf(getMissedAcknowledgementNotice({ status: 'persist_failed' }, [], ja)), 'MISSED_ACK_FAILED');
+  assert.equal(codeOf(getMissedAcknowledgementNotice({ status: 'refill_failed' }, [], ja)), 'REFILL_FAILED');
+  assert.equal(getMissedAcknowledgementNotice({ status: 'nothing' }, [], ja), null);
+});
+
+test('the acknowledgement notice keeps its code and tone in both languages', () => {
+  const cases: Array<[Parameters<typeof getMissedAcknowledgementNotice>[0], AlarmScheduleIssue[]]> = [
+    [{ status: 'persist_failed' }, []],
+    [{ status: 'refill_failed' }, []],
+    [{ status: 'acknowledged', refillSeverity: 'none' }, []],
+    [{ status: 'acknowledged', refillSeverity: 'danger' }, [issue('check_in_schedule_failed'), issue('main_schedule_failed')]],
+    [{ status: 'acknowledged', refillSeverity: 'warning' }, [issue('check_in_schedule_failed')]],
+  ];
+  for (const [result, issues] of cases) {
+    const inJa = getMissedAcknowledgementNotice(result, issues, ja);
+    const inEn = getMissedAcknowledgementNotice(result, issues, en);
+    assert.equal(inJa?.tone, inEn?.tone);
+    assert.equal(codeOf(inJa), codeOf(inEn));
+    assert.ok(inJa && inEn);
+    assert.doesNotMatch(inEn.text, /[぀-ヿ㐀-鿿]/);
+    assert.match(inJa.text, /[぀-ヿ㐀-鿿]/);
+  }
+  assert.equal(getMissedAcknowledgementNotice({ status: 'nothing' }, [], en), null);
+  assert.equal(
+    getMissedAcknowledgementNotice({ status: 'refill_failed' }, [], en)?.text,
+    en.missed.acknowledgeRefillFailed,
+  );
+  assert.equal(
+    getMissedAcknowledgementNotice({ status: 'acknowledged', refillSeverity: 'none' }, [], en)?.text,
+    en.missed.acknowledged,
+  );
 });

@@ -1,4 +1,7 @@
-import { type ErrorCode, noticeFromCode } from './errorCatalog';
+import type { ErrorCode } from './errorCatalog';
+import { noticeFromCodeIn } from './i18n/errorText';
+import type { TextContext } from './i18n/context';
+import type { Messages } from './i18n/messages';
 import {
   SNOOZE_INTERVAL_MS,
   SNOOZE_MAX_COUNT,
@@ -16,44 +19,44 @@ export interface SnoozeCopy {
 
 const SNOOZE_MINUTES = SNOOZE_INTERVAL_MS / 60_000;
 
-function clock(ms: number): string {
-  const date = new Date(ms);
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-}
-
 /**
  * Wording for the ringing card (secondary to stopping) and for the card shown
  * while a snooze waits. `nextAtMs` is when the next ring would be.
  */
-export function getSnoozeCopy(input: {
-  phase: 'ringing' | 'snoozed';
-  used: number;
-  nextAtMs: number;
-}): SnoozeCopy {
+export function getSnoozeCopy(
+  input: {
+    phase: 'ringing' | 'snoozed';
+    used: number;
+    nextAtMs: number;
+  },
+  { messages, formatter }: TextContext,
+): SnoozeCopy {
+  const copy = messages.snooze;
   const remaining = Math.max(0, SNOOZE_MAX_COUNT - input.used);
+  const clock = formatter.clockAt(input.nextAtMs);
   if (input.phase === 'snoozed') {
     return {
-      title: 'スヌーズ中',
-      detail: `${clock(input.nextAtMs)}にもう一度鳴ります（${input.used}回目・${SNOOZE_MAX_COUNT}回まで）。起きたことにはなりません。`,
-      actionLabel: 'アラームを止める',
-      actionHint: 'もう一度鳴らす予定も取り消して、この回のアラームを終えます。',
+      title: copy.waitingTitle,
+      detail: copy.waitingDetail(clock, input.used, SNOOZE_MAX_COUNT),
+      actionLabel: copy.stopLabel,
+      actionHint: copy.stopHint,
       actionDisabled: false,
     };
   }
   if (remaining === 0) {
     return {
-      title: 'スヌーズ',
-      detail: `スヌーズは${SNOOZE_MAX_COUNT}回までです。止めるまで鳴り続けます。`,
-      actionLabel: `${SNOOZE_MINUTES}分後にもう一度鳴らす`,
-      actionHint: '回数の上限に達したため使えません。',
+      title: copy.title,
+      detail: copy.exhaustedDetail(SNOOZE_MAX_COUNT),
+      actionLabel: copy.actionLabel(SNOOZE_MINUTES),
+      actionHint: copy.exhaustedHint,
       actionDisabled: true,
     };
   }
   return {
-    title: 'スヌーズ',
-    detail: `${clock(input.nextAtMs)}にもう一度鳴らします（あと${remaining}回できます）。起きたことにはなりません。`,
-    actionLabel: `${SNOOZE_MINUTES}分後にもう一度鳴らす`,
-    actionHint: `いまの音を止めて、${SNOOZE_MINUTES}分後にもう一度鳴らします。`,
+    title: copy.title,
+    detail: copy.availableDetail(clock, remaining),
+    actionLabel: copy.actionLabel(SNOOZE_MINUTES),
+    actionHint: copy.actionHint(SNOOZE_MINUTES),
     actionDisabled: false,
   };
 }
@@ -96,8 +99,9 @@ getSnoozeCopy.failureCode = (
 
 getSnoozeCopy.failure = (
   reason: SnoozeRejection,
+  messages: Messages,
   report: CleanupReport = {},
-): string => noticeFromCode(getSnoozeCopy.failureCode(reason, report)).text;
+): string => noticeFromCodeIn(messages, getSnoozeCopy.failureCode(reason, report)).text;
 
 /** Warning code when an accepted snooze left a cancellation unconfirmed. */
 getSnoozeCopy.acceptedCleanupCode = (report: CleanupReport): ErrorCode | null => {

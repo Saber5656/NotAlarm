@@ -58,7 +58,7 @@ UI は `isStaleStorageResult` で reset 前の結果を捨てる `setCurrentAlar
 
 - ALR-006（歩数監視）: 今回は鳴動遷移のみを実行・検証した。歩数監視のライフサイクルは本節の対象外。
 - ALR-007（周期の永続化・競合・冪等性）: 上表の配信遷移（競合・重複・版/破損 store 非修復・reset gate）が実行済み。他の全経路を網羅したとは主張しない。
-- ALR-011（プライバシー・ログ）: 診断カタログは Issue 20 で未実装（pending）。現行の UI エラー文言ヘルパーと record mapping の必要性は維持し、新たな raw native error を UI に出さない。この節は実行したテストの範囲に限る。
+- ALR-011（プライバシー・ログ）: 診断カタログは Issue 20 で実装済み（`src/errorCatalog.ts`、安定コード＋tone＋retry。UI は `error.message` を読まず、コードからだけ文を引く）。日英の文言は Issue 22 が `Messages.errors` に持つ（`tests/i18n.test.ts`）。この表と各節の実行結果は、カタログ導入前に実行した当時の履歴であり、書き換えていない（当時はカタログが未実装で pending と記録していた）。カタログ導入後の再実行結果は末尾の「統合後の再実行」に別記する。ログ収集・共有機能は未実装のまま。この節は実行したテストの範囲に限る。
 
 ## 未検証（物理端末・native）
 
@@ -85,3 +85,36 @@ UI は `isStaleStorageResult` で reset 前の結果を捨てる `setCurrentAlar
 | ID 重複排除、dismiss 失敗でも他 ID を試行、persist されなかった cycle・将来/迷子通知は触らない | › delivered ids are de-duplicated... / only persisted cycles are dismissed |
 
 制限: Expo SDK 57 の通知ドキュメントを確認したが、`content.data` は任意の JSON であり、`dueAtMs` の追加に SDK 固有の制約は見つかっていない。実機での配信確認は未実施。
+
+## 統合後の再実行（Issue 22 の日英化 + Issue 16/20/29/13/43 統合、2026-10-15）
+
+main 9b3eba3 に Issue 22 を再適用した作業ツリー（未コミット）での実行結果。上の各節の結果は書き換えていない。
+
+| 確認 | 結果 |
+|---|---|
+| `npm run typecheck` | 成功 |
+| `npm test` | 1080 件成功 / 0 件失敗（`tests/integratedLocalization.test.ts` 18 件、`tests/i18n.test.ts` のカタログ検査を含む） |
+| `npm run security:check` | 成功（文書化済みで未失効の例外のみ） |
+| `npx expo install --check` | 依存は最新（SDK 57、`expo-localization ~57.0.2`） |
+| `npx expo export --platform ios` / `--platform web` | どちらも成功 |
+
+- 安全性のテスト（配信・スヌーズ受理・停止の結果分離・リセット・チェックポイント・論理日付・容量）は弱めていない。変更したのは、文言の取得方法（`noticeFromCodeIn` 等・`TextContext` の引数）に合わせた呼び出しと、ソース検査の正規表現のみ（意図は同じ）。
+- ALR-011: カタログ（101 コード）は実装済みで、日英の全文は `Messages.errors` にある。
+- 未実施: 実機（Expo Go）、VoiceOver / TalkBack、ブラウザ DOM の実測、ネイティブビルドでの権限文言。export は実機起動の証明ではない。
+- #17 / #19 / #21 は上の実行には含まれない。含めた後の再実行は次節。
+
+## 最終機能統合後の再実行（#17/#19/#21 + Issue 22、2026-10-15）
+
+#17 head d8ab195（#19/#21 を含む）に Issue 22 を再適用した作業ツリー（未コミット）での実行結果。上の各節の結果は書き換えていない。
+
+| 確認 | 結果 |
+|---|---|
+| `npm run typecheck` | 成功 |
+| `npm test` | 1120 件成功 / 0 件失敗 |
+| `npm run security:check` | 成功（文書化済みで未失効の例外のみ） |
+| `npx expo install --check` | 依存は最新 |
+| `npx expo export --platform ios` / `--platform web` | どちらも成功（`/tmp/exp-ios-issue22-final-1792062504`、`/tmp/exp-web-issue22-final-1792062504`） |
+
+- 新規テストは先に赤を確認した（`/tmp/issue22-final-red.log`: 138 件中 12 件失敗。日付つき停止ラベル、`missed.cardAnnouncement`、`getMissedAcknowledgementNotice(…, messages)`、`settings.failedHome`、App の配線）。
+- 見逃し告知・集約 notice・日付つきラベル・failedHome は日英で code / tone が同一であることをテストで確認。`errorCatalog` は 101 コードのまま。
+- 未実施: 実機（Expo Go）、VoiceOver / TalkBack、ブラウザ DOM の実測（親の QA）、ネイティブビルド。export は実機起動の証明ではない。

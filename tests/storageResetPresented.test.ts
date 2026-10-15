@@ -12,9 +12,9 @@ import {
   type StorageResetGateway,
 } from "../src/storageReset";
 import {
-  LOCAL_DATA_COPY,
   canCloseSettings,
 } from "../src/localDataDeletion";
+import { en, ja } from "./support/text";
 
 function owned(identifier: string): ScheduledNotificationSnapshot {
   return {
@@ -222,6 +222,9 @@ test("a payload-owned id is persisted before cancellation, so a presented copy w
 test("settings cannot be closed while a deletion is in flight, and the failure copy tells how to retry from home", () => {
   assert.equal(canCloseSettings({ deletionInFlight: true }), false);
   assert.equal(canCloseSettings({ deletionInFlight: false }), true);
-  assert.match(LOCAL_DATA_COPY.failedHome, /設定/);
-  assert.match(LOCAL_DATA_COPY.failedHome, /データを削除/);
+  assert.match(ja.settings.failedHome, /設定/);
+  assert.match(ja.settings.failedHome, /データを削除/);
+  // English users get the same home notice, with no Japanese-only UI.
+  assert.match(en.settings.failedHome, /Settings/);
+  assert.doesNotMatch(en.settings.failedHome, /[぀-ヿ㐀-鿿]/);
 });

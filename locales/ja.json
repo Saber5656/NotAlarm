@@ -1,0 +1,6 @@
+{
+  "ios": {
+    "NSMotionUsageDescription": "起床確認のため、アプリを開いている間の歩数を計測します。",
+    "NSLocationWhenInUseUsageDescription": "日の出・日の入りに合わせた背景のため、ボタンを押したときだけおおよその現在地を一度使います。保存するのは約10km単位に丸めた値だけです。"
+  }
+}

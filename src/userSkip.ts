@@ -1,5 +1,6 @@
 import { STEP_WINDOW_LEAD_MS } from './alarmPolicy';
 import type { StoredAlarm } from './alarmStorage';
+import type { TextContext } from './i18n/context';
 
 /** The exact occurrence a skip dialog was opened for. */
 export interface UserSkipTarget {
@@ -55,25 +56,16 @@ export function captureUserSkipTarget(
   );
 }
 
-export const USER_SKIP_LABEL = '今回分だけ止める';
-
 export function describeUserSkipConfirmation(
   cycle: Pick<StoredAlarm, 'dueAtMs'>,
-  formatDate: (timestampMs: number) => string,
-  formatClock: (timestampMs: number) => string,
+  { messages, formatter }: TextContext,
 ): { title: string; body: string; confirmLabel: string; cancelLabel: string } {
   return {
-    title: '今回分だけ止めますか？',
-    body: `${formatDate(cycle.dueAtMs)} ${formatClock(
-      cycle.dueAtMs,
-    )} の回だけ止めます。ほかの予定の回と繰り返しの設定は変わりません。`,
-    confirmLabel: USER_SKIP_LABEL,
-    cancelLabel: 'キャンセル',
+    title: messages.skip.confirmTitle,
+    body: messages.skip.confirmBody(
+      `${formatter.day(cycle.dueAtMs)} ${formatter.clockAt(cycle.dueAtMs)}`,
+    ),
+    confirmLabel: messages.skip.label,
+    cancelLabel: messages.common.cancel,
   };
 }
-
-// Neutral about later days: a today-only alarm has none.
-export const USER_SKIP_DONE_NOTICE =
-  'この回だけ止めました。繰り返しの設定は変わりません。';
-export const USER_SKIP_HINT =
-  'この回だけ止めます。繰り返しの設定は変わりません。アラーム全体を止めるには一覧のスイッチを使います';

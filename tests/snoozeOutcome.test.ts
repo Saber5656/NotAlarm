@@ -131,11 +131,11 @@ test('without a snapshot the readback is best-effort: applied when it works, sil
 
 test('App hands stop and snooze to the shared presenters, never reloading before the sound stops', () => {
   const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
-  assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\)\)/);
+  assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\), textRef\.current\)/);
   assert.doesNotMatch(snooze, /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/);
 
   const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
-  assert.match(stop, /presentStopped\(result,/);
+  assert.match(stop, /presentStopped\(\s*result,/);
   assert.doesNotMatch(stop, /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/);
   // The presenters own the order: sound, snapshot, refill (tests/outcomeCodes.test.ts).
   const effects = block('const outcomeEffects = useCallback', 'const stopOccurrence');

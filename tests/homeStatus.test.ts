@@ -14,9 +14,6 @@ import type {
   StoredAlarmDefinition,
 } from '../src/alarmStorage';
 import {
-  STORAGE_LOAD_FAILED_COPY,
-  RINGING_STOP_LABEL,
-  SUPPRESSION_WARNING_COPY,
   canEditAlarm,
   canSubmitComposer,
   classifySuppressionFailure,
@@ -27,14 +24,15 @@ import {
   getRingingStopA11yLabel,
   getRingingDisplay,
   planMissedAnnouncement,
-  MISSED_CARD_ANNOUNCEMENT,
   runUnlessAlarmListLocked,
   getStepGuidance,
+  getSuppressionWarningCopy,
   isAlarmListLocked,
   resolveComposerValues,
   summarizeNewAlarm,
   withoutQueueStatus,
 } from '../src/homeStatus';
+import { EN_TEXT, JA_TEXT, en, ja, withFormatter } from './support/text';
 
 const NOW = new Date(2026, 9, 2, 22, 0, 0).getTime(); // Fri 10/2 22:00
 const HOUR = 60 * 60_000;
@@ -69,7 +67,9 @@ function definition(cycles: StoredAlarm[]): StoredAlarmDefinition {
   };
 }
 
-const fmt = (ms: number) => `D${new Date(ms).getDate()}`;
+const fmt = withFormatter(JA_TEXT, {
+  day: (ms) => `D${new Date(ms).getDate()}`,
+});
 
 describe('isAlarmListLocked', () => {
   test('locks list switches and delete only while an alarm rings', () => {
@@ -132,13 +132,13 @@ describe('describeSuppressedOccurrence', () => {
 
 describe('getStepGuidance', () => {
   test('shows the bar only while counting or preparing', () => {
-    assert.equal(getStepGuidance('counting').showProgress, true);
-    assert.equal(getStepGuidance('preparing').showProgress, true);
+    assert.equal(getStepGuidance('counting', ja).showProgress, true);
+    assert.equal(getStepGuidance('preparing', ja).showProgress, true);
   });
 
   test('hides the bar and says the alarm stays when steps cannot be used', () => {
     for (const state of ['unavailable', 'denied', 'error'] as const) {
-      const guidance = getStepGuidance(state);
+      const guidance = getStepGuidance(state, ja);
       assert.equal(guidance.showProgress, false, state);
       assert.match(guidance.message, /歩数による停止を確認できません/, state);
       assert.match(guidance.message, /予定を確認してください/, state);
@@ -148,20 +148,20 @@ describe('getStepGuidance', () => {
   });
 
   test('offers the settings shortcut only when permission was denied', () => {
-    assert.equal(getStepGuidance('denied').canOpenSettings, true);
-    assert.equal(getStepGuidance('unavailable').canOpenSettings, false);
-    assert.equal(getStepGuidance('error').canOpenSettings, false);
+    assert.equal(getStepGuidance('denied', ja).canOpenSettings, true);
+    assert.equal(getStepGuidance('unavailable', ja).canOpenSettings, false);
+    assert.equal(getStepGuidance('error', ja).canOpenSettings, false);
   });
 });
 
-describe('STORAGE_LOAD_FAILED_COPY', () => {
+describe('ja.storageLoadFailed', () => {
   test('tells that old alarms may still ring and explains why add is off', () => {
-    assert.match(STORAGE_LOAD_FAILED_COPY.body, /鳴ることがあります/);
-    assert.match(STORAGE_LOAD_FAILED_COPY.addDisabledReason, /追加できません/);
+    assert.match(ja.storageLoadFailed.body, /鳴ることがあります/);
+    assert.match(ja.storageLoadFailed.addDisabledReason, /追加できません/);
   });
 
   test('keeps the restart steps non-destructive', () => {
-    const steps = STORAGE_LOAD_FAILED_COPY.restartSteps.join('\n');
+    const steps = ja.storageLoadFailed.restartSteps.join('\n');
     assert.match(steps, /完全に終了/);
     assert.match(steps, /開き直/);
     assert.doesNotMatch(steps, /削除|初期化|再インストール|消去/);
@@ -179,7 +179,9 @@ describe('summarizeNewAlarm', () => {
       minute: 0,
       repeatKind: 'weekdays',
       customWeekdays: [],
-      formatDate: (ms) => `${new Date(ms).getMonth() + 1}/${new Date(ms).getDate()}`,
+      text: withFormatter(JA_TEXT, {
+        day: (ms) => `${new Date(ms).getMonth() + 1}/${new Date(ms).getDate()}`,
+      }),
     });
     assert.equal(summary.text, '平日・初回 10/5 07:00（2日9時間後）');
     assert.equal(summary.isDistant, true);
@@ -192,7 +194,7 @@ describe('summarizeNewAlarm', () => {
       minute: 0,
       repeatKind: 'daily',
       customWeekdays: [],
-      formatDate: () => '10/4',
+      text: withFormatter(JA_TEXT, { day: () => '10/4' }),
     });
     assert.equal(summary.text, '毎日・初回 10/4 07:00（10時間後）');
     assert.equal(summary.isDistant, false);
@@ -205,7 +207,7 @@ describe('summarizeNewAlarm', () => {
       minute: 0,
       repeatKind: 'custom',
       customWeekdays: [],
-      formatDate: () => '',
+      text: JA_TEXT,
     });
     assert.equal(none.text, '曜日を選ぶと初回の日時が表示されます');
     const passed = summarizeNewAlarm({
@@ -214,7 +216,7 @@ describe('summarizeNewAlarm', () => {
       minute: 0,
       repeatKind: 'today',
       customWeekdays: [],
-      formatDate: () => '',
+      text: JA_TEXT,
     });
     assert.match(passed.text, /今日の07:00はすでに過ぎています/);
   });
@@ -234,8 +236,21 @@ describe('ringing copy', () => {
   });
 
   test('the focused stop label carries the occurrence date', () => {
-    const label = getRingingStopA11yLabel(0, 5, '10/14(水)');
-    assert.equal(label, '10/14(水) 0時5分のアラームが鳴っています。アラームを止める');
+    const label = getRingingStopA11yLabel(0, 5, JA_TEXT, '10/14(水)');
+    assert.equal(label, '10/14(水) 00:05のアラームが鳴っています。アラームを止める');
+  });
+
+  test('the focused stop label carries the occurrence date in English too', () => {
+    const label = getRingingStopA11yLabel(0, 5, EN_TEXT, 'Wed, 10/14');
+    assert.match(label, /Wed, 10\/14/);
+    assert.match(label, /12:05/);
+    assert.ok(label.endsWith(en.ringing.stopLabel));
+    assert.doesNotMatch(label, /[぀-ヿ㐀-鿿]/);
+    // Without a date the label is the time-only form in both languages.
+    assert.equal(
+      getRingingStopA11yLabel(7, 0, EN_TEXT),
+      en.ringing.stopSpoken(EN_TEXT.formatter.clock(7, 0), en.ringing.stopLabel),
+    );
   });
 
   test('a main ring displays its own due date and time', () => {
@@ -270,7 +285,9 @@ describe('ringing copy', () => {
     assert.equal(added.announce, true);
     assert.equal(plan([...added.announced], ['a', 'b', 'c']).announce, false);
     assert.equal(plan([], []).announce, false);
-    assert.match(MISSED_CARD_ANNOUNCEMENT, /見逃し/);
+    assert.match(ja.missed.cardAnnouncement, /見逃し/);
+    assert.doesNotMatch(en.missed.cardAnnouncement, /[぀-ヿ㐀-鿿]/);
+    assert.match(en.missed.cardAnnouncement, /missed/i);
   });
 
   test('ringing defers announcing new ids and never re-announces known ones', () => {
@@ -327,17 +344,17 @@ describe('ringing copy', () => {
 
   test('the stop control label carries the time and that it is ringing', () => {
     assert.equal(
-      getRingingStopA11yLabel(7, 0),
-      '7時0分のアラームが鳴っています。アラームを止める',
+      getRingingStopA11yLabel(7, 0, JA_TEXT),
+      '07:00のアラームが鳴っています。アラームを止める',
     );
     assert.equal(
-      getRingingStopA11yLabel(18, 5),
-      '18時5分のアラームが鳴っています。アラームを止める',
+      getRingingStopA11yLabel(18, 5, JA_TEXT),
+      '18:05のアラームが鳴っています。アラームを止める',
     );
   });
 
   test('stop label says it stops the sound, not that the user is awake', () => {
-    assert.equal(RINGING_STOP_LABEL, 'アラームを止める');
+    assert.equal(ja.ringing.stopLabel, 'アラームを止める');
   });
 });
 
@@ -420,15 +437,15 @@ describe('runUnlessAlarmListLocked', () => {
   });
 });
 
-describe('SUPPRESSION_WARNING_COPY', () => {
+describe('getSuppressionWarningCopy', () => {
   test('save failure says the stop happened but is not saved, not that the alarm is on', () => {
-    const copy = SUPPRESSION_WARNING_COPY.save_failed;
+    const copy = getSuppressionWarningCopy('save_failed', ja);
     assert.match(copy.body, /保存できません/);
     assert.doesNotMatch(copy.body, /アラームは有効/);
   });
 
   test('unknown state never promises armed or stopped', () => {
-    const copy = SUPPRESSION_WARNING_COPY.status_unknown;
+    const copy = getSuppressionWarningCopy('status_unknown', ja);
     assert.match(copy.title, /未確認/);
     assert.match(copy.body, /鳴る場合と鳴らない場合/);
   });
@@ -438,7 +455,7 @@ describe('summarizeNewAlarm add gating', () => {
   const base = {
     repeatKind: 'daily' as const,
     customWeekdays: [] as never[],
-    formatDate: () => 'D',
+    text: JA_TEXT,
   };
 
   test('under the minimum lead asks to pick the time again and cannot be added', () => {
@@ -497,6 +514,7 @@ describe('classifySuppressionFailure', () => {
   test('maps a save failure to a dedicated warning, never to "alarm is on"', () => {
     const result = classifySuppressionFailure(
       new SuppressionSaveError('c1', new Error('disk')),
+      ja,
     );
     assert.equal(result?.warning, 'save_failed');
     assert.doesNotMatch(result?.notice.text ?? '', /有効/);
@@ -506,28 +524,29 @@ describe('classifySuppressionFailure', () => {
   test('maps an unknown cancellation to the unverified warning', () => {
     const result = classifySuppressionFailure(
       new SuppressionCancelUnknownError('c1', new Error('x')),
+      ja,
     );
     assert.equal(result?.warning, 'status_unknown');
     assert.equal(result?.notice.code, 'CANCEL_UNKNOWN');
   });
 
   test('other errors are not suppression failures', () => {
-    assert.equal(classifySuppressionFailure(new Error('x')), null);
+    assert.equal(classifySuppressionFailure(new Error('x'), ja), null);
   });
 });
 
 describe('describeAlarmRemains', () => {
   test('keeps the unverified-cancel danger wording and explains the new reasons', () => {
-    assert.equal(describeAlarmRemains('CANCEL_NOT_VERIFIED').tone, 'danger');
-    assert.match(describeAlarmRemains('ALARM_DUE_OR_PAST').text, /鳴ります/);
-    assert.match(describeAlarmRemains('JOURNAL_NOT_WRITTEN').text, /取り消していません/);
-    assert.match(describeAlarmRemains('INVALID_RESPONSE').text, /維持します/);
+    assert.equal(describeAlarmRemains('CANCEL_NOT_VERIFIED', ja).tone, 'danger');
+    assert.match(describeAlarmRemains('ALARM_DUE_OR_PAST', ja).text, /鳴ります/);
+    assert.match(describeAlarmRemains('JOURNAL_NOT_WRITTEN', ja).text, /取り消していません/);
+    assert.match(describeAlarmRemains('INVALID_RESPONSE', ja).text, /維持します/);
   });
 });
 
 describe('describeTodayOnlyExpiry', () => {
   const created = new Date(2026, 9, 15, 6, 0).getTime();
-  const fmt = () => '10/15(木)';
+  const fmt = withFormatter(JA_TEXT, { day: () => '10/15(木)' });
   const def = (kind: 'today' | 'daily'): StoredAlarmDefinition => ({
     id: 'a',
     hour: 7,
@@ -593,7 +612,7 @@ describe('describeTodayOnlyExpiry', () => {
 });
 
 describe('summarizeNewAlarm when editing an existing alarm', () => {
-  const formatDate = () => '10/3';
+  const text = withFormatter(JA_TEXT, { day: () => '10/3' });
 
   test('keeps the original date of a today-only alarm instead of moving it to today', () => {
     const original = makeAlarmRepeat('today', NOW - 3 * 24 * HOUR);
@@ -604,7 +623,7 @@ describe('summarizeNewAlarm when editing an existing alarm', () => {
       repeatKind: 'today',
       customWeekdays: [],
       existingRepeat: original,
-      formatDate,
+      text,
     });
     assert.equal(summary.canAdd, false);
     assert.match(summary.text, /この日の23:30はすでに過ぎています/);
@@ -618,7 +637,7 @@ describe('summarizeNewAlarm when editing an existing alarm', () => {
       repeatKind: 'weekdays',
       customWeekdays: [],
       enabled: false,
-      formatDate,
+      text,
     });
     assert.equal(summary.canAdd, true);
     assert.equal(summary.isDistant, false);
@@ -636,7 +655,7 @@ describe('summarizeNewAlarm when editing an existing alarm', () => {
       repeatKind: 'custom',
       customWeekdays: [],
       enabled: false,
-      formatDate,
+      text,
     });
     assert.equal(summary.canAdd, false);
   });
