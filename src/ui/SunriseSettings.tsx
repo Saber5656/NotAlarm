@@ -94,7 +94,9 @@ export function SunriseSettings({
           style={styles.status}
           testID="sun-status"
         >
-          {sunStatusText(status)}
+          {sunStatusText(status, {
+            scheduleActive: state.schedule !== undefined,
+          })}
         </Text>
       ) : null}
     </View>

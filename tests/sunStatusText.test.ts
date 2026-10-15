@@ -25,3 +25,13 @@ test("every fallback and failed outcome has a truthful fixed-time message", () =
 test("messages never claim alarms depend on the background", () => {
   assert.doesNotMatch(sunStatusText("timeout"), /アラームが(鳴|止)/);
 });
+
+test("a failed lookup never claims the fixed time while a place schedule stays active", () => {
+  for (const key of ["denied", "timeout", "error", "unsupported-timezone"] as const) {
+    const active = sunStatusText(key, { scheduleActive: true });
+    assert.doesNotMatch(active, /固定/, key);
+    assert.match(active, /これまでの設定/, key);
+    assert.match(sunStatusText(key, { scheduleActive: false }), /固定/, key);
+    assert.equal(sunStatusText(key), sunStatusText(key, { scheduleActive: false }));
+  }
+});
