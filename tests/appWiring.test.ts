@@ -721,8 +721,8 @@ test('missed announcements queue on iOS and wait for the app to be active', () =
 test('settings close is guarded by the deletion ref and a failed deletion also reaches home in the chosen language', () => {
   assert.match(app, /canCloseSettings\(\{ deletionInFlight: deletionInFlightRef\.current \}\)/);
   assert.match(app, /onClose=\{closeSettings\}/);
-  assert.match(app, /setSettingsNotice\(messagesNow\(\)\.settings\.failed\)/);
-  assert.match(app, /text: messagesNow\(\)\.settings\.failedHome/);
+  assert.match(app, /setSettingsNotice\(\{ text: \(m\) => m\.settings\.failed \}\)/);
+  assert.match(app, /text: t\.messages\.settings\.failedHome/);
   assert.doesNotMatch(app, /LOCAL_DATA_COPY/);
 });
 

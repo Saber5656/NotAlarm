@@ -1,4 +1,5 @@
 import { errorCodeOf } from './errorCatalog';
+import { rememberRebuild } from './i18n/localizedNotice';
 import type { Messages } from './i18n/messages';
 import {
   scheduleAlarmNotificationsFailSafe,
@@ -1436,6 +1437,21 @@ export interface ReconcileSummary {
 
 /** Picks the single most important thing to tell the user after a pass. */
 export function summarizeReconciliation(
+  input: ReconcileSummaryInput,
+  messages: Messages,
+): ReconcileSummary {
+  const summary = pickReconciliationSummary(input, messages);
+  if (summary.notice) {
+    // The same finding, written again if the language changes while it shows.
+    rememberRebuild(
+      summary.notice,
+      (text) => summarizeReconciliation(input, text.messages).notice!,
+    );
+  }
+  return summary;
+}
+
+function pickReconciliationSummary(
   input: ReconcileSummaryInput,
   messages: Messages,
 ): ReconcileSummary {

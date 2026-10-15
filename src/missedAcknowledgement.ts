@@ -3,6 +3,7 @@ import { describeScheduleIssues, type AlarmScheduleIssue } from './alarmScheduli
 import type { ErrorNotice } from './errorCatalog';
 import type { Messages } from './i18n/messages';
 import { noticeFromCodeIn } from './i18n/errorText';
+import { rememberRebuild } from './i18n/localizedNotice';
 
 export type RefillSeverity = 'none' | 'warning' | 'danger';
 
@@ -93,6 +94,23 @@ export async function acknowledgeMissedAlarms(
  * never replaced by a later check-in warning.
  */
 export function getMissedAcknowledgementNotice(
+  result: MissedAcknowledgementResult,
+  refillIssues: readonly AlarmScheduleIssue[],
+  messages: Messages,
+): ErrorNotice | { tone: 'neutral'; text: string } | null {
+  const notice = pickMissedAcknowledgementNotice(result, refillIssues, messages);
+  if (notice && notice.tone !== 'neutral') {
+    // A failure is written again if the language changes while it shows.
+    rememberRebuild(
+      notice,
+      (text) =>
+        getMissedAcknowledgementNotice(result, refillIssues, text.messages) as ErrorNotice,
+    );
+  }
+  return notice;
+}
+
+function pickMissedAcknowledgementNotice(
   result: MissedAcknowledgementResult,
   refillIssues: readonly AlarmScheduleIssue[],
   messages: Messages,

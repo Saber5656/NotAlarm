@@ -19,6 +19,8 @@ import {
   describeErrorCode,
   errorCodeOf,
 } from './errorCatalog';
+import type { TextContext } from './i18n/context';
+import { localizedNotice } from './i18n/localizedNotice';
 import type { Messages } from './i18n/messages';
 import { classifyDueCycle } from './missedAlarms';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
@@ -87,6 +89,45 @@ export function describeScheduleIssues(
     code: first.code,
     text: `${lead}${main ? messages.scheduleIssue.incomplete + gap : ''}${message}${gap}${recovery}`,
   };
+}
+
+/** `describeScheduleIssues` that can be rendered again in another language. */
+export function describeScheduleIssuesLocalized(
+  issues: readonly AlarmScheduleIssue[],
+  leadOf: (text: TextContext) => string,
+  text: TextContext,
+): ErrorNotice | null {
+  if (issues.length === 0) {
+    return null;
+  }
+  return localizedNotice(
+    (t) => describeScheduleIssues(issues, leadOf(t), t.messages) as ErrorNotice,
+    text,
+  );
+}
+
+/** The notice after an alarm was added, in the language current at completion. */
+export function describeAlarmAdded(
+  input: {
+    issues: readonly AlarmScheduleIssue[];
+    hour: number;
+    minute: number;
+    nextAtMs: number;
+  },
+  text: TextContext,
+): ErrorNotice | { tone: 'success'; text: string } {
+  const { messages, formatter } = text;
+  const clock = formatter.clock(input.hour, input.minute);
+  return (
+    describeScheduleIssuesLocalized(
+      input.issues,
+      (t) => t.messages.scheduleIssue.addedLead,
+      text,
+    ) ?? {
+      tone: 'success',
+      text: messages.alarmList.added(clock, `${formatter.day(input.nextAtMs)} ${clock}`),
+    }
+  );
 }
 
 /**

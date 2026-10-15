@@ -126,7 +126,7 @@ export function AlarmComposerModal({
   const [draftMinute, setDraftMinute] = useState(
     selectedTime.getMinutes().toString().padStart(2, '0'),
   );
-  const [timeInputError, setTimeInputError] = useState<string | null>(null);
+  const [hasTimeInputError, setHasTimeInputError] = useState(false);
 
   useEffect(() => {
     if (formNotice && visible && Platform.OS === 'ios') {
@@ -154,7 +154,7 @@ export function AlarmComposerModal({
     if (!visible) {
       setActiveSection('time');
       setIsTimeEditing(false);
-      setTimeInputError(null);
+      setHasTimeInputError(false);
       Keyboard.dismiss();
     }
   }, [visible]);
@@ -181,7 +181,7 @@ export function AlarmComposerModal({
         void DateTimePickerAndroid.dismiss('time').catch(() => undefined);
       }
       setIsTimeEditing(false);
-      setTimeInputError(null);
+      setHasTimeInputError(false);
       Keyboard.dismiss();
       onClose();
     }
@@ -193,7 +193,7 @@ export function AlarmComposerModal({
     }
     setDraftHour(selectedTime.getHours().toString().padStart(2, '0'));
     setDraftMinute(selectedTime.getMinutes().toString().padStart(2, '0'));
-    setTimeInputError(null);
+    setHasTimeInputError(false);
     setActiveSection('time');
     setIsTimeEditing(true);
   };
@@ -240,7 +240,7 @@ export function AlarmComposerModal({
 
   const cancelTimeEditing = () => {
     setIsTimeEditing(false);
-    setTimeInputError(null);
+    setHasTimeInputError(false);
     Keyboard.dismiss();
   };
 
@@ -252,16 +252,17 @@ export function AlarmComposerModal({
       onTimeChange(nextTime);
       setDraftHour(hour.toString().padStart(2, '0'));
       setDraftMinute(minute.toString().padStart(2, '0'));
-      setTimeInputError(null);
+      setHasTimeInputError(false);
       setIsTimeEditing(false);
       Keyboard.dismiss();
     } catch {
       // The input is the only thing that can be wrong; a thrown message is
       // never shown.
-      const message = messages.composer.timeInputInvalid;
-      setTimeInputError(message);
+      setHasTimeInputError(true);
       if (Platform.OS === 'ios') {
-        AccessibilityInfo.announceForAccessibility(message);
+        AccessibilityInfo.announceForAccessibility(
+          messages.composer.timeInputInvalid,
+        );
       }
     }
   };
@@ -401,7 +402,7 @@ export function AlarmComposerModal({
                         onChangeText={(value) => {
                           const next = sanitizeClockInput(value);
                           setDraftHour(next);
-                          setTimeInputError(null);
+                          setHasTimeInputError(false);
                           if (next.length === 2) {
                             minuteInputRef.current?.focus();
                           }
@@ -421,7 +422,7 @@ export function AlarmComposerModal({
                         maxLength={2}
                         onChangeText={(value) => {
                           setDraftMinute(sanitizeClockInput(value));
-                          setTimeInputError(null);
+                          setHasTimeInputError(false);
                         }}
                         onSubmitEditing={confirmTimeEditing}
                         ref={minuteInputRef}
@@ -432,13 +433,13 @@ export function AlarmComposerModal({
                         value={draftMinute}
                       />
                     </View>
-                    {timeInputError ? (
+                    {hasTimeInputError ? (
                       <Text
                         accessibilityLiveRegion="assertive"
                         accessibilityRole="alert"
                         style={styles.timeInputError}
                       >
-                        {timeInputError}
+                        {messages.composer.timeInputInvalid}
                       </Text>
                     ) : null}
                     <View style={styles.timeEditorActions}>
