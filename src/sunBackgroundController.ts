@@ -27,7 +27,9 @@ export const DEFAULT_LOCATION_TIMEOUT_MS = 10_000;
 export type SunNotice =
   | 'invalid-saved'
   | 'permission-revoked'
-  | 'timezone-changed';
+  | 'timezone-changed'
+  /** A deletion is unfinished; every choice stays off until it is retried. */
+  | 'reset-pending';
 
 export type DeviceLocationOutcome =
   | { kind: 'saved'; preference: SunPreference }
@@ -135,7 +137,7 @@ export function createSunBackgroundController({
       }
       if (isStorageResetPendingError(error)) {
         // Shown as fixed; the saved value is deleted by the pending retry.
-        return { preference: FIXED_SUN_PREFERENCE };
+        return { preference: FIXED_SUN_PREFERENCE, notice: 'reset-pending' };
       }
       throw error;
     }
@@ -198,7 +200,7 @@ export function createSunBackgroundController({
       } catch (error) {
         if (isStorageResetPendingError(error)) {
           // Deletion unfinished: the saved place must not drive the theme.
-          return { preference: FIXED_SUN_PREFERENCE };
+          return { preference: FIXED_SUN_PREFERENCE, notice: 'reset-pending' };
         }
         throw error;
       }
