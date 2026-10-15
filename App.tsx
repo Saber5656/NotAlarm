@@ -200,7 +200,10 @@ import {
   type SuppressionCleanup,
 } from './src/suppressionFollowUp';
 import {
+  USER_SKIP_DONE_NOTICE,
+  USER_SKIP_HINT,
   USER_SKIP_LABEL,
+  captureUserSkipTarget,
   describeUserSkipConfirmation,
   getUserSkipOffer,
   type UserSkipTarget,
@@ -1534,7 +1537,7 @@ function AlarmApp() {
         await finishSuppression(result.alarm, suppressionCleanup);
         setNotice({
           tone: 'success',
-          text: 'この回だけ止めました。繰り返しの設定は変わらず、次の日以降は鳴ります。',
+          text: USER_SKIP_DONE_NOTICE,
         });
       } catch (error) {
         const failure = classifySuppressionFailure(error);
@@ -1561,10 +1564,9 @@ function AlarmApp() {
 
   const confirmUserSkip = useCallback(() => {
     // Capture the occurrence now; the dialog confirms exactly this one.
-    const target = getUserSkipOffer(
-      alarmsRef.current
-        .flatMap((alarm) => alarm.cycles)
-        .find((cycle) => cycle.cycleId === skipOffer?.cycleId) ?? null,
+    const target = captureUserSkipTarget(
+      alarmsRef.current.flatMap((alarm) => alarm.cycles),
+      skipOffer?.cycleId,
       Date.now(),
     );
     if (!target) {
@@ -2603,6 +2605,30 @@ function AlarmApp() {
           : null,
       )
     : null;
+  // Independent of the delivery-warning card: the foreground loop still
+  // runs with notifications off, so the user must keep this control.
+  const skipAction = skipOffer ? (
+    <Pressable
+      accessibilityHint={USER_SKIP_HINT}
+      accessibilityLabel={`${formatNextDate(
+        skipOffer.dueAtMs,
+      )} ${formatAlarmTime(
+        new Date(skipOffer.dueAtMs).getHours(),
+        new Date(skipOffer.dueAtMs).getMinutes(),
+      )}の回だけ止める`}
+      accessibilityRole="button"
+      disabled={isBusy}
+      hitSlop={4}
+      onPress={confirmUserSkip}
+      style={({ pressed }) => [
+        styles.skipButton,
+        pressed && styles.buttonDimmed,
+      ]}
+      testID="skip-this-occurrence"
+    >
+      <Text style={styles.skipButtonText}>{USER_SKIP_LABEL}</Text>
+    </Pressable>
+  ) : null;
   const listLocked = isAlarmListLocked(ringingCycle);
   const suppressedOccurrence = describeSuppressedOccurrence(
     alarms,
@@ -2979,6 +3005,7 @@ function AlarmApp() {
             <Text style={styles.deliveryWarningBody}>
               {deliveryWarningCopy.body}
             </Text>
+            {skipAction}
           </View>
         ) : monitoringCycle && monitoringDefinition ? (
           <GlassSurface
@@ -3087,28 +3114,7 @@ function AlarmApp() {
                 </View>
               </>
             )}
-            {skipOffer ? (
-              <Pressable
-                accessibilityHint="この回だけ止めます。繰り返しの設定は変わらず、次の日以降は鳴ります。アラーム全体を止めるには一覧のスイッチを使います"
-                accessibilityLabel={`${formatNextDate(
-                  skipOffer.dueAtMs,
-                )} ${formatAlarmTime(
-                  new Date(skipOffer.dueAtMs).getHours(),
-                  new Date(skipOffer.dueAtMs).getMinutes(),
-                )}の回だけ止める`}
-                accessibilityRole="button"
-                disabled={isBusy}
-                hitSlop={4}
-                onPress={confirmUserSkip}
-                style={({ pressed }) => [
-                  styles.skipButton,
-                  pressed && styles.buttonDimmed,
-                ]}
-                testID="skip-this-occurrence"
-              >
-                <Text style={styles.skipButtonText}>{USER_SKIP_LABEL}</Text>
-              </Pressable>
-            ) : null}
+            {skipAction}
           </GlassSurface>
         ) : (
           <GlassSurface

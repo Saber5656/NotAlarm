@@ -108,7 +108,7 @@ export function describeSuppressedOccurrence(
       dueAtMs: cycle.dueAtMs,
       text: `${formatDate(cycle.dueAtMs)} ${formatClock(
         cycle.dueAtMs,
-      )} は今回分だけ止めたため鳴りません（次の日以降は鳴ります）`,
+      )} は今回分だけ止めたため鳴りません`,
     };
   }
   const reason = cycle.stepCandidateRecorded ? '100歩' : '通知';

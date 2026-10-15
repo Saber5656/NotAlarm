@@ -1,6 +1,7 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -9,12 +10,18 @@ import {
 } from '../src/alarmOrchestrator';
 import { STEP_WINDOW_LEAD_MS } from '../src/alarmPolicy';
 import type { StoredAlarm, StoredAlarmDefinition } from '../src/alarmStorage';
+import { describeSuppressedOccurrence } from '../src/homeStatus';
 import {
   createSuppressionSaver,
   finishSuppression,
 } from '../src/suppressionFollowUp';
 import { createSuppressionJournal } from '../src/suppressionJournal';
-import { buildUserSkipTarget } from '../src/userSkip';
+import {
+  buildUserSkipTarget,
+  captureUserSkipTarget,
+  USER_SKIP_DONE_NOTICE,
+  USER_SKIP_HINT,
+} from '../src/userSkip';
 
 const DUE = 10_000_000;
 const START = DUE - STEP_WINDOW_LEAD_MS;
@@ -161,3 +168,60 @@ test('delivered check-in is dismissed on success and a dismiss failure is non-fa
   assert.deepEqual(calls, ['cancel:checkin-1', 'dismiss:checkin-1', 'refill']);
 });
 
+test('target capture pins the exact occurrence and window boundaries', () => {
+  const cycles = [cycle];
+  assert.equal(captureUserSkipTarget(cycles, 'cycle-1', START - 1), null);
+  assert.deepEqual(captureUserSkipTarget(cycles, 'cycle-1', START), {
+    cycleId: 'cycle-1',
+    mainAlarmId: 'main-1',
+    dueAtMs: DUE,
+  });
+  assert.ok(captureUserSkipTarget(cycles, 'cycle-1', DUE - 1));
+  assert.equal(captureUserSkipTarget(cycles, 'cycle-1', DUE), null);
+  assert.equal(captureUserSkipTarget(cycles, 'other', START), null);
+  assert.equal(captureUserSkipTarget(cycles, undefined, START), null);
+});
+
+test('skip just before due forges no wakeup or step evidence', async () => {
+  const h = harness(DUE - 1);
+  const result = await processUserSkipFailSafe(h.deps, buildUserSkipTarget(cycle));
+  assert.equal(result.status, 'suppressed');
+  const saved = h.stored;
+  assert.equal(saved.stepCount, 12);
+  assert.equal(saved.stepCandidateRecorded, false);
+  assert.equal(saved.confirmedAtMs, undefined);
+});
+
+test('skip copy makes no promise about later days (today-only safe)', () => {
+  for (const text of [USER_SKIP_DONE_NOTICE, USER_SKIP_HINT]) {
+    assert.doesNotMatch(text, /次の日|翌日|以降は鳴/);
+  }
+  const status = describeSuppressedOccurrence(
+    [
+      definition(
+        { ...cycle, phase: 'suppressed', suppressedBy: 'user_skip' },
+        'today',
+      ),
+    ],
+    START,
+    () => '10/16',
+  );
+  assert.match(status!.text, /今回分だけ止めた/);
+  assert.doesNotMatch(status!.text, /次の日|翌日|以降は鳴/);
+});
+
+test('App wires the shared helpers and keeps the skip action under warnings', () => {
+  const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+  // All three suppression paths persist through the epoch-safe setter.
+  assert.equal(
+    app.match(/createSuppressionSaver\(saveStoredAlarm, setCurrentAlarms\)/g)
+      ?.length,
+    3,
+  );
+  // Only the module-level journal recovery keeps a plain save (no screen state).
+  assert.equal(app.match(/saveAlarm: async \(cycle\) => \{/g)?.length, 1);
+  assert.equal(app.match(/finishSuppression\(/g)?.length, 3);
+  // One button definition, rendered in the monitoring card and under warnings.
+  assert.equal(app.match(/testID="skip-this-occurrence"/g)?.length, 1);
+  assert.equal(app.match(/\{skipAction\}/g)?.length, 2);
+});
