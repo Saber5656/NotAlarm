@@ -2,13 +2,26 @@
 
 Issue 29（保存の版管理・冪等性）で実際に存在し、実行したテストだけを記載する。記載のない基準は未検証であり、カバレッジを推定しない。
 
-## 実行結果（2026-10-15、worktree 未コミット状態）
+## 実行結果
 
-- `npm test`: tests 778 / pass 778 / fail 0
+### 履歴: 元の Issue 29 最終実行（2026-10-15、commit 90e39、PR 47 のマージ前）
+
+この節はその時点の記録であり、以後の `npm test` の件数を示すものではない。
+
+- `npm test`: tests 793 / pass 793 / fail 0（最終実行。途中の 778 は最終値ではない）
 - `npx tsc --noEmit`: エラーなし
 - `npm run security:check`: 文書化済み・期限内の例外のみ
 - `npx expo install --check`: Dependencies are up to date（SDK 57）
 - `npx expo export --platform ios`: 成功（実機起動の証明ではない）
+
+### PR 47 後追い指摘の修正（main 841f637 の上、worktree 未コミット状態）
+
+実際に実行した結果。上の履歴とは別の実行である。
+
+- `npm test`: tests 933 / pass 933 / fail 0
+- `npx tsc --noEmit`: エラーなし
+- `npx expo export --platform ios`: 成功（実機起動の証明ではない）
+- `npm run security:check`: 成功
 
 ## 鳴動遷移（配信された main 通知 → ringing）
 
@@ -56,3 +69,19 @@ UI は `isStaleStorageResult` で reset 前の結果を捨てる `setCurrentAlar
 - Watch routing（ALR-005）、実機の歩数監視（ALR-006）、OS 時刻変更・再起動（ALR-008）
 
 詳細は [REMAINING_ISSUES.md](REMAINING_ISSUES.md) と [DEVICE_TEST.md](DEVICE_TEST.md) を参照。
+
+## 配信 due の完全一致と missed 確認応答（PR 47 後追い）
+
+実装: `buildMainNotificationData` / `buildSnoozeNotificationData` / `readMainDeliveryIdentity`（`src/alarmContracts.ts`）、`src/notificationService.ts`、`App.tsx` の received listener、`acknowledgeMissedAlarms`（`src/missedAcknowledgement.ts`）。
+
+| 基準 | テスト |
+|---|---|
+| main・snooze の通知 payload に予約した正確な `dueAtMs` が入る（snooze は snooze 自身の due） | `tests/deliveryDueIdentity.test.ts` › main and snooze payloads carry the exact scheduled due time / the scheduling functions use the payload builders |
+| listener が payload の due を `saveCycleRinging` へ渡す（配線検査） | › the listener passes the payload due time to the atomic transition |
+| 誤った deadline の配信は鳴らさない／snooze は snooze due で判定し元 cycle due は不一致 | › a delivered main payload rings only at its own due time / a delivered snooze payload is judged at the snooze due |
+| 不正・非有限の `dueAtMs` は拒否し、legacy 扱いにしない | › malformed or non-finite provided due values are rejected |
+| due なしの既存キュー通知は明示的 legacy フォールバック、snooze は現行 ID が必須 | › an already queued payload without a due time keeps the explicit legacy fallback |
+| 遅れて missed になった snooze の確認応答で main と snooze の両 ID を persist 後に dismiss | `tests/missedAcknowledgement.test.ts` › a late missed snooze is acknowledged and both of its delivered ids are dismissed after persisting |
+| ID 重複排除、dismiss 失敗でも他 ID を試行、persist されなかった cycle・将来/迷子通知は触らない | › delivered ids are de-duplicated... / only persisted cycles are dismissed |
+
+制限: Expo SDK 57 の通知ドキュメントを確認したが、`content.data` は任意の JSON であり、`dueAtMs` の追加に SDK 固有の制約は見つかっていない。実機での配信確認は未実施。
