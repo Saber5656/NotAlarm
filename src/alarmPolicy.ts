@@ -29,6 +29,20 @@ export interface ExplicitAwakeConfirmation {
   confirmedAtMs: number;
 }
 
+/**
+ * The user explicitly chose to skip exactly one occurrence from inside the app.
+ * It carries the occurrence it was shown for, so a stale dialog can never be
+ * applied to a different cycle. It is not a notification check-in and carries
+ * no step data.
+ */
+export interface UserSkipEvidence {
+  kind: "USER_SKIP_THIS_OCCURRENCE";
+  cycleId: string;
+  mainAlarmId: string;
+  dueAtMs: number;
+  requestedAtMs: number;
+}
+
 export type StepEvidence =
   | {
       kind: "STEP_MONITORING";
@@ -51,6 +65,7 @@ export type StepEvidence =
 
 export type WakeEvidence =
   | ExplicitAwakeConfirmation
+  | UserSkipEvidence
   | StepEvidence
   | { kind: "UNKNOWN" }
   | { kind: "ERROR"; reason: string };
@@ -71,10 +86,12 @@ export type SuppressionRejectionReason =
   | "STALE_CONFIRMATION"
   | "CONFIRMATION_BEFORE_CHECK_IN_WINDOW"
   | "CONFIRMATION_AT_OR_AFTER_DUE"
-  | "CONFIRMATION_IN_FUTURE";
+  | "CONFIRMATION_IN_FUTURE"
+  | "WRONG_OCCURRENCE"
+  | "SKIP_BEFORE_WINDOW";
 
 export type SuppressionDecision =
-  | { canSuppress: true; reason: "CONFIRMED_AWAKE" | "STEP_THRESHOLD_REACHED" }
+  | { canSuppress: true; reason: "CONFIRMED_AWAKE" | "STEP_THRESHOLD_REACHED" | "USER_SKIPPED" }
   | { canSuppress: false; reason: SuppressionRejectionReason };
 
 export type SuppressionOutcome = "SUPPRESSED" | "ALARM_REMAINS_ARMED";
@@ -161,6 +178,31 @@ export function canSuppressAlarm(
       return { canSuppress: false, reason: "NOT_EXPLICIT_CONFIRMATION" };
     }
     return { canSuppress: true, reason: "STEP_THRESHOLD_REACHED" };
+  }
+
+  if (confirmation.kind === "USER_SKIP_THIS_OCCURRENCE") {
+    if (confirmation.cycleId !== record.cycleId) {
+      return { canSuppress: false, reason: "WRONG_CYCLE" };
+    }
+    if (confirmation.mainAlarmId !== record.mainAlarmId) {
+      return { canSuppress: false, reason: "WRONG_MAIN_ALARM" };
+    }
+    if (confirmation.dueAtMs !== record.dueAtMs) {
+      return { canSuppress: false, reason: "WRONG_OCCURRENCE" };
+    }
+    if (!Number.isFinite(confirmation.requestedAtMs)) {
+      return { canSuppress: false, reason: "INVALID_CONFIRMATION_TIME" };
+    }
+    if (
+      confirmation.requestedAtMs < record.dueAtMs - STEP_WINDOW_LEAD_MS ||
+      confirmation.requestedAtMs < record.armedAtMs
+    ) {
+      return { canSuppress: false, reason: "SKIP_BEFORE_WINDOW" };
+    }
+    if (confirmation.requestedAtMs >= record.dueAtMs) {
+      return { canSuppress: false, reason: "ALARM_DUE_OR_PAST" };
+    }
+    return { canSuppress: true, reason: "USER_SKIPPED" };
   }
 
   if (confirmation.kind !== "EXPLICIT_AWAKE_CONFIRMATION") {

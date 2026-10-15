@@ -55,7 +55,9 @@ export function isSuppressionIntent(value: unknown): value is SuppressionIntent 
     state.armedAtMs === intent.armedAtMs &&
     state.dueAtMs === intent.dueAtMs &&
     isFiniteNumber(state.stepCount) &&
-    typeof state.stepCandidateRecorded === 'boolean'
+    typeof state.stepCandidateRecorded === 'boolean' &&
+    (state.suppressedBy === undefined ||
+      (state.suppressedBy === 'user_skip' && isFiniteNumber(state.skippedAtMs)))
   );
 }
 

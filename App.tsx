@@ -88,6 +88,7 @@ import {
 import {
   processAwakeResponseFailSafe,
   processStepThresholdFailSafe,
+  processUserSkipFailSafe,
   recoverSuppressionJournal,
 } from './src/alarmOrchestrator';
 import {
@@ -176,6 +177,12 @@ import {
   deleteAllLocalData,
   getLocalDataDeletionAvailability,
 } from './src/localDataDeletion';
+import {
+  USER_SKIP_LABEL,
+  describeUserSkipConfirmation,
+  getUserSkipOffer,
+  type UserSkipTarget,
+} from './src/userSkip';
 import { createStorageResetService } from './src/storageReset';
 import {
   advanceStorageEpoch,
@@ -769,6 +776,7 @@ function AlarmApp() {
 
   const alarmsRef = useRef<StoredAlarmDefinition[]>([]);
   const responseInFlightRef = useRef<string | null>(null);
+  const skipInFlightRef = useRef(false);
   const stepSuppressionInFlightRef = useRef(false);
   const dueTransitionInFlightRef = useRef(false);
   const deliveryCheckRef = useRef(0);
@@ -1190,6 +1198,8 @@ function AlarmApp() {
     ? getStepWindowPhase(stepWindow, nowMs)
     : null;
   // Steps count only inside the window and only while the app is on screen.
+  const skipOffer =
+    Platform.OS === 'web' ? null : getUserSkipOffer(monitoringCycle, nowMs);
   const isWatchingSteps =
     Platform.OS !== 'web' && shouldWatchSteps(stepWindowPhase, isAppForeground);
 
@@ -1345,6 +1355,103 @@ function AlarmApp() {
     },
     [refreshAfterCycleCompletion],
   );
+
+  // Explicit in-app skip of exactly one occurrence. The target is the
+  // occurrence the dialog was opened for; a stale one is rejected, never
+  // retargeted. Same suppression transaction, journal and locks as the others.
+  const performUserSkip = useCallback(
+    async (target: UserSkipTarget) => {
+      if (skipInFlightRef.current) {
+        return;
+      }
+      skipInFlightRef.current = true;
+      let suppressedConfirmed = false;
+      try {
+        const result = await processUserSkipFailSafe(
+          {
+            loadAlarm: () => loadStoredAlarmByCycleId(target.cycleId),
+            saveAlarm: async (cycle) => {
+              await saveStoredAlarm(cycle);
+            },
+            cancelScheduled: cancelScheduledNotification,
+            journal: suppressionJournal,
+          },
+          target,
+        );
+        if (result.status === 'alarm_remains') {
+          if (result.reason === 'SUPPRESSION_PENDING') {
+            const reconciled = await reconcileSuppressions();
+            setSuppressionWarning(
+              reconciled.state === 'ok' ? null : reconciled.state,
+            );
+            return;
+          }
+          setNotice(describeAlarmRemains(result.reason));
+          return;
+        }
+        if (result.status !== 'suppressed') {
+          return;
+        }
+        suppressedConfirmed = true;
+        await cancelNotificationIfPresent(result.alarm.checkInNotificationId);
+        await refreshAfterCycleCompletion(result.alarm);
+        setNotice({
+          tone: 'success',
+          text: 'この回だけ止めました。繰り返しの設定は変わらず、次の日以降は鳴ります。',
+        });
+      } catch (error) {
+        const failure = classifySuppressionFailure(error);
+        if (failure) {
+          setSuppressionWarning(failure.warning);
+          setNotice({ tone: 'danger', text: failure.notice });
+        } else if (suppressedConfirmed) {
+          setNotice({
+            tone: 'warning',
+            text: 'この回のアラームは停止しました。次回分の予約更新に失敗したため、アラームの状態を確認してください。',
+          });
+        } else {
+          setNotice({
+            tone: 'danger',
+            text: '今回分の停止に失敗しました。安全のためアラームは維持します。',
+          });
+        }
+      } finally {
+        skipInFlightRef.current = false;
+      }
+    },
+    [refreshAfterCycleCompletion],
+  );
+
+  const confirmUserSkip = useCallback(() => {
+    // Capture the occurrence now; the dialog confirms exactly this one.
+    const target = getUserSkipOffer(
+      alarmsRef.current
+        .flatMap((alarm) => alarm.cycles)
+        .find((cycle) => cycle.cycleId === skipOffer?.cycleId) ?? null,
+      Date.now(),
+    );
+    if (!target) {
+      setNotice(describeAlarmRemains('SKIP_BEFORE_WINDOW'));
+      return;
+    }
+    const copy = describeUserSkipConfirmation(
+      target,
+      formatNextDate,
+      (timestampMs) =>
+        formatAlarmTime(
+          new Date(timestampMs).getHours(),
+          new Date(timestampMs).getMinutes(),
+        ),
+    );
+    Alert.alert(copy.title, copy.body, [
+      { text: copy.cancelLabel, style: 'cancel' },
+      {
+        text: copy.confirmLabel,
+        style: 'destructive',
+        onPress: () => void performUserSkip(target),
+      },
+    ]);
+  }, [performUserSkip, skipOffer?.cycleId]);
 
   useEffect(() => {
     if (Platform.OS === 'web' || !isLoaded) {
@@ -2662,6 +2769,28 @@ function AlarmApp() {
                 </View>
               </>
             )}
+            {skipOffer ? (
+              <Pressable
+                accessibilityHint="この回だけ止めます。繰り返しの設定は変わらず、次の日以降は鳴ります。アラーム全体を止めるには一覧のスイッチを使います"
+                accessibilityLabel={`${formatNextDate(
+                  skipOffer.dueAtMs,
+                )} ${formatAlarmTime(
+                  new Date(skipOffer.dueAtMs).getHours(),
+                  new Date(skipOffer.dueAtMs).getMinutes(),
+                )}の回だけ止める`}
+                accessibilityRole="button"
+                disabled={isBusy}
+                hitSlop={4}
+                onPress={confirmUserSkip}
+                style={({ pressed }) => [
+                  styles.skipButton,
+                  pressed && styles.buttonDimmed,
+                ]}
+                testID="skip-this-occurrence"
+              >
+                <Text style={styles.skipButtonText}>{USER_SKIP_LABEL}</Text>
+              </Pressable>
+            ) : null}
           </GlassSurface>
         ) : (
           <GlassSurface
@@ -2812,12 +2941,12 @@ function AlarmApp() {
                       accessibilityHint={
                         todayExpiry && !definition.enabled
                           ? '終了しているためオンにできません。新しいアラームを追加してください'
-                          : 'オフにすると、セット済みの通知をすべて取り消します'
+                          : 'アラーム全体のスイッチです。オフにすると、繰り返しを含むすべての回の通知を取り消します。この回だけ止めるには、上の今回分だけ止めるを使います'
                       }
                       accessibilityLabel={`${formatAlarmTime(
                         definition.hour,
                         definition.minute,
-                      )}、${repeatA11y}のアラーム`}
+                      )}、${repeatA11y}のアラーム、すべての回`}
                       disabled={
                         isBusy ||
                         listLocked ||
@@ -3617,6 +3746,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 12,
     backgroundColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  skipButton: {
+    minHeight: 44,
+    alignSelf: 'flex-start',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.55)',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  skipButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
   },
   stepSettingsButtonText: {
     color: '#173A68',
