@@ -1,5 +1,12 @@
 import { currentPlanningZone } from './planningZone';
-import { stampOccurrence } from './occurrenceIdentity';
+import {
+  applyEvidenceStamps,
+  collectLogicalDateEvidence,
+  dateKeyInZone,
+  isLogicalDateEvidence,
+  LOGICAL_DATE_REACH_MS,
+  stampOccurrence,
+} from './occurrenceIdentity';
 import { getUpcomingAlarmTimes, SCHEDULED_OCCURRENCES_PER_ALARM } from './alarmSchedule';
 import {
   type AlarmSchedulingGateway,
@@ -13,6 +20,12 @@ export interface AlarmScheduleFillResult {
   definition: StoredAlarmDefinition;
   issues: AlarmScheduleIssue[];
   scheduledCycles: StoredAlarm[];
+  /**
+   * A stopped occurrence's date could not be established (no valid origin
+   * zone): nothing was scheduled, because the day it stopped must not be
+   * guessed. The alarm is left short, not recreated.
+   */
+  originUnverified?: boolean;
 }
 
 export type AlarmScheduleIssue =
@@ -117,6 +130,8 @@ export async function fillAlarmDefinitionSchedule(
   gateway: AlarmSchedulingGateway,
   makeCycleId: () => string = defaultCycleId,
   planningZone: string = currentPlanningZone(),
+  /** The zone stored occurrences without their own identity were planned in. */
+  originZone?: string | null,
 ): Promise<AlarmScheduleFillResult> {
   const normalizedCycles = normalizeCycles(definition.cycles, nowMs);
   if (!definition.enabled) {
@@ -126,6 +141,28 @@ export async function fillAlarmDefinitionSchedule(
       scheduledCycles: [],
     };
   }
+
+  // Which logical days are already taken is decided by the same utility the
+  // time-zone replan uses, not by absolute due times: after a zone change a
+  // skipped day sits at a different instant.
+  const evidence = collectLogicalDateEvidence({
+    cycles: normalizedCycles,
+    nowMs,
+    hour: definition.hour,
+    minute: definition.minute,
+    repeat: definition.repeat,
+    planningZone,
+    originZone,
+  });
+  if (evidence.originUnknown) {
+    return {
+      definition: { ...definition, cycles: normalizedCycles },
+      issues: [],
+      scheduledCycles: [],
+      originUnverified: true,
+    };
+  }
+  const stampedCycles = applyEvidenceStamps(normalizedCycles, evidence.stamps);
 
   const targetActiveCycles =
     definition.repeat.kind === 'today'
@@ -142,12 +179,17 @@ export async function fillAlarmDefinitionSchedule(
       cycle.phase !== 'armed' &&
       cycle.phase !== 'step_candidate',
   ).length;
+  // A blocked day can sit past (its old instant) or ahead; each takes at most
+  // one slot, so ask for enough to still fill the target around them.
+  const evidenceCount = stampedCycles.filter((cycle) =>
+    isLogicalDateEvidence(cycle, nowMs),
+  ).length;
   const dueTimes = getUpcomingAlarmTimes(
     nowMs,
     definition.hour,
     definition.minute,
     definition.repeat,
-    targetActiveCycles + completedFutureCycleCount,
+    targetActiveCycles + Math.max(completedFutureCycleCount, evidenceCount),
   );
   if (
     dueTimes.length === 0 &&
@@ -160,16 +202,17 @@ export async function fillAlarmDefinitionSchedule(
       definition: {
         ...definition,
         enabled: false,
-        cycles: normalizedCycles,
+        cycles: stampedCycles,
       },
       issues: [],
       scheduledCycles: [],
     };
   }
   const occupiedDueTimes = new Set(
-    normalizedCycles.map((cycle) => cycle.dueAtMs),
+    stampedCycles.map((cycle) => cycle.dueAtMs),
   );
-  const cycles = [...normalizedCycles];
+  const cycles = [...stampedCycles];
+  let skippedBlockedDay = false;
   const issues: AlarmScheduleIssue[] = [];
   const scheduledCycles: StoredAlarm[] = [];
 
@@ -179,6 +222,14 @@ export async function fillAlarmDefinitionSchedule(
     }
     if (occupiedDueTimes.has(dueAtMs)) {
       continue;
+    }
+    if (evidence.blockedDates.size > 0) {
+      const dateKey = dateKeyInZone(dueAtMs, planningZone);
+      // An unreadable date cannot be compared with the stopped days: not used.
+      if (dateKey === null || evidence.blockedDates.has(dateKey)) {
+        skippedBlockedDay = true;
+        continue;
+      }
     }
 
     const armedAtMs = nowMs;
@@ -238,11 +289,12 @@ export async function fillAlarmDefinitionSchedule(
   if (
     activeCycleCount === 0 &&
     definition.repeat.kind === 'today' &&
-    normalizedCycles.some(
-      (cycle) =>
-        cycle.dueAtMs > nowMs &&
-        (cycle.phase === 'suppressed' || cycle.phase === 'dismissed'),
-    )
+    (skippedBlockedDay ||
+      normalizedCycles.some(
+        (cycle) =>
+          cycle.dueAtMs > nowMs &&
+          (cycle.phase === 'suppressed' || cycle.phase === 'dismissed'),
+      ))
   ) {
     return {
       definition: {
@@ -296,11 +348,14 @@ function normalizeCycles(
   cycles: readonly StoredAlarm[],
   nowMs: number,
 ): StoredAlarm[] {
+  // A stopped occurrence is kept while its calendar date can still be the
+  // date of a slot ahead (see LOGICAL_DATE_REACH_MS): the instant it had is
+  // not what matters after a zone change. Older ones can no longer recur.
   return cycles
     .filter(
       (cycle) =>
         (cycle.phase !== 'suppressed' && cycle.phase !== 'dismissed') ||
-        cycle.dueAtMs >= nowMs,
+        cycle.dueAtMs > nowMs - LOGICAL_DATE_REACH_MS,
     )
     .map((cycle) => classifyDueCycle(cycle, nowMs, 'resume'));
 }

@@ -373,7 +373,8 @@ test('steps used for 06:30 stay unusable for 07:00 after 06:30 is pruned', async
     suppressed,
   );
 
-  // A later startup / foreground refill prunes the past suppressed cycle.
+  // A later startup / foreground refill prunes the past suppressed cycle once
+  // its day can no longer recur (kept for the logical-date reach until then).
   const gateway: AlarmSchedulingGateway = {
     scheduleMain: async ({ cycleId }) => `main-${cycleId}`,
     scheduleCheckIn: async ({ cycleId }) => `check-${cycleId}`,
@@ -381,7 +382,7 @@ test('steps used for 06:30 stay unusable for 07:00 after 06:30 is pruned', async
   let sequence = 0;
   const refilled = await fillAlarmDefinitionSchedule(
     saved[0]!,
-    at(6, 45),
+    at(6, 45) + 3 * 24 * 60 * 60_000,
     gateway,
     () => `refill-${++sequence}`,
   );

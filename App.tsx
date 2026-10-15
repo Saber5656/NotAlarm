@@ -240,6 +240,7 @@ import {
   type ScheduleReconcileResult,
 } from './src/reconcileGate';
 import {
+  canAdvancePlanningZone,
   reconcileAlarmSchedules,
   recoverAbortedReconciliation,
   summarizeReconciliation,
@@ -552,6 +553,7 @@ async function reconcileScheduleWithQueueOnce(
       const storedZone = await loadPlanningZone(AsyncStorage);
       const zoneChanged = didPlanningZoneChange(storedZone, zone);
       let outcome: ReconcileOutcome | null = null;
+      let excludedForGate: ReadonlySet<string> = new Set();
       const alarms = await transactAlarmDefinitions(
         async (current, checkpoint) => {
           await assertNoPendingReset();
@@ -568,12 +570,15 @@ async function reconcileScheduleWithQueueOnce(
           for (const pending of await loadPendingAlarmEdits()) {
             excludedAlarmIds.add(pending.alarmId);
           }
+          excludedForGate = excludedAlarmIds;
           outcome = await reconcileAlarmSchedules({
             alarms: current,
             excludedAlarmIds,
             readQueue: readScheduledNotificationQueue,
             orphans: orphanStore,
             originZone: storedZone,
+            // Checked against the real planning clock when the plan is made.
+            currentZone: zone,
             canSchedule,
             nowMs: Date.now,
             gateway: reconcileGateway,
@@ -584,9 +589,17 @@ async function reconcileScheduleWithQueueOnce(
       );
       const done = outcome as ReconcileOutcome | null;
       const statuses = done?.statuses ?? {};
-      const settled = Object.values(statuses).every(
-        (status) => status === 'verified' || status === 'repaired',
-      );
+      // The stored zone is the origin of every stopped occurrence that has no
+      // identity of its own. It moves only when each alarm was really
+      // reconciled (an empty result proves nothing) and no excluded alarm or
+      // unstamped evidence still depends on the old one, and only while the
+      // device is still in the zone this run planned for.
+      const settled =
+        canAdvancePlanningZone({
+          outcome: done,
+          excludedAlarmIds: excludedForGate,
+          nowMs: Date.now(),
+        }) && currentPlanningZone() === zone;
       if (settled && !isStaleStorageResult(alarms)) {
         // Remembered only once the schedule matches this zone.
         await savePlanningZone(AsyncStorage, zone).catch(() => undefined);
@@ -714,14 +727,18 @@ async function fillEnabledSchedules(
   alarms: StoredAlarmDefinition[],
   nowMs: number,
   excludedAlarmIds: ReadonlySet<string> = new Set(),
+  originZone: string | null = null,
 ): Promise<{
   alarms: StoredAlarmDefinition[];
   issues: AlarmScheduleIssue[];
   scheduledCycles: StoredAlarm[];
+  /** Alarms left short because a stopped day's origin zone is unknown. */
+  unverifiedAlarmIds: string[];
 }> {
   const next: StoredAlarmDefinition[] = [];
   const issues: AlarmScheduleIssue[] = [];
   const scheduledCycles: StoredAlarm[] = [];
+  const unverifiedAlarmIds: string[] = [];
 
   for (const alarm of alarms) {
     if (!alarm.enabled || excludedAlarmIds.has(alarm.id)) {
@@ -734,10 +751,16 @@ async function fillEnabledSchedules(
         alarm,
         nowMs,
         schedulingGateway,
+        undefined,
+        undefined,
+        originZone,
       );
       next.push(filled.definition);
       issues.push(...filled.issues);
       scheduledCycles.push(...filled.scheduledCycles);
+      if (filled.originUnverified) {
+        unverifiedAlarmIds.push(alarm.id);
+      }
     } catch (error) {
       next.push(alarm);
       issues.push({
@@ -753,7 +776,7 @@ async function fillEnabledSchedules(
     }
   }
 
-  return { alarms: next, issues, scheduledCycles };
+  return { alarms: next, issues, scheduledCycles, unverifiedAlarmIds };
 }
 
 type ScheduleRefillTrigger = 'startup' | 'foreground';
@@ -802,6 +825,7 @@ async function refillEnabledSchedulesOnce(
     }
     const fillIssues: AlarmScheduleIssue[] = [];
     let attemptedAlarmIds: string[] = [];
+    const unverifiedAlarmIds: string[] = [];
     const alarms = await withScheduledNotificationRollback(
       (track) =>
         mutateAlarmDefinitions(async (current) => {
@@ -814,9 +838,13 @@ async function refillEnabledSchedulesOnce(
             current,
             Date.now(),
             pendingAlarmIds,
+            // Stopped days that predate their own identity are dated by the
+            // zone the schedule was last reconciled in.
+            await loadPlanningZone(AsyncStorage),
           );
           track(filled.scheduledCycles);
           fillIssues.push(...filled.issues);
+          unverifiedAlarmIds.push(...filled.unverifiedAlarmIds);
           return filled.alarms;
         }),
       cancellationGateway,
@@ -827,7 +855,7 @@ async function refillEnabledSchedulesOnce(
       attempt: {
         attemptedAlarmIds,
         issues: fillIssues,
-        skippedAlarmIds: [...pendingAlarmIds],
+        skippedAlarmIds: [...pendingAlarmIds, ...unverifiedAlarmIds],
       },
       problemKeys: fillIssues.map(getAlarmScheduleIssueKey),
       notice:
@@ -1100,6 +1128,9 @@ function AlarmApp() {
                 base,
                 now,
                 schedulingGateway,
+                undefined,
+                undefined,
+                await loadPlanningZone(AsyncStorage),
               );
               track(filled.scheduledCycles);
               updated.push(filled.definition);
@@ -2115,6 +2146,9 @@ function AlarmApp() {
                 enabledDefinition,
                 now,
                 schedulingGateway,
+                undefined,
+                undefined,
+                await loadPlanningZone(AsyncStorage),
               );
               track(filled.scheduledCycles);
               fillIssues.push(...filled.issues);

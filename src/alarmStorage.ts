@@ -15,7 +15,7 @@ import {
   localDateKey,
   type AlarmRepeat,
 } from './alarmSchedule';
-import { readOccurrenceIdentity } from './occurrenceIdentity';
+import { withTrustedOccurrenceMetadata } from './occurrenceIdentity';
 import { type ClassificationSource, classifyOverdueCycles } from './missedAlarms';
 import { assertNoPendingReset, stampStorageResult } from './storageResetGate';
 import { hasValidSnoozeState, type SnoozeRecord } from './snooze';
@@ -140,19 +140,7 @@ export function dropUntrustedOccurrenceMetadata(
 ): StoredAlarmDefinition[] {
   return alarms.map((definition) => ({
     ...definition,
-    cycles: definition.cycles.map((cycle) => {
-      if (
-        cycle.logicalDateKey === undefined &&
-        cycle.planningZone === undefined
-      ) {
-        return cycle;
-      }
-      if (readOccurrenceIdentity(cycle)) {
-        return cycle;
-      }
-      const { logicalDateKey: _date, planningZone: _zone, ...rest } = cycle;
-      return rest;
-    }),
+    cycles: definition.cycles.map(withTrustedOccurrenceMetadata),
   }));
 }
 
@@ -239,7 +227,12 @@ export async function loadPendingAlarmEdits(): Promise<PendingAlarmEdit[]> {
   if (!isAlarmEditJournalV1(parsed)) {
     throw new Error('未完了のアラーム編集を読み取れません。');
   }
-  return stampStorageResult(parsed.entries);
+  return stampStorageResult(
+    parsed.entries.map((entry) => ({
+      ...entry,
+      newCycles: entry.newCycles.map(withTrustedOccurrenceMetadata),
+    })),
+  );
 }
 
 function mutatePendingAlarmEdits(
