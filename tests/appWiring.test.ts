@@ -534,3 +534,18 @@ test('the ringing card keeps stop first and snooze second, both pressable', () =
   assert.ok(card.indexOf('stopRinging()') < card.indexOf('snoozeRinging()'));
   assert.match(card, /minHeight|styles\.snoozeButton/);
 });
+
+test('Android channel delivery wiring', () => {
+  const service = readFileSync(
+    new URL('../src/notificationService.ts', import.meta.url),
+    'utf8',
+  );
+  const read = service.slice(
+    service.indexOf('export async function readNotificationDelivery'),
+    service.indexOf('Android keeps an absolute'),
+  );
+
+    assert.match(read, /mainChannelId: ALARM_CHANNEL_ID/);
+    assert.doesNotMatch(read, /CHECK_IN_CHANNEL_ID|requestPermissionsAsync|setNotificationChannelAsync/);
+    assert.match(read, /getNotificationChannelAsync/);
+});

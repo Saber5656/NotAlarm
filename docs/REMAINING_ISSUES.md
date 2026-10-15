@@ -116,7 +116,8 @@
 - メイン通知を OS へ登録し、ID を得た後だけ `armed` にする
 - 設定後の権限変更と通知設定変更を再検査する（foreground 復帰時の再検査は実装済み。background 中は検知できない）
 - 確認通知だけ失敗した場合と、メイン通知が失敗した場合を分ける
-- 残り: 実機（Expo Go / development build、iOS / Android）での検証、Android の通知 channel 単位の音・重要度設定の検出、通知を再びオンにした時点での OS pending 一覧との照合（予約枠の補充は、通知が許可された状態でアプリへ戻った時点で行う。ALR-008 / ALR-010 と関連）、消音スイッチ・音量・Focus の扱い（ALR-001）
+- Android の通知 channel 単位の検出（実装済み・自動テスト済み・実機未確認）: API 26 以上ではメインのアラーム channel の重要度・音を読み、オフ/無音/不明を警告する。API 24/25 には channel が存在しないため channel API を呼ばず権限のみで判定する。`Platform.Version` が数値の整数でない場合は 'unknown'（警告）に倒し、旧版扱いにしない。iOS は従来どおり権限のみ。
+- 残り: 実機（Expo Go / development build、iOS / Android）での検証（Android の channel 判定は実機未確認）、通知を再びオンにした時点での OS pending 一覧との照合（予約枠の補充は、通知が許可された状態でアプリへ戻った時点で行う。ALR-008 / ALR-010 と関連）、消音スイッチ・音量・Focus の扱い（ALR-001）
 
 ### 受け入れ条件
 

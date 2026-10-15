@@ -22,7 +22,7 @@ import {
 } from './queueInspection';
 import { toUtcCalendarFields } from './notificationTrigger';
 import {
-  assessNotificationDelivery,
+  resolveNotificationDelivery,
   type NotificationDeliveryState,
 } from './notificationDelivery';
 
@@ -132,15 +132,17 @@ async function registerAlarmNotificationTypes(): Promise<void> {
 }
 
 /**
- * Reads the current permission without prompting. A failed read is reported as
+ * Reads the current permission (and, on Android, the main alarm channel) without prompting. A failed read is reported as
  * 'unknown' so the UI never assumes the alarm can ring.
  */
 export async function readNotificationDelivery(): Promise<NotificationDeliveryState> {
-  try {
-    return assessNotificationDelivery(await Notifications.getPermissionsAsync());
-  } catch {
-    return 'unknown';
-  }
+  return resolveNotificationDelivery({
+    platform: Platform.OS,
+    platformVersion: Platform.Version,
+    mainChannelId: ALARM_CHANNEL_ID,
+    getPermissions: () => Notifications.getPermissionsAsync(),
+    getChannel: (id) => Notifications.getNotificationChannelAsync(id),
+  });
 }
 
 /**
