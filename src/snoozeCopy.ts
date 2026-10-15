@@ -73,3 +73,19 @@ const FAILURE_COPY: Record<SnoozeRejection, string> = {
 
 getSnoozeCopy.failure = (reason: SnoozeRejection): string =>
   FAILURE_COPY[reason];
+
+/**
+ * Said when a notification could not be confirmed cancelled. Never worded as a
+ * completed cleanup; a memory-only record also says it does not survive a restart.
+ */
+getSnoozeCopy.cleanupWarning = (report: {
+  cleanup?: 'unconfirmed';
+  tracking?: 'memory_only';
+}): string => {
+  if (report.cleanup !== 'unconfirmed') {
+    return '';
+  }
+  return report.tracking === 'memory_only'
+    ? ' 予約済みの通知の取り消しを確認できていません。この記録は保存できず、アプリを閉じると失われます。端末の通知を確認してください。'
+    : ' 予約済みの通知の取り消しを確認できていません。次回の起動時に再確認します。端末の通知も確認してください。';
+};

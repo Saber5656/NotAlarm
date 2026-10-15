@@ -159,7 +159,8 @@ test('startup treats an unfinished reset as a recovery state before any refill',
 
 test('the reset gate is installed at the storage layer and completion advances the epoch', () => {
   assert.match(app, /installStorageResetGate\(\(\) => storageReset\.hasPendingReset\(\)\)/);
-  assert.match(app, /onCompleted: advanceStorageEpoch/);
+  const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
+  assert.match(reset, /onCompleted: \(\) => \{\s*advanceStorageEpoch\(\);/);
 });
 
 test('results read before a finished deletion never reach the screen', () => {

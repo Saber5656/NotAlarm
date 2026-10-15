@@ -216,6 +216,10 @@ import {
   getSnoozeAvailability,
 } from './src/snooze';
 import { getSnoozeCopy } from './src/snoozeCopy';
+import {
+  adoptStoredAlarms,
+  presentCommittedOutcome,
+} from './src/snoozeOutcome';
 import { createSnoozeTransaction } from './src/snoozeTransaction';
 import { createStorageResetService } from './src/storageReset';
 import {
@@ -301,7 +305,13 @@ const storageReset = createStorageResetService({
   exclusive: (run) =>
     suppressionJournal.exclusive(() => runExclusiveAlarmStorage(run)),
   nowMs: Date.now,
-  onCompleted: advanceStorageEpoch,
+  // Ids only the snooze service remembers are cancelled with the stored ones
+  // and forgotten once the deletion confirmed everything gone.
+  extraKnownIds: () => snoozeService.unsettledIds(),
+  onCompleted: () => {
+    advanceStorageEpoch();
+    snoozeService.forgetUnsettled();
+  },
 });
 // Every alarm write and reservation re-checks this inside the storage locks.
 installStorageResetGate(() => storageReset.hasPendingReset());
@@ -2668,9 +2678,40 @@ function AlarmApp() {
           });
           return;
         }
-        stopForegroundAlarmSound();
-        await refreshAfterCycleCompletion(result.cycle);
-        setNotice({ tone: 'neutral', text: 'アラームを停止しました。' });
+        // The persisted stop reaches the screen and the sound stops before any
+        // fallible refill, so a later failure cannot leave the ringing card up.
+        presentCommittedOutcome(result, {
+          stopSound: stopForegroundAlarmSound,
+          apply: setCurrentAlarms,
+        });
+        let refillError: unknown = null;
+        try {
+          await refreshAfterCycleCompletion(result.cycle);
+        } catch (error) {
+          refillError = error;
+        }
+        await adoptStoredAlarms(result, {
+          apply: setCurrentAlarms,
+          reload: loadAlarmDefinitions,
+        });
+        const warning = getSnoozeCopy.cleanupWarning(result);
+        if (isStorageResetPendingError(refillError)) {
+          setDeletionPending(true);
+          setNotice({
+            tone: 'danger',
+            text: `アラームは停止しました。データの削除が途中のため次回分の予約は更新していません。${refillError.message}${warning}`,
+          });
+        } else if (refillError) {
+          setNotice({
+            tone: 'danger',
+            text: `アラームは停止しました。次回分の予約を更新できませんでした。アラーム一覧を確認してください。${warning}`,
+          });
+        } else {
+          setNotice({
+            tone: warning ? 'warning' : 'neutral',
+            text: `アラームを停止しました。${warning}`.trim(),
+          });
+        }
       } catch (error) {
         if (isStorageResetPendingError(error)) {
           // Fail-safe: the sound and the delivered notification are stopped
@@ -2696,7 +2737,7 @@ function AlarmApp() {
         setIsBusy(false);
       }
     },
-    [isBusy, refreshAfterCycleCompletion],
+    [isBusy, refreshAfterCycleCompletion, setCurrentAlarms],
   );
 
   const stopRinging = useCallback(async () => {
@@ -2715,24 +2756,40 @@ function AlarmApp() {
       // The next occurrence that bounds a snooze is read inside the service's
       // transaction, from the latest stored state.
       const result = await snoozeService.snooze(ringingCycle.cycleId);
-      // The stored state is the truth, whatever the outcome.
-      setCurrentAlarms(await loadAlarmDefinitions());
       if (result.status === 'snoozed') {
-        stopForegroundAlarmSound();
+        // Sound and the committed snapshot first: nothing fallible runs
+        // between the accepted snooze and the screen showing it.
+        const applied = presentCommittedOutcome(result, {
+          stopSound: stopForegroundAlarmSound,
+          apply: setCurrentAlarms,
+        });
+        const warning = getSnoozeCopy.cleanupWarning(result);
         setNotice({
-          tone: 'neutral',
+          tone: warning ? 'warning' : 'neutral',
           text: `スヌーズしました。${formatAlarmTime(
             new Date(result.dueAtMs).getHours(),
             new Date(result.dueAtMs).getMinutes(),
-          )}にもう一度鳴ります。`,
+          )}にもう一度鳴ります。${warning}`,
         });
+        if (!applied) {
+          await adoptStoredAlarms(result, {
+            apply: setCurrentAlarms,
+            reload: loadAlarmDefinitions,
+          });
+        }
         return;
       }
+      // Rejected: the stored state is still the truth; reading it is best
+      // effort and never turns the rejection into another failure.
+      await adoptStoredAlarms(
+        {},
+        { apply: setCurrentAlarms, reload: loadAlarmDefinitions },
+      );
       setNotice({
         tone: 'danger',
         text: `${getSnoozeCopy.failure(result.reason)}${
           result.cleanup === 'unconfirmed'
-            ? ' 予約の取り消しを確認できていません。端末の通知を確認してください。'
+            ? getSnoozeCopy.cleanupWarning(result)
             : ''
         }`,
       });

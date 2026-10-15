@@ -64,6 +64,11 @@ export interface StorageResetDependencies {
   /** Serialises the reset against stops, adds and recovery in this process. */
   exclusive<T>(run: () => Promise<T>): Promise<T>;
   nowMs(): number;
+  /**
+   * Notification ids known only from memory (for example an unexpected id a
+   * snooze could not record or cancel); cancelled with the stored ones.
+   */
+  extraKnownIds?(): readonly string[];
   /** Runs under the lock once every key and the intent are gone. */
   onCompleted?(): void;
 }
@@ -190,6 +195,7 @@ export function createStorageResetService({
   gateway,
   exclusive,
   nowMs,
+  extraKnownIds,
   onCompleted,
 }: StorageResetDependencies): StorageResetService {
   async function ownedScheduledIds(
@@ -219,6 +225,7 @@ export function createStorageResetService({
     const knownIds = new Set([
       ...(previous?.ownedIds ?? []),
       ...(await readOwnedIds(store)),
+      ...(extraKnownIds?.() ?? []),
     ]);
     const intent: StorageResetIntentV1 = {
       version: 1,
