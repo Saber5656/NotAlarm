@@ -23,7 +23,22 @@ const TEXT: Record<SunStatusKey, string> = {
     'データの削除が終わるまで、この設定は変更できません。「データを削除」をもう一度実行してください。',
 };
 
-/** Brief status line; the background never affects whether an alarm rings. */
-export function sunStatusText(key: SunStatusKey): string {
-  return TEXT[key];
+/** Failed lookups leave the saved choice alone, so the text must say which applies. */
+const KEPT_SCHEDULE_TEXT: Partial<Record<SunStatusKey, string>> = {
+  denied: '位置情報が許可されなかったため、これまでの設定のままです。',
+  timeout: '現在地を取得できなかったため、これまでの設定のままです。',
+  error: '現在地を取得できなかったため、これまでの設定のままです。',
+  'unsupported-timezone':
+    'タイムゾーンを確認できないため、これまでの設定のままです。',
+};
+
+/**
+ * Brief status line; the background never affects whether an alarm rings.
+ * `scheduleActive` is true while a region or device schedule is still applied.
+ */
+export function sunStatusText(
+  key: SunStatusKey,
+  { scheduleActive = false }: { scheduleActive?: boolean } = {},
+): string {
+  return (scheduleActive && KEPT_SCHEDULE_TEXT[key]) || TEXT[key];
 }
