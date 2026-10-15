@@ -50,6 +50,9 @@ export interface StoredAlarm {
   stepCountFromMs?: number;
   stepCandidateAtMs?: number;
   confirmedAtMs?: number;
+  /** Set when the user explicitly skipped this occurrence in the app. */
+  suppressedBy?: 'user_skip';
+  skippedAtMs?: number;
   stepCandidateRecorded: boolean;
 }
 
@@ -421,7 +424,11 @@ function isStoredAlarm(value: unknown, expectedAlarmId: string): value is Stored
     (alarm.stepCountFromMs === undefined ||
       (typeof alarm.stepCountFromMs === 'number' &&
         Number.isFinite(alarm.stepCountFromMs))) &&
-    typeof alarm.stepCandidateRecorded === 'boolean'
+    typeof alarm.stepCandidateRecorded === 'boolean' &&
+    (alarm.suppressedBy === undefined ||
+      (alarm.suppressedBy === 'user_skip' &&
+        typeof alarm.skippedAtMs === 'number' &&
+        Number.isFinite(alarm.skippedAtMs)))
   );
 }
 

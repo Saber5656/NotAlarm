@@ -98,6 +98,16 @@ export function describeSuppressedOccurrence(
   }
 
   const { cycle } = earliest;
+  if (cycle.suppressedBy === 'user_skip') {
+    return {
+      alarmId: earliest.alarmId,
+      cycleId: cycle.cycleId,
+      dueAtMs: cycle.dueAtMs,
+      text: `${formatDate(cycle.dueAtMs)} ${formatClock(
+        cycle.dueAtMs,
+      )} は今回分だけ止めたため鳴りません（次の日以降は鳴ります）`,
+    };
+  }
   const reason = cycle.stepCandidateRecorded ? '100歩' : '通知';
   return {
     alarmId: earliest.alarmId,
@@ -249,6 +259,18 @@ export function describeAlarmRemains(reason: string): {
       return {
         tone: 'warning',
         text: 'アラーム時刻になったため停止しませんでした。アラームは鳴ります。',
+      };
+    case 'SKIP_BEFORE_WINDOW':
+      return {
+        tone: 'warning',
+        text: 'まだ止められる時間（アラームの60分前から）ではないため、アラームを維持します。',
+      };
+    case 'WRONG_OCCURRENCE':
+    case 'WRONG_CYCLE':
+    case 'WRONG_MAIN_ALARM':
+      return {
+        tone: 'warning',
+        text: '確認した回とは別の回になっているため止めませんでした。アラームは維持します。',
       };
     case 'JOURNAL_NOT_WRITTEN':
       return {

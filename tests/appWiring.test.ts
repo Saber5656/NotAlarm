@@ -35,7 +35,7 @@ test('toggle and delete re-check the latest alarms and clock when they run', () 
 });
 
 test('both suppression paths write to the persistent journal', () => {
-  assert.equal(app.match(/journal: suppressionJournal,/g)?.length, 3);
+  assert.equal(app.match(/journal: suppressionJournal,/g)?.length, 4);
   const awake = block('processAwakeResponseFailSafe(', 'confirmedAtMs: Date.now()');
   assert.match(awake, /journal: suppressionJournal/);
   const steps = block('processStepThresholdFailSafe(', 'countedFromMs,\n          },');
@@ -71,7 +71,7 @@ test('refill skips alarms with unsettled suppressions and fails closed if unread
 });
 
 test('suppression failures are shown through the dedicated warning, not "alarm on"', () => {
-  assert.equal(app.match(/classifySuppressionFailure\(error\)/g)?.length, 2);
+  assert.equal(app.match(/classifySuppressionFailure\(error\)/g)?.length, 3);
   assert.match(app, /testID="suppression-warning"/);
 });
 

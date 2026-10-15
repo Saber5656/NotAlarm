@@ -422,6 +422,80 @@ async function awakeResponse(
   );
 }
 
+export interface UserSkipInput {
+  cycleId: string;
+  mainAlarmId: string;
+  /** The due time of the occurrence the user was shown. */
+  dueAtMs: number;
+}
+
+export function processUserSkipFailSafe(
+  dependencies: AwakeResponseDependencies,
+  input: UserSkipInput,
+): Promise<AwakeResponseResult> {
+  return exclusively(dependencies, () => userSkip(dependencies, input));
+}
+
+async function userSkip(
+  dependencies: AwakeResponseDependencies,
+  input: UserSkipInput,
+): Promise<AwakeResponseResult> {
+  const activeAlarm = await dependencies.loadAlarm();
+  if (!activeAlarm) {
+    return { status: 'alarm_remains', reason: 'NO_ACTIVE_ALARM' };
+  }
+  if (
+    activeAlarm.phase === 'suppressed' &&
+    activeAlarm.suppressedBy === 'user_skip' &&
+    activeAlarm.cycleId === input.cycleId &&
+    activeAlarm.mainAlarmId === input.mainAlarmId &&
+    activeAlarm.dueAtMs === input.dueAtMs
+  ) {
+    // A duplicate request for the same skipped occurrence changes nothing.
+    return { status: 'suppressed', alarm: activeAlarm };
+  }
+  if (activeAlarm.phase !== 'armed' && activeAlarm.phase !== 'step_candidate') {
+    return { status: 'alarm_remains', reason: 'NO_ACTIVE_ALARM' };
+  }
+
+  // Fresh clock read: the load above may have been slow.
+  const nowMs = (dependencies.nowMs ?? Date.now)();
+  const decision = canSuppressAlarm(
+    {
+      cycleId: activeAlarm.cycleId,
+      mainAlarmId: activeAlarm.mainAlarmId,
+      checkInNotificationId: activeAlarm.checkInNotificationId,
+      armedAtMs: activeAlarm.armedAtMs,
+      dueAtMs: activeAlarm.dueAtMs,
+    },
+    {
+      kind: 'USER_SKIP_THIS_OCCURRENCE',
+      cycleId: input.cycleId,
+      mainAlarmId: input.mainAlarmId,
+      dueAtMs: input.dueAtMs,
+      requestedAtMs: nowMs,
+    },
+    nowMs,
+  );
+  if (!decision.canSuppress) {
+    return { status: 'alarm_remains', reason: decision.reason };
+  }
+
+  // Steps, check-in identity and confirmedAtMs are deliberately untouched.
+  const suppressed: StoredAlarm = {
+    ...activeAlarm,
+    phase: 'suppressed',
+    suppressedBy: 'user_skip',
+    skippedAtMs: nowMs,
+  };
+  return cancelAndPersistSuppression(
+    dependencies,
+    activeAlarm,
+    decision,
+    suppressed,
+  );
+}
+
 export function processStepThresholdFailSafe(
   dependencies: AwakeResponseDependencies,
   input: StepThresholdInput,
