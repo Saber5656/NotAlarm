@@ -47,6 +47,11 @@ import {
   type TextContext,
 } from './src/i18n';
 import { readDeviceLocaleSettings } from './src/i18n/deviceLocale';
+import {
+  localizedNotice,
+  relocalizeNotice,
+  rememberRebuild,
+} from './src/i18n/localizedNotice';
 import { I18nProvider } from './src/ui/I18nContext';
 import { AlarmComposerModal } from './src/ui/AlarmComposerModal';
 import { SettingsModal } from './src/ui/SettingsModal';
@@ -80,7 +85,9 @@ import {
   getRingingCycle,
   fillAlarmDefinitionSchedule,
   getAlarmScheduleIssueKey,
+  describeAlarmAdded,
   describeScheduleIssues,
+  describeScheduleIssuesLocalized,
   getAlarmScheduleIssueSeverity,
   getSkippedRefillAttempt,
   reconcileReportedScheduleProblems,
@@ -281,6 +288,25 @@ import {
 installForegroundNotificationHandler();
 
 type Notice = AppNotice;
+
+// The settings sheet's message, kept as a way to write it so a language change
+// can write it again instead of leaving the old sentence behind.
+interface SettingsNotice {
+  text: (messages: Messages) => string;
+}
+
+function blockedDeletionNotice(state: {
+  isRinging: boolean;
+  isBusy: boolean;
+  isLoaded: boolean;
+}): SettingsNotice {
+  return {
+    text: (messages) => {
+      const availability = getLocalDataDeletionAvailability(state, messages);
+      return availability.allowed ? '' : availability.reason;
+    },
+  };
+}
 
 const orphanStore = createOrphanStore(AsyncStorage);
 
@@ -914,7 +940,15 @@ async function refillEnabledSchedulesOnce(
         skippedAlarmIds: [...pendingAlarmIds, ...unverifiedAlarmIds],
       },
       problemKeys: fillIssues.map(getAlarmScheduleIssueKey),
-      notice: describeScheduleIssues(fillIssues, '', messages),
+      notice: (() => {
+        const issueNotice = describeScheduleIssues(fillIssues, '', messages);
+        return issueNotice
+          ? rememberRebuild(
+              issueNotice,
+              (text) => describeScheduleIssues(fillIssues, '', text.messages)!,
+            )
+          : null;
+      })(),
     };
   } catch (error) {
     const code = errorCodeOf(error, 'REFILL_FAILED');
@@ -1008,7 +1042,7 @@ function AlarmApp() {
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [deletionPending, setDeletionPending] = useState(false);
-  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
+  const [settingsNotice, setSettingsNotice] = useState<SettingsNotice | null>(null);
   const [pedometerState, setPedometerState] = useState<PedometerState>(
     Platform.OS === 'web' ? 'unavailable' : 'preparing',
   );
@@ -1227,10 +1261,10 @@ function AlarmApp() {
         // The caller shows one notice for all refills together.
         collectedIssues.push(...issues);
       } else {
-        const issueNotice = describeScheduleIssues(
+        const issueNotice = describeScheduleIssuesLocalized(
           issues,
-          messagesNow().scheduleIssue.nextLead,
-          messagesNow(),
+          (t) => t.messages.scheduleIssue.nextLead,
+          textRef.current,
         );
         if (issueNotice) {
           setNotice(issueNotice);
@@ -1282,6 +1316,8 @@ function AlarmApp() {
       localeSettingsRef.current = next;
       textRef.current = nextText;
       setLocaleSettings(next);
+      // Sentences already on screen were written in the previous language.
+      setNotice((previous) => relocalizeNotice(previous, nextText));
     };
     refreshLocale();
     const subscription = AppState.addEventListener('change', (state) => {
@@ -1305,10 +1341,12 @@ function AlarmApp() {
         }
         try {
           if ((await storageReset.readAmbiguousCount()) > 0 && mounted) {
-            setNotice({
-              tone: 'danger',
-              text: messagesNow().settings.ambiguousWarning,
-            });
+            setNotice(
+              localizedNotice(
+                (t) => ({ tone: 'danger', text: t.messages.settings.ambiguousWarning }),
+                textRef.current,
+              ),
+            );
           }
         } catch {
           // Advisory only; never blocks startup.
@@ -1476,10 +1514,10 @@ function AlarmApp() {
   );
   // Read when activation fails, so the notice uses the latest delivery state
   // without re-running (and releasing) the keep-awake effect.
-  const keepAwakeFailureTextRef = useRef(bedsideGuidance.keepAwakeFailure);
+  const keepAwakeDeliveryRef = useRef(notificationDelivery);
   useEffect(() => {
-    keepAwakeFailureTextRef.current = bedsideGuidance.keepAwakeFailure;
-  }, [bedsideGuidance]);
+    keepAwakeDeliveryRef.current = notificationDelivery;
+  }, [notificationDelivery]);
 
   // Bedside mode: the loop sound and step check only run while the app is on
   // screen, so the screen stays on while an alarm is ringing or due soon.
@@ -1496,10 +1534,16 @@ function AlarmApp() {
     void Promise.resolve()
       .then(() => activateKeepAwakeAsync(BEDSIDE_KEEP_AWAKE_TAG))
       .catch(() => {
-        setNotice({
-          tone: 'warning',
-          text: keepAwakeFailureTextRef.current,
-        });
+        setNotice(
+          localizedNotice(
+            (t) => ({
+              tone: 'warning',
+              text: getBedsideGuidance(keepAwakeDeliveryRef.current, t.messages)
+                .keepAwakeFailure,
+            }),
+            textRef.current,
+          ),
+        );
       });
     return () => {
       void Promise.resolve()
@@ -1766,15 +1810,19 @@ function AlarmApp() {
           setSuppressionWarning(failure.warning);
           setNotice(failure.notice);
         } else if (suppressedConfirmed) {
-          setNotice({
-            tone: 'warning',
-            text: messagesNow().skip.stoppedRefillFailed,
-          });
+          setNotice(
+            localizedNotice(
+              (t) => ({ tone: 'warning', text: t.messages.skip.stoppedRefillFailed }),
+              textRef.current,
+            ),
+          );
         } else {
-          setNotice({
-            tone: 'danger',
-            text: messagesNow().skip.failed,
-          });
+          setNotice(
+            localizedNotice(
+              (t) => ({ tone: 'danger', text: t.messages.skip.failed }),
+              textRef.current,
+            ),
+          );
         }
       } finally {
         skipInFlightRef.current = false;
@@ -1842,10 +1890,12 @@ function AlarmApp() {
             if (reportResetPending(error)) {
               return;
             }
-            setNotice({
-              tone: 'danger',
-              text: messagesNow().ringing.persistFailed,
-            });
+            setNotice(
+              localizedNotice(
+                (t) => ({ tone: 'danger', text: t.messages.ringing.persistFailed }),
+                textRef.current,
+              ),
+            );
           });
       },
     );
@@ -2000,10 +2050,15 @@ function AlarmApp() {
             if (progress.status !== 'updated') {
               return;
             }
-            setNotice({
-              ...noticeFromCodeIn(messagesNow(), 'CANCEL_NOT_VERIFIED'),
-              text: messagesNow().checkIn.stepsCancelUnconfirmed,
-            });
+            setNotice(
+              localizedNotice(
+                (t) => ({
+                  ...noticeFromCodeIn(t.messages, 'CANCEL_NOT_VERIFIED'),
+                  text: t.messages.checkIn.stepsCancelUnconfirmed,
+                }),
+                textRef.current,
+              ),
+            );
           })
           .catch((error: unknown) => {
             const failure = classifySuppressionFailure(error, messagesNow());
@@ -2153,23 +2208,18 @@ function AlarmApp() {
       clearQueueStatus(definition.id);
       setCurrentAlarms(next);
       setIsComposerOpen(false);
-      const firstRingLabel = `${formatter.day(nextAtMs)} ${formatter.clock(
-        definition.hour,
-        definition.minute,
-      )}`;
-      // "Added ... rings at" is only said when nothing is missing or unverified.
+      // The language may have changed while the composer was open or the
+      // schedule was being written; the notice uses the one current now.
       setNotice(
-        describeScheduleIssues(
-          fillIssues,
-          messages.scheduleIssue.addedLead,
-          messages,
-        ) ?? {
-          tone: 'success',
-          text: messages.alarmList.added(
-            formatter.clock(definition.hour, definition.minute),
-            firstRingLabel,
-          ),
-        },
+        describeAlarmAdded(
+          {
+            issues: fillIssues,
+            hour: definition.hour,
+            minute: definition.minute,
+            nextAtMs,
+          },
+          textRef.current,
+        ),
       );
     } catch (error) {
       if (reportResetPending(error)) {
@@ -2268,10 +2318,10 @@ function AlarmApp() {
         });
         clearQueueStatus(definition.id);
         setCurrentAlarms(next);
-        const issueNotice = describeScheduleIssues(
+        const issueNotice = describeScheduleIssuesLocalized(
           fillIssues,
-          messagesNow().scheduleIssue.enabledLead,
-          messagesNow(),
+          (t) => t.messages.scheduleIssue.enabledLead,
+          textRef.current,
         );
         if (issueNotice) {
           setNotice(issueNotice);
@@ -2404,12 +2454,11 @@ function AlarmApp() {
           setNotice(noticeFromCodeIn(messagesNow(), 'EDIT_CLEANUP_PENDING'));
         } else if (severity !== 'none') {
           setNotice(
-            describeScheduleIssues(
+            describeScheduleIssuesLocalized(
               result.issues,
-              m.scheduleIssue.changedLead(clockLabel),
-              m,
-            ) ??
-              noticeFromCodeIn(m, 'CHECKIN_PARTIAL'),
+              (t) => t.messages.scheduleIssue.changedLead(t.formatter.clock(hour, minute)),
+              textRef.current,
+            ) ?? noticeFromCodeIn(m, 'CHECKIN_PARTIAL'),
           );
         } else {
           setNotice({
@@ -2455,14 +2504,15 @@ function AlarmApp() {
   );
 
   const notifyListLocked = useCallback((reason?: AlarmListLockReason) => {
-    const { ringing } = messagesNow();
-    setNotice({
-      tone: 'warning',
-      text:
-        reason === 'snoozed'
-          ? ringing.snoozedLockedNotice(ringing.stopLabel)
-          : ringing.lockedNotice(ringing.stopLabel),
-    });
+    setNotice(
+      localizedNotice(({ messages: { ringing } }) => ({
+        tone: 'warning',
+        text:
+          reason === 'snoozed'
+            ? ringing.snoozedLockedNotice(ringing.stopLabel)
+            : ringing.lockedNotice(ringing.stopLabel),
+      }), textRef.current),
+    );
   }, []);
 
   // Both read the latest alarms and clock when they run: a confirm dialog or
@@ -2572,10 +2622,10 @@ function AlarmApp() {
       sun.completeDeletion();
       setNotice(
         ambiguousCount > 0
-          ? {
-              tone: 'danger',
-              text: messagesNow().storageLoadFailed.resetAmbiguous,
-            }
+          ? localizedNotice(
+              (t) => ({ tone: 'danger', text: t.messages.storageLoadFailed.resetAmbiguous }),
+              textRef.current,
+            )
           : { tone: 'neutral', text: messagesNow().storageLoadFailed.resetDone },
       );
     } catch {
@@ -2590,16 +2640,13 @@ function AlarmApp() {
 
   const performLocalDataDeletion = useCallback(async () => {
     // Re-checked when the dialog is confirmed: an alarm may have started.
-    const availability = getLocalDataDeletionAvailability(
-      {
-        isRinging: getRingingCycle(alarmsRef.current) !== null,
-        isBusy,
-        isLoaded,
-      },
-      messagesNow(),
-    );
-    if (!availability.allowed) {
-      setSettingsNotice(availability.reason);
+    const deletionState = {
+      isRinging: getRingingCycle(alarmsRef.current) !== null,
+      isBusy,
+      isLoaded,
+    };
+    if (!getLocalDataDeletionAvailability(deletionState, messagesNow()).allowed) {
+      setSettingsNotice(blockedDeletionNotice(deletionState));
       return;
     }
     if (deletionInFlightRef.current) {
@@ -2616,9 +2663,14 @@ function AlarmApp() {
         // The in-memory list is not rewritten; storage may be partly removed,
         // and alarm writes are refused until a retry finishes.
         setDeletionPending(true);
-        setSettingsNotice(messagesNow().settings.failed);
+        setSettingsNotice({ text: (m) => m.settings.failed });
         // Also on home, so the failure and the retry steps outlive the sheet.
-        setNotice({ tone: 'danger', text: messagesNow().settings.failedHome });
+        setNotice(
+          localizedNotice(
+            (t) => ({ tone: 'danger', text: t.messages.settings.failedHome }),
+            textRef.current,
+          ),
+        );
         return;
       }
       applyLocalDataDeleted();
@@ -2626,7 +2678,10 @@ function AlarmApp() {
       setIsSettingsOpen(false);
       setNotice(
         outcome.ambiguousCount > 0
-          ? { tone: 'danger', text: messagesNow().settings.ambiguousWarning }
+          ? localizedNotice(
+              (t) => ({ tone: 'danger', text: t.messages.settings.ambiguousWarning }),
+              textRef.current,
+            )
           : { tone: 'neutral', text: messagesNow().settings.done },
       );
     } finally {
@@ -2644,16 +2699,13 @@ function AlarmApp() {
   }, []);
 
   const confirmLocalDataDeletion = useCallback(() => {
-    const availability = getLocalDataDeletionAvailability(
-      {
-        isRinging: getRingingCycle(alarmsRef.current) !== null,
-        isBusy,
-        isLoaded,
-      },
-      messagesNow(),
-    );
-    if (!availability.allowed) {
-      setSettingsNotice(availability.reason);
+    const deletionState = {
+      isRinging: getRingingCycle(alarmsRef.current) !== null,
+      isBusy,
+      isLoaded,
+    };
+    if (!getLocalDataDeletionAvailability(deletionState, messagesNow()).allowed) {
+      setSettingsNotice(blockedDeletionNotice(deletionState));
       return;
     }
     Alert.alert(
@@ -3835,7 +3887,7 @@ function AlarmApp() {
             style={styles.settingsNotice}
             testID="settings-notice"
           >
-            {settingsNotice}
+            {settingsNotice.text(messages)}
           </Text>
         ) : null}
         <SunriseSettings resetPending={deletionPending} state={sun} />

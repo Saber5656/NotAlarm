@@ -4,6 +4,8 @@ import {
   type ErrorCode,
   type ErrorNotice,
 } from '../errorCatalog';
+import type { TextContext } from './context';
+import { rememberRebuild } from './localizedNotice';
 import type { Messages } from './messages';
 
 const TONE_RANK = { neutral: 0, success: 0, warning: 1, danger: 2 } as const;
@@ -15,7 +17,10 @@ const TONE_RANK = { neutral: 0, success: 0, warning: 1, danger: 2 } as const;
  */
 export function noticeFromCodeIn(messages: Messages, code: ErrorCode): ErrorNotice {
   const { message, recovery } = messages.errors[code];
-  return { tone: describeErrorCode(code).tone, text: message + messages.common.sentenceGap + recovery, code };
+  return rememberRebuild(
+    { tone: describeErrorCode(code).tone, text: message + messages.common.sentenceGap + recovery, code },
+    (text: TextContext) => noticeFromCodeIn(text.messages, code),
+  );
 }
 
 /** Several independent outcomes in one notice; see `noticeFromCodes`. */
@@ -28,7 +33,10 @@ export function noticeFromCodesIn(
     (worst, notice) => (TONE_RANK[notice.tone] > TONE_RANK[worst] ? notice.tone : worst),
     notices[0].tone,
   );
-  return { tone, text: notices.map((notice) => notice.text).join(messages.common.sentenceGap), code: codes[0] };
+  return rememberRebuild(
+    { tone, text: notices.map((notice) => notice.text).join(messages.common.sentenceGap), code: codes[0] },
+    (text: TextContext) => noticeFromCodesIn(text.messages, codes),
+  );
 }
 
 /** Notice for a thrown value. Only its catalog code is read, never its message. */
