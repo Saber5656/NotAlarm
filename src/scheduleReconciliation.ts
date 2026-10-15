@@ -3,6 +3,7 @@ import {
   type AlarmSchedulingGateway,
 } from './alarmOrchestrator';
 import { CHECK_IN_KIND, MAIN_ALARM_KIND } from './alarmContracts';
+import { getSnoozeIds } from './snooze';
 import { getCheckInAtMs } from './alarmPolicy';
 import {
   getUpcomingAlarmTimes,
@@ -45,7 +46,7 @@ import {
  * time; an id carrying other content is foreign and is never cancelled.
  * If a checkpoint cannot be saved, what was just scheduled is cancelled and
  * any id that cannot be cancelled is handed to the orphan store.
- * suppressed / dismissed / ringing occurrences are never rescheduled, and no
+ * suppressed / dismissed / ringing / snoozed occurrences are never rescheduled, and no
  * old occurrence is cancelled once its due time has been reached.
  */
 
@@ -240,6 +241,10 @@ class Run {
         live.add(stored.mainAlarmId);
         if (stored.checkInNotificationId) {
           live.add(stored.checkInNotificationId);
+        }
+        // A snooze's delivery (and any attempt still tracked) is live too.
+        for (const id of getSnoozeIds(stored)) {
+          live.add(id);
         }
       }
     }

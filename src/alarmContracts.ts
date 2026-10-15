@@ -12,6 +12,8 @@ export interface AlarmNotificationData {
   alarmId?: string;
   cycleId: string;
   mainAlarmId?: string;
+  /** 1-based snooze number; present only on a snooze delivery. */
+  snooze?: number;
 }
 
 /** Strict shape check shared by notification responses and ownership tests. */
@@ -21,7 +23,7 @@ export function parseAlarmNotificationData(
   if (!data || typeof data !== 'object') {
     return null;
   }
-  const { owner, kind, alarmId, cycleId, mainAlarmId } = data as Record<
+  const { owner, kind, alarmId, cycleId, mainAlarmId, snooze } = data as Record<
     string,
     unknown
   >;
@@ -30,9 +32,17 @@ export function parseAlarmNotificationData(
     (alarmId !== undefined && typeof alarmId !== 'string') ||
     typeof cycleId !== 'string' ||
     (mainAlarmId !== undefined && typeof mainAlarmId !== 'string') ||
-    (owner !== undefined && typeof owner !== 'string')
+    (owner !== undefined && typeof owner !== 'string') ||
+    (snooze !== undefined && !Number.isInteger(snooze))
   ) {
     return null;
   }
-  return { owner, kind, alarmId, cycleId, mainAlarmId };
+  return {
+    owner,
+    kind,
+    alarmId,
+    cycleId,
+    mainAlarmId,
+    snooze: snooze as number | undefined,
+  };
 }

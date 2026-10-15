@@ -157,6 +157,7 @@ import {
   readNotificationDelivery,
   scheduleCheckInNotification,
   scheduleMainAlarmNotification,
+  scheduleSnoozeNotification,
 } from './src/notificationService';
 import {
   type NotificationDeliveryState,
@@ -184,6 +185,7 @@ import {
   canSubmitComposer,
   getStepGuidance,
   isAlarmListLocked,
+  type AlarmListLockReason,
   resolveComposerValues,
   runUnlessAlarmListLocked,
   summarizeNewAlarm,
@@ -208,6 +210,13 @@ import {
   getUserSkipOffer,
   type UserSkipTarget,
 } from './src/userSkip';
+import {
+  createSnoozeService,
+  getSnoozeAvailability,
+  markDeliveredCycleRinging,
+} from './src/snooze';
+import { getSnoozeCopy } from './src/snoozeCopy';
+import { createSnoozeTransaction } from './src/snoozeTransaction';
 import { createStorageResetService } from './src/storageReset';
 import {
   advanceStorageEpoch,
@@ -251,6 +260,33 @@ const schedulingGateway = {
   scheduleMain: scheduleMainAlarmNotification,
   scheduleCheckIn: scheduleCheckInNotification,
 };
+
+// Snooze and stop of a ringing occurrence share one queue, so a double press
+// or a stop racing a snooze cannot schedule or count twice.
+const snoozeService = createSnoozeService({
+  gateway: {
+    listScheduledIds: listScheduledNotificationIds,
+    schedule: scheduleSnoozeNotification,
+    cancelScheduled: cancelNotificationIfPresent,
+    dismissDelivered: dismissDeliveredNotification,
+  },
+  // Not used directly: every operation runs inside `transact`, which gives it
+  // a store local to one transaction, so nothing waits on its own queue.
+  store: {
+    load: loadStoredAlarmByCycleId,
+    save: async (cycle) => {
+      await saveStoredAlarm(cycle);
+    },
+  },
+  // Same order as stop, edit and deletion: suppression lock, then storage turn.
+  transact: createSnoozeTransaction({
+    exclusive: (run) => suppressionJournal.exclusive(run),
+    transact: transactAlarmDefinitions,
+  }),
+  nowMs: Date.now,
+  makeId: () =>
+    `snooze-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+});
 
 // Order matches the stop path: the suppression journal lock, then the
 // definition/cancellation queues. Only the recovery card and the settings sheet call reset(), each after an
@@ -1108,6 +1144,26 @@ function AlarmApp() {
     [refreshAfterCycleCompletion],
   );
 
+  // Re-arms snoozes the system lost and clears attempts a restart interrupted.
+  // Runs before overdue cycles are classified so a due snooze is judged on its
+  // own time. It never adds a snooze or touches the original due time.
+  const recoverSnoozes = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      return;
+    }
+    try {
+      const outcome = await snoozeService.recover();
+      if (outcome.rearmFailed.length > 0 || outcome.unresolved.length > 0) {
+        setNotice({
+          tone: 'warning',
+          text: 'スヌーズの再設定を確認できませんでした。アプリを開いている間は時刻に鳴りますが、閉じると鳴らない場合があります。',
+        });
+      }
+    } catch {
+      // Overdue handling below still rings or marks the snooze as missed.
+    }
+  }, []);
+
   useEffect(() => {
     let mounted = true;
 
@@ -1159,6 +1215,7 @@ function AlarmApp() {
             reconciled.state === 'ok' ? null : reconciled.state,
           );
         }
+        await recoverSnoozes();
         let restored = await markDueCyclesRinging(Date.now(), 'launch');
 
         // A refill adds reservations without reading the OS queue, so it only
@@ -1207,7 +1264,13 @@ function AlarmApp() {
     return () => {
       mounted = false;
     };
-  }, [reconcileWithQueue, recordRefill, refillEnabledSchedules, setCurrentAlarms]);
+  }, [
+    reconcileWithQueue,
+    recordRefill,
+    recoverSnoozes,
+    refillEnabledSchedules,
+    setCurrentAlarms,
+  ]);
 
   useEffect(() => {
     if (Platform.OS === 'web' || !isLoaded) {
@@ -1236,6 +1299,7 @@ function AlarmApp() {
         setSuppressionWarning(
           reconciled.state === 'ok' ? null : reconciled.state,
         );
+        await recoverSnoozes();
         try {
           // Cycles that came due while the app was away are classified here,
           // before the 1-second tick could treat them as freshly due.
@@ -1267,6 +1331,7 @@ function AlarmApp() {
     isLoaded,
     reconcileWithQueue,
     recordRefill,
+    recoverSnoozes,
     refillEnabledSchedules,
     refreshNotificationDelivery,
     setCurrentAlarms,
@@ -1320,6 +1385,18 @@ function AlarmApp() {
   }, [keepScreenAwake]);
 
   const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
+  const snoozedCycle = useMemo(
+    () =>
+      alarms
+        .flatMap((alarm) => alarm.cycles)
+        .filter((cycle) => cycle.phase === 'snoozed')
+        .sort(
+          (left, right) =>
+            (left.snooze?.dueAtMs ?? left.dueAtMs) -
+            (right.snooze?.dueAtMs ?? right.dueAtMs),
+        )[0] ?? null,
+    [alarms],
+  );
   const missedCycles = useMemo(() => getMissedCycles(alarms), [alarms]);
   const missedPreview = useMemo(
     () => getMissedPreview(missedCycles),
@@ -1611,13 +1688,17 @@ function AlarmApp() {
           return;
         }
 
-        void loadStoredAlarmByCycleId(data.cycleId)
-          .then(async (cycle) => {
-            if (!cycle || !isMonitoring(cycle)) {
-              return;
-            }
-            const updated = { ...cycle, phase: 'ringing' as const };
-            const next = await saveStoredAlarm(updated);
+        // Decided on the latest stored state inside the storage turn, never
+        // on a copy read earlier, so it cannot undo a stop, snooze or reset.
+        const deliveredCycleId: string = data.cycleId;
+        void transactAlarmDefinitions(async (current) =>
+          markDeliveredCycleRinging(
+            current,
+            deliveredCycleId,
+            notification.request.identifier,
+          ),
+        )
+          .then((next) => {
             setCurrentAlarms(next);
           })
           .catch(() => {
@@ -1649,7 +1730,10 @@ function AlarmApp() {
 
       const hasDueCycle = alarmsRef.current.some((definition) =>
         definition.cycles.some(
-          (cycle) => isMonitoring(cycle) && cycle.dueAtMs <= tick,
+          (cycle) =>
+            (isMonitoring(cycle) && cycle.dueAtMs <= tick) ||
+            (cycle.phase === 'snoozed' &&
+              (cycle.snooze?.dueAtMs ?? cycle.dueAtMs) <= tick),
         ),
       );
       if (!hasDueCycle || dueTransitionInFlightRef.current) {
@@ -2239,10 +2323,13 @@ function AlarmApp() {
     ],
   );
 
-  const notifyListLocked = useCallback(() => {
+  const notifyListLocked = useCallback((reason?: AlarmListLockReason) => {
     setNotice({
       tone: 'warning',
-      text: `アラームが鳴っている間は、オン・オフ、編集、削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`,
+      text:
+        reason === 'snoozed'
+          ? `スヌーズ中は、オン・オフ、編集、削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`
+          : `アラームが鳴っている間は、オン・オフ、編集、削除はできません。先に「${RINGING_STOP_LABEL}」を押してください。`,
     });
   }, []);
 
@@ -2521,40 +2608,112 @@ function AlarmApp() {
     }
   }, [isBusy, missedCycles, refreshAfterCycleCompletion, setCurrentAlarms]);
 
+  const stopOccurrence = useCallback(
+    async (cycle: StoredAlarm) => {
+      if (isBusy) {
+        return;
+      }
+
+      setIsBusy(true);
+      try {
+        // Also cancels a waiting snooze, so nothing rings after the stop.
+        const result = await snoozeService.stop(cycle.cycleId);
+        if (result.status !== 'stopped') {
+          setNotice({
+            tone: 'danger',
+            text:
+              result.status === 'failed'
+                ? '停止処理に失敗しました。アラームは維持しています。もう一度お試しください。'
+                : 'このアラームはすでに終わっています。',
+          });
+          return;
+        }
+        stopForegroundAlarmSound();
+        await refreshAfterCycleCompletion(result.cycle);
+        setNotice({ tone: 'neutral', text: 'アラームを停止しました。' });
+      } catch (error) {
+        if (isStorageResetPendingError(error)) {
+          // Fail-safe: the sound and the delivered notification are stopped
+          // here, but the stop is not written while a deletion is unfinished,
+          // so no old alarm record is brought back. The retried deletion
+          // cancels every notification, a waiting snooze's included.
+          stopForegroundAlarmSound();
+          await dismissDeliveredNotification(cycle.mainAlarmId).catch(
+            () => undefined,
+          );
+          setDeletionPending(true);
+          setNotice({
+            tone: 'danger',
+            text: `音と通知は止めましたが、データの削除が途中のため停止の記録は保存していません。${error.message}`,
+          });
+        } else {
+          setNotice({
+            tone: 'danger',
+            text: '停止処理に失敗しました。端末の通知から停止してください。',
+          });
+        }
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [isBusy, refreshAfterCycleCompletion],
+  );
+
   const stopRinging = useCallback(async () => {
+    if (ringingCycle) {
+      await stopOccurrence(ringingCycle);
+    }
+  }, [ringingCycle, stopOccurrence]);
+
+  const snoozeRinging = useCallback(async () => {
     if (!ringingCycle || isBusy) {
       return;
     }
 
     setIsBusy(true);
     try {
-      stopForegroundAlarmSound();
-      await dismissDeliveredNotification(ringingCycle.mainAlarmId);
-      await cancelNotificationIfPresent(ringingCycle.checkInNotificationId);
-      const dismissed = { ...ringingCycle, phase: 'dismissed' as const };
-      await saveStoredAlarm(dismissed);
-      await refreshAfterCycleCompletion(dismissed);
-      setNotice({ tone: 'neutral', text: 'アラームを停止しました。' });
+      // The next occurrence that bounds a snooze is read inside the service's
+      // transaction, from the latest stored state.
+      const result = await snoozeService.snooze(ringingCycle.cycleId);
+      // The stored state is the truth, whatever the outcome.
+      setCurrentAlarms(await loadAlarmDefinitions());
+      if (result.status === 'snoozed') {
+        stopForegroundAlarmSound();
+        setNotice({
+          tone: 'neutral',
+          text: `スヌーズしました。${formatAlarmTime(
+            new Date(result.dueAtMs).getHours(),
+            new Date(result.dueAtMs).getMinutes(),
+          )}にもう一度鳴ります。`,
+        });
+        return;
+      }
+      setNotice({
+        tone: 'danger',
+        text: `${getSnoozeCopy.failure(result.reason)}${
+          result.cleanup === 'unconfirmed'
+            ? ' 予約の取り消しを確認できていません。端末の通知を確認してください。'
+            : ''
+        }`,
+      });
     } catch (error) {
       if (isStorageResetPendingError(error)) {
-        // Fail-safe: the sound and the delivered notification are already
-        // stopped above, but the stop is not written while a deletion is
-        // unfinished, so no old alarm record is brought back.
+        // Nothing was scheduled or written; the alarm keeps ringing.
         setDeletionPending(true);
         setNotice({
           tone: 'danger',
-          text: `音と通知は止めましたが、データの削除が途中のため停止の記録は保存していません。${error.message}`,
+          text: `データの削除が途中のため、スヌーズはできません。アラームは鳴ったままです。${error.message}`,
         });
       } else {
         setNotice({
           tone: 'danger',
-          text: '停止処理に失敗しました。端末の通知から停止してください。',
+          text: getSnoozeCopy.failure('SCHEDULE_FAILED'),
         });
       }
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, refreshAfterCycleCompletion, ringingCycle]);
+  }, [isBusy, ringingCycle, setCurrentAlarms]);
 
   const orderedAlarms = useMemo(
     () =>
@@ -2629,7 +2788,7 @@ function AlarmApp() {
       <Text style={styles.skipButtonText}>{USER_SKIP_LABEL}</Text>
     </Pressable>
   ) : null;
-  const listLocked = isAlarmListLocked(ringingCycle);
+  const listLocked = isAlarmListLocked(ringingCycle ?? snoozedCycle);
   const suppressedOccurrence = describeSuppressedOccurrence(
     alarms,
     nowMs,
@@ -2855,6 +3014,43 @@ function AlarmApp() {
           </View>
         ) : null}
 
+        {!ringingCycle && snoozedCycle ? (
+          <View style={styles.ringingCard} testID="snoozed-alarm">
+            {(() => {
+              const waiting = getSnoozeCopy({
+                phase: 'snoozed',
+                used: snoozedCycle.snooze?.count ?? 0,
+                nextAtMs: snoozedCycle.snooze?.dueAtMs ?? snoozedCycle.dueAtMs,
+              });
+              return (
+                <>
+                  <Text accessibilityRole="header" style={styles.ringingLabel}>
+                    {waiting.title}
+                  </Text>
+                  <Text style={styles.ringingTitle}>{waiting.detail}</Text>
+                  <Pressable
+                    accessibilityHint={waiting.actionHint}
+                    accessibilityLabel={waiting.actionLabel}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: isBusy }}
+                    disabled={isBusy}
+                    hitSlop={4}
+                    onPress={() => void stopOccurrence(snoozedCycle)}
+                    style={({ pressed }) => [
+                      styles.stopButton,
+                      (isBusy || pressed) && styles.buttonDimmed,
+                    ]}
+                  >
+                    <Text style={styles.stopButtonText}>
+                      {waiting.actionLabel}
+                    </Text>
+                  </Pressable>
+                </>
+              );
+            })()}
+          </View>
+        ) : null}
+
         {ringingCycle ? (
           <View style={styles.ringingCard}>
             <Text accessibilityRole="header" style={styles.ringingLabel}>
@@ -2894,6 +3090,35 @@ function AlarmApp() {
             >
               <Text style={styles.stopButtonText}>{RINGING_STOP_LABEL}</Text>
             </Pressable>
+            {(() => {
+              const snoozeCopy = getSnoozeCopy({
+                phase: 'ringing',
+                ...getSnoozeAvailability(ringingCycle, nowMs),
+              });
+              const snoozeDisabled = isBusy || snoozeCopy.actionDisabled;
+              return (
+                <View testID="snooze-section">
+                  <Text style={styles.snoozeDetail}>{snoozeCopy.detail}</Text>
+                  <Pressable
+                    accessibilityHint={snoozeCopy.actionHint}
+                    accessibilityLabel={snoozeCopy.actionLabel}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: snoozeDisabled }}
+                    disabled={snoozeDisabled}
+                    hitSlop={4}
+                    onPress={() => void snoozeRinging()}
+                    style={({ pressed }) => [
+                      styles.snoozeButton,
+                      (snoozeDisabled || pressed) && styles.buttonDimmed,
+                    ]}
+                  >
+                    <Text style={styles.snoozeButtonText}>
+                      {snoozeCopy.actionLabel}
+                    </Text>
+                  </Pressable>
+                </View>
+              );
+            })()}
           </View>
         ) : missedCycles.length > 0 ? (
           <View style={styles.ringingCard} testID="missed-alarms">
@@ -3807,6 +4032,30 @@ const styles = StyleSheet.create({
     color: '#B42318',
     fontSize: 17,
     fontWeight: '900',
+    textAlign: 'center',
+  },
+  snoozeDetail: {
+    marginTop: 12,
+    color: '#FECDCA',
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  snoozeButton: {
+    minHeight: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.85)',
+    borderRadius: 14,
+    backgroundColor: 'transparent',
+  },
+  snoozeButtonText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
     textAlign: 'center',
   },
   deliveryWarningCard: {

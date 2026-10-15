@@ -18,6 +18,7 @@ import {
   parseOrphanJournal,
 } from './orphanedNotifications';
 import { PLANNING_ZONE_KEY } from './planningZone';
+import { getSnoozeIds } from './snooze';
 import {
   SUPPRESSION_JOURNAL_KEY,
   readValidSuppressionIntents,
@@ -137,6 +138,9 @@ async function readOwnedIds(store: KeyValueStore): Promise<string[]> {
     for (const cycle of alarm.cycles) {
       add(cycle.mainAlarmId);
       add(cycle.checkInNotificationId);
+      for (const id of getSnoozeIds(cycle)) {
+        add(id);
+      }
     }
   }
 

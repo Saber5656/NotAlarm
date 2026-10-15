@@ -168,7 +168,9 @@ function isDueLive(cycle: StoredAlarm, nowMs: number): boolean {
   return (
     (cycle.phase === 'armed' ||
       cycle.phase === 'step_candidate' ||
-      cycle.phase === 'ringing') &&
+      cycle.phase === 'ringing' ||
+      // Its snooze notification is still pending: the data must stay.
+      cycle.phase === 'snoozed') &&
     cycle.dueAtMs <= nowMs
   );
 }
@@ -252,14 +254,26 @@ export async function editAlarmDefinition(
       true,
     );
   }
-  if (findAlarmListLock(alarms, startMs)) {
+  const lock = findAlarmListLock(alarms, startMs);
+  if (lock) {
     throw new AlarmEditError(
       'locked',
-      'アラームが鳴っている間は編集できません。',
+      lock === 'snoozed'
+        ? 'スヌーズ中は編集できません。先にアラームを止めてください。'
+        : 'アラームが鳴っている間は編集できません。',
       true,
     );
   }
   const cycleIds = target.cycles.map((cycle) => cycle.cycleId);
+  // A snooze attempt a restart interrupted may still own a notification the
+  // edit would not release; recovery settles it first, an edit never guesses.
+  if (target.cycles.some((cycle) => cycle.snooze?.pending !== undefined)) {
+    throw new AlarmEditError(
+      'unsettled',
+      'このアラームのスヌーズの処理が完了していません。アプリを開き直してから編集してください。',
+      true,
+    );
+  }
   const hasEarlierEdit = (await journal.load()).some(
     (entry) => entry.alarmId === alarmId,
   );
