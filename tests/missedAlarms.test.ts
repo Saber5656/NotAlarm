@@ -8,6 +8,7 @@ import {
   acknowledgeMissedCycles,
   classifyOverdueCycles,
   getMissedCycles,
+  getMissedPreview,
 } from '../src/missedAlarms';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
 import type {
@@ -168,4 +169,19 @@ test('getMissedCycles lists missed cycles oldest first', () => {
     getMissedCycles(alarms).map((c) => c.cycleId),
     ['a', 'b'],
   );
+});
+
+test('getMissedPreview bounds visible items but keeps the full total', () => {
+  const all = Array.from({ length: 30 }, (_, i) => `c${i}`);
+  const preview = getMissedPreview(all);
+  assert.deepEqual(preview.visible, ['c0', 'c1', 'c2']);
+  assert.equal(preview.hiddenCount, 27);
+  assert.equal(preview.total, 30);
+});
+
+test('getMissedPreview shows everything when under the limit', () => {
+  const preview = getMissedPreview(['a', 'b']);
+  assert.deepEqual(preview.visible, ['a', 'b']);
+  assert.equal(preview.hiddenCount, 0);
+  assert.equal(preview.total, 2);
 });

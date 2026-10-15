@@ -66,7 +66,11 @@ import {
   type RefillAttempt,
 } from './src/alarmScheduling';
 import { acknowledgeMissedAlarms } from './src/missedAcknowledgement';
-import { acknowledgeMissedCycles, getMissedCycles } from './src/missedAlarms';
+import {
+  acknowledgeMissedCycles,
+  getMissedCycles,
+  getMissedPreview,
+} from './src/missedAlarms';
 import {
   ScheduledNotificationRollbackError,
   withScheduledNotificationRollback,
@@ -891,6 +895,10 @@ function AlarmApp() {
 
   const ringingCycle = useMemo(() => getRingingCycle(alarms), [alarms]);
   const missedCycles = useMemo(() => getMissedCycles(alarms), [alarms]);
+  const missedPreview = useMemo(
+    () => getMissedPreview(missedCycles),
+    [missedCycles],
+  );
   const monitoringCycle = useMemo(
     () => (ringingCycle ? null : getNextMonitoringCycle(alarms, nowMs)),
     [alarms, nowMs, ringingCycle],
@@ -2008,7 +2016,10 @@ function AlarmApp() {
             <Text style={styles.ringingTitle}>
               音は鳴らしません。起きたかどうかは判断していません。
             </Text>
-            {missedCycles.map((cycle) => (
+            <Text style={styles.missedItem}>
+              見逃し合計 {missedCycles.length}件
+            </Text>
+            {missedPreview.visible.map((cycle) => (
               <Text key={cycle.cycleId} style={styles.missedItem}>
                 {formatNextDate(cycle.dueAtMs)}{' '}
                 {formatAlarmTime(
@@ -2017,6 +2028,11 @@ function AlarmApp() {
                 )}
               </Text>
             ))}
+            {missedPreview.hiddenCount > 0 ? (
+              <Text style={styles.missedItem}>
+                ほか{missedPreview.hiddenCount}件
+              </Text>
+            ) : null}
             <Pressable
               accessibilityHint="見逃したアラームをすべて確認済みにします。繰り返しの今後の予定は残ります。"
               accessibilityLabel={`見逃した${missedCycles.length}件をすべて確認済みにする`}
