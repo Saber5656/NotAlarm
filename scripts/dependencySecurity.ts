@@ -2,7 +2,8 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
 
 export type AdvisoryException = {
   package: string;
@@ -52,7 +53,7 @@ export function evaluateAudit(
   report: AuditReport,
   exceptions: AdvisoryException[],
   now: Date,
-  installed?: Record<string, string>,
+  installed?: Record<string, string | undefined>,
 ): string[] {
   const problems: string[] = [];
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
@@ -150,6 +151,132 @@ const ASSESSED_DEPENDENTS: Record<string, string[]> = {
   ],
 };
 
+// The @expo/cli the code-dominance assessment was made against, pinned by version and by the
+// content digest of the two files that import node-forge / call the verification paths.
+export const ASSESSED_CLI_VERSION = '57.0.30';
+export const ASSESSED_CLI_DIGESTS: Record<string, string> = {
+  'build/src/utils/codesigning.js': '935fadac6f1dc56bc088acb04416d1fc83bd70505f368b87dd210d0aa4617de2',
+  'build/src/run/ios/codeSigning/Security.js': 'af3f12dfb57ef87ae4cb3903af4398eeb034750c08d4fe523bc6a7d3062998b2',
+};
+
+function versionAt(dir: string): string | undefined {
+  try {
+    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every directory under root/node_modules (at any nesting) that is an installed copy of `name`. */
+export function installedCopyPaths(root: string, name: string): string[] {
+  const found: string[] = [];
+  const visit = (nodeModules: string) => {
+    if (!existsSync(nodeModules)) return;
+    for (const entry of readdirSync(nodeModules)) {
+      const dir = join(nodeModules, entry);
+      if (!statSync(dir).isDirectory()) continue;
+      if (entry.startsWith('@')) {
+        for (const scoped of readdirSync(dir)) consider(join(dir, scoped), `${entry}/${scoped}`);
+      } else {
+        consider(dir, entry);
+      }
+    }
+  };
+  const consider = (dir: string, packageName: string) => {
+    if (packageName === name) found.push(dir);
+    if (statSync(dir).isDirectory()) visit(join(dir, 'node_modules'));
+  };
+  visit(join(root, 'node_modules'));
+  return found;
+}
+
+/** Node's lookup: the nearest node_modules/<name> walking up from the importer directory. */
+export function resolveInstalledFrom(root: string, importerDir: string, name: string): string | undefined {
+  let dir = join(root, importerDir);
+  for (;;) {
+    const candidate = join(dir, 'node_modules', name);
+    if (existsSync(join(candidate, 'package.json'))) return candidate;
+    if (dir === root || dir === dirname(dir)) return undefined;
+    dir = dirname(dir);
+  }
+}
+
+/**
+ * Every installed copy of an assessed package must be the assessed version: all nested copies,
+ * every lockfile entry, and what node resolves from each known importer. Unreadable input fails.
+ */
+export function checkInstalledCopies(root: string): string[] {
+  const problems: string[] = [];
+  for (const [name, version] of Object.entries(ASSESSED_VERSIONS)) {
+    const copies = installedCopyPaths(root, name);
+    if (copies.length === 0) problems.push(`${name} has no installed copy, assessed ${version}`);
+    for (const copy of copies) {
+      const installed = versionAt(copy);
+      if (installed !== version) problems.push(`${copy.slice(root.length + 1)} is ${installed ?? 'unreadable'}, assessed ${version}`);
+    }
+  }
+  let lock: Record<string, { version?: string }> = {};
+  try {
+    lock = readJson(root, 'package-lock.json').packages ?? {};
+  } catch (error) {
+    problems.push(`could not read package-lock.json: ${(error as Error).message}`);
+  }
+  for (const [path, entry] of Object.entries(lock)) {
+    const name = Object.keys(ASSESSED_VERSIONS).find((n) => path === `node_modules/${n}` || path.endsWith(`/node_modules/${n}`));
+    if (name && entry.version !== ASSESSED_VERSIONS[name]) {
+      problems.push(`lock ${path} is ${entry.version ?? 'unversioned'}, assessed ${ASSESSED_VERSIONS[name]}`);
+    }
+  }
+  for (const [name, importers] of Object.entries(ASSESSED_DEPENDENTS)) {
+    for (const importer of importers) {
+      const resolved = resolveInstalledFrom(root, importer, name);
+      const installed = resolved && versionAt(resolved);
+      if (installed !== ASSESSED_VERSIONS[name]) {
+        problems.push(`${importer} resolves ${name} to ${installed ?? 'nothing'}, assessed ${ASSESSED_VERSIONS[name]}`);
+      }
+    }
+  }
+  return problems;
+}
+
+/** Audit `nodes` paths (affected installed copies) must each be a copy that checkInstalledCopies covers. */
+export function checkAuditNodes(root: string, report: AuditReport): string[] {
+  const problems: string[] = [];
+  for (const vulnerability of Object.values(report.vulnerabilities)) {
+    if (!(vulnerability.name in ASSESSED_VERSIONS)) continue;
+    const nodes = (vulnerability as { nodes?: unknown }).nodes;
+    if (!Array.isArray(nodes) || nodes.length === 0 || !nodes.every((n) => typeof n === 'string')) {
+      problems.push(`audit entry ${vulnerability.name} has missing, empty or invalid nodes`);
+      continue;
+    }
+    for (const node of nodes as string[]) {
+      const installed = versionAt(join(root, node));
+      if (installed !== ASSESSED_VERSIONS[vulnerability.name]) {
+        problems.push(`audit node ${node} is ${installed ?? 'unreadable'}, assessed ${ASSESSED_VERSIONS[vulnerability.name]}`);
+      }
+    }
+  }
+  return problems;
+}
+
+/** The assessed @expo/cli: exact version and exact content of the files the dominance proof was made on. */
+export function checkCliPin(root: string, cli: string = CLI): string[] {
+  const problems: string[] = [];
+  const version = versionAt(join(root, cli));
+  if (version !== ASSESSED_CLI_VERSION) problems.push(`@expo/cli is ${version ?? 'unreadable'}, assessed ${ASSESSED_CLI_VERSION}`);
+  for (const [file, digest] of Object.entries(ASSESSED_CLI_DIGESTS)) {
+    let actual: string;
+    try {
+      actual = createHash('sha256').update(readFileSync(join(root, cli, file))).digest('hex');
+    } catch {
+      problems.push(`@expo/cli ${file} is unreadable`);
+      continue;
+    }
+    if (actual !== digest) problems.push(`@expo/cli ${file} content changed (sha256 ${actual}), reassess guard dominance`);
+  }
+  return problems;
+}
+
 const METRO_FILE_MAP_COPIES = [
   'node_modules/@expo/metro/node_modules/metro-file-map',
   'node_modules/metro-file-map',
@@ -199,10 +326,7 @@ export function checkCallPathAssumptions(
   const problems: string[] = [];
   const fail = (message: string) => problems.push(message);
 
-  for (const [name, version] of Object.entries(ASSESSED_VERSIONS)) {
-    const installed = readJson(root, `node_modules/${name}/package.json`).version;
-    if (installed !== version) fail(`${name} is ${installed}, assessed ${version}`);
-  }
+  problems.push(...checkInstalledCopies(root), ...checkCliPin(root));
 
   const lock = readJson(root, 'package-lock.json').packages as Record<
     string,
@@ -254,15 +378,6 @@ export function checkCallPathAssumptions(
   );
   if (verifyCallers.length !== 1 || !verifyCallers[0].endsWith(join('utils', 'codesigning.js'))) {
     fail(`code-signing verify callers changed: ${verifyCallers.join(', ')}`);
-  } else {
-    const codesigning = readFileSync(verifyCallers[0], 'utf8');
-    for (const guard of [
-      /if \(!expectSignatureHeader\)/,
-      /if \(!easProjectId\)/,
-      /if \(!codeSigningCertificatePath\)/,
-    ]) {
-      if (!guard.test(codesigning)) fail(`code-signing guard missing: ${guard}`);
-    }
   }
   const signing = read(root, 'node_modules/@expo/code-signing-certificates/build/main.js');
   const verifies = signing.match(/\.verify\(/g)?.length ?? 0;

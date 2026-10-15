@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   checkCallPathAssumptions,
+  checkAuditNodes,
   checkExportedBundles,
+  installedCopyPaths,
   evaluateAudit,
   type AdvisoryException,
   type AuditReport,
@@ -26,7 +28,14 @@ const exceptions: AdvisoryException[] = JSON.parse(
 const installed = Object.fromEntries(
   exceptions.map((e) => [
     e.package,
-    JSON.parse(readFileSync(`${root}node_modules/${e.package}/package.json`, 'utf8')).version,
+    // Every installed copy, so a differing nested copy cannot hide behind the hoisted one.
+    [
+      ...new Set(
+        installedCopyPaths(root, e.package).map(
+          (dir) => JSON.parse(readFileSync(`${dir}/package.json`, 'utf8')).version as string,
+        ),
+      ),
+    ].sort().join(',') || undefined,
   ]),
 );
 
@@ -42,6 +51,7 @@ if (!auditText) {
 const report = JSON.parse(auditText) as AuditReport;
 const problems = [
   ...evaluateAudit(report, exceptions, new Date(), installed),
+  ...checkAuditNodes(root, report),
   ...checkCallPathAssumptions(root),
   ...(option('--dist') ? checkExportedBundles(option('--dist')!) : []),
 ];

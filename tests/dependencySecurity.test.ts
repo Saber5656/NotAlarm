@@ -1,15 +1,18 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { describe } from 'node:test';
 
 import {
+  checkAuditNodes,
   checkCallPathAssumptions,
+  checkCliPin,
+  checkInstalledCopies,
   checkResolvedExpoConfig,
   resolveExpoConfig,
   checkExportedBundles,
@@ -240,5 +243,105 @@ describe('CI wiring', () => {
 
   test('uses Node 22', () => {
     assert.match(ci, /node-version: '22\.x'/);
+  });
+});
+
+describe('every installed copy and the pinned CLI (fixtures)', () => {
+  const lockOf = (entries: Record<string, string>) =>
+    JSON.stringify({ packages: Object.fromEntries(Object.entries(entries).map(([k, v]) => [k, { version: v }])) });
+  const CLI = 'node_modules/expo/node_modules/@expo/cli';
+
+  function fixture(overrides: Record<string, string | null> = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), 'depsec-'));
+    const files: Record<string, string | null> = {
+      'node_modules/braces/package.json': '{"version":"3.0.3"}',
+      'node_modules/micromatch/package.json': '{"version":"4.0.8"}',
+      'node_modules/node-forge/package.json': '{"version":"1.4.0"}',
+      'node_modules/@expo/code-signing-certificates/package.json': '{"version":"0.0.6"}',
+      'node_modules/@expo/metro/node_modules/metro-file-map/package.json': '{"version":"1"}',
+      'node_modules/metro-file-map/package.json': '{"version":"1"}',
+      [`${CLI}/package.json`]: '{"version":"57.0.30"}',
+      'package-lock.json': lockOf({
+        'node_modules/braces': '3.0.3',
+        'node_modules/micromatch': '4.0.8',
+        'node_modules/node-forge': '1.4.0',
+        'node_modules/@expo/code-signing-certificates': '0.0.6',
+      }),
+      ...overrides,
+    };
+    for (const [file, content] of Object.entries(files)) {
+      if (content === null) continue;
+      const path = join(dir, file);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, content);
+    }
+    return dir;
+  }
+
+  test('real checkout: all copies, lock, resolution and the CLI pin match', () => {
+    assert.deepEqual(checkInstalledCopies(root), []);
+    assert.deepEqual(checkCliPin(root), []);
+  });
+
+  test('fixture with only assessed copies passes', () => {
+    assert.deepEqual(checkInstalledCopies(fixture()), []);
+  });
+
+  test('rejects a nested changed node-forge version under @expo/cli even if the hoisted copy is assessed', () => {
+    const dir = fixture({ [`${CLI}/node_modules/node-forge/package.json`]: '{"version":"1.3.0"}' });
+    const problems = checkInstalledCopies(dir);
+    assert.ok(problems.some((p) => /@expo\/cli\/node_modules\/node-forge is 1\.3\.0/.test(p)), problems.join('\n'));
+    assert.ok(problems.some((p) => /@expo\/cli resolves node-forge to 1\.3\.0/.test(p)), problems.join('\n'));
+  });
+
+  test('rejects an added copy of an assessed package elsewhere in the tree', () => {
+    const dir = fixture({ 'node_modules/foo/node_modules/braces/package.json': '{"version":"3.0.2"}' });
+    assert.ok(checkInstalledCopies(dir).some((p) => /foo\/node_modules\/braces is 3\.0\.2/.test(p)));
+  });
+
+  test('rejects a lockfile entry for a different version, and an unreadable lock', () => {
+    const lock = lockOf({ 'node_modules/braces': '3.0.3', 'node_modules/x/node_modules/node-forge': '1.5.0' });
+    assert.ok(checkInstalledCopies(fixture({ 'package-lock.json': lock })).some((p) => /lock .*node-forge is 1\.5\.0/.test(p)));
+    assert.ok(checkInstalledCopies(fixture({ 'package-lock.json': 'not json' })).some((p) => /package-lock/.test(p)));
+  });
+
+  test('rejects an audit node path whose installed version is not the assessed one', () => {
+    const dir = fixture({ 'node_modules/y/node_modules/node-forge/package.json': '{"version":"1.9.9"}' });
+    const report = {
+      vulnerabilities: {
+        'node-forge': { name: 'node-forge', severity: 'high', via: [], nodes: ['node_modules/y/node_modules/node-forge'] },
+      },
+    } as unknown as AuditReport;
+    assert.ok(checkAuditNodes(dir, report).length === 1);
+  });
+
+  test('audit nodes missing, empty or of the wrong type fail closed for assessed advisory entries only', () => {
+    const dir = fixture();
+    const entry = (nodes: unknown) =>
+      ({ vulnerabilities: { 'node-forge': { name: 'node-forge', severity: 'high', via: [], ...(nodes === undefined ? {} : { nodes }) } } }) as unknown as AuditReport;
+    for (const nodes of [undefined, [], 'node_modules/node-forge', [1], null]) {
+      assert.ok(checkAuditNodes(dir, entry(nodes)).some((p) => /node-forge.*nodes/.test(p)), JSON.stringify(nodes));
+    }
+    assert.deepEqual(checkAuditNodes(dir, entry(['node_modules/node-forge'])), []);
+    const unrelated = { vulnerabilities: { 'metro-file-map': { name: 'metro-file-map', severity: 'high', via: ['micromatch'] } } } as unknown as AuditReport;
+    assert.deepEqual(checkAuditNodes(dir, unrelated), []);
+  });
+
+  test('CLI pin: version change and content change both fail; unchanged real files pass', () => {
+    const copiedFiles = {
+      [`${CLI}/build/src/utils/codesigning.js`]: readFileSync(join(root, CLI, 'build/src/utils/codesigning.js'), 'utf8'),
+      [`${CLI}/build/src/run/ios/codeSigning/Security.js`]: readFileSync(join(root, CLI, 'build/src/run/ios/codeSigning/Security.js'), 'utf8'),
+    };
+    assert.deepEqual(checkCliPin(fixture(copiedFiles)), []);
+    assert.ok(checkCliPin(fixture()).some((p) => /codesigning\.js is unreadable/.test(p)));
+    const changedVersion = fixture({ [`${CLI}/package.json`]: '{"version":"57.0.31"}' });
+    assert.ok(checkCliPin(changedVersion).some((p) => /@expo\/cli is 57\.0\.31, assessed 57\.0\.30/.test(p)));
+    const changedContent = fixture({
+      [`${CLI}/build/src/utils/codesigning.js`]: readFileSync(join(root, CLI, 'build/src/utils/codesigning.js'), 'utf8') + '\n',
+      [`${CLI}/build/src/run/ios/codeSigning/Security.js`]: readFileSync(join(root, CLI, 'build/src/run/ios/codeSigning/Security.js'), 'utf8'),
+    });
+    const problems = checkCliPin(changedContent);
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /codesigning\.js content changed/);
   });
 });
