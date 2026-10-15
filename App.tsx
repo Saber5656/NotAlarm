@@ -75,6 +75,7 @@ import {
   ScheduledNotificationRollbackError,
   withScheduledNotificationRollback,
 } from './src/alarmScheduleRollback';
+import { prepareAlarmEnable } from './src/alarmDefinitionMutations';
 import {
   MAX_ALARM_COUNT,
   formatRepeatLabel,
@@ -161,6 +162,7 @@ import {
   classifySuppressionFailure,
   describeAlarmRemains,
   describeSuppressedOccurrence,
+  describeTodayOnlyExpiry,
   getRingingStopA11yLabel,
   getStepGuidance,
   isAlarmListLocked,
@@ -1485,27 +1487,11 @@ function AlarmApp() {
               }
 
               const now = Date.now();
-              const repeat =
-                latest.repeat.kind === 'today'
-                  ? makeAlarmRepeat('today', now)
-                  : latest.repeat;
-              const nextAtMs = getNextAlarmTime(
-                now,
-                latest.hour,
-                latest.minute,
-                repeat,
-              );
-              if (!nextAtMs || nextAtMs - now < MIN_ARM_LEAD_MS) {
-                throw new Error(
-                  'この「今日だけ」アラームは時刻を過ぎています。削除して新しい時刻を追加してください。',
-                );
+              const prepared = prepareAlarmEnable(latest, now);
+              if (!prepared.ok) {
+                throw new Error(prepared.message);
               }
-              const enabledDefinition = {
-                ...latest,
-                repeat,
-                enabled: true,
-                cycles: [],
-              };
+              const enabledDefinition = prepared.definition;
               const filled = await fillAlarmDefinitionSchedule(
                 enabledDefinition,
                 now,
@@ -2324,6 +2310,14 @@ function AlarmApp() {
                 formatNextDate,
                 { refillFailed: refillFailedAlarmIds.has(definition.id) },
               );
+              const todayExpiry = describeTodayOnlyExpiry(
+                definition,
+                nowMs,
+                formatNextDate,
+              );
+              const repeatA11y = todayExpiry
+                ? todayExpiry.a11yLabel
+                : formatRepeatLabel(definition.repeat);
               const scheduleLineWarns =
                 definition.enabled &&
                 (deliveryWarningCopy !== null || coverageLine.isWarning);
@@ -2349,8 +2343,12 @@ function AlarmApp() {
                         {formatAlarmTime(definition.hour, definition.minute)}
                       </Text>
                       <Text style={styles.repeatText}>
-                        {formatRepeatLabel(definition.repeat)}
-                        {nextCycle
+                        {todayExpiry
+                          ? todayExpiry.rowLabel
+                          : formatRepeatLabel(definition.repeat)}
+                        {todayExpiry
+                          ? ''
+                          : nextCycle
                           ? ` ・ 次回 ${formatNextDate(nextCycle.dueAtMs)}`
                           : definition.enabled
                             ? ' ・ 次回予約なし'
@@ -2358,12 +2356,21 @@ function AlarmApp() {
                       </Text>
                     </View>
                     <Switch
-                      accessibilityHint="オフにすると、セット済みの通知をすべて取り消します"
+                      accessibilityHint={
+                        todayExpiry && !definition.enabled
+                          ? '終了しているためオンにできません。新しいアラームを追加してください'
+                          : 'オフにすると、セット済みの通知をすべて取り消します'
+                      }
                       accessibilityLabel={`${formatAlarmTime(
                         definition.hour,
                         definition.minute,
-                      )}、${formatRepeatLabel(definition.repeat)}のアラーム`}
-                      disabled={isBusy || listLocked || Platform.OS === 'web'}
+                      )}、${repeatA11y}のアラーム`}
+                      disabled={
+                        isBusy ||
+                        listLocked ||
+                        Platform.OS === 'web' ||
+                        (todayExpiry !== null && !definition.enabled)
+                      }
                       onValueChange={(enabled) =>
                         void toggleAlarm(definition, enabled)
                       }
@@ -2385,15 +2392,17 @@ function AlarmApp() {
                         scheduleLineWarns && styles.scheduleSummaryWarning,
                       ]}
                     >
-                      {definition.enabled && deliveryWarningCopy
-                        ? deliveryWarningCopy.scheduleLine
-                        : coverageLine.text}
+                      {todayExpiry
+                        ? todayExpiry.explanation
+                        : definition.enabled && deliveryWarningCopy
+                          ? deliveryWarningCopy.scheduleLine
+                          : coverageLine.text}
                     </Text>
                     <Pressable
                       accessibilityLabel={`${formatAlarmTime(
                         definition.hour,
                         definition.minute,
-                      )}、${formatRepeatLabel(definition.repeat)}のアラームを削除`}
+                      )}、${repeatA11y}のアラームを削除`}
                       accessibilityRole="button"
                       disabled={isBusy || listLocked}
                       onPress={() => confirmDeleteAlarm(definition)}

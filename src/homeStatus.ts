@@ -353,3 +353,48 @@ export const RINGING_STOP_HINT =
 export function getRingingStopA11yLabel(hour: number, minute: number): string {
   return `${hour}時${minute}分のアラームが鳴っています。${RINGING_STOP_LABEL}`;
 }
+
+function isTerminalCycle(cycle: StoredAlarm): boolean {
+  return cycle.phase === 'suppressed' || cycle.phase === 'dismissed';
+}
+
+export interface TodayOnlyExpiry {
+  /** Replaces the repeat label in the row, e.g. "今日だけ（10/15） ・ 終了". */
+  rowLabel: string;
+  /** Spoken suffix carrying the original date and the Ended state. */
+  a11yLabel: string;
+  explanation: string;
+}
+
+/**
+ * An expired today-only definition keeps its original date and is shown as
+ * ended; it is never reused for another day. Null when it can still ring.
+ */
+export function describeTodayOnlyExpiry(
+  definition: StoredAlarmDefinition,
+  nowMs: number,
+  formatDate: (timestampMs: number) => string,
+): TodayOnlyExpiry | null {
+  const { repeat } = definition;
+  if (repeat.kind !== 'today' || !repeat.dateKey) {
+    return null;
+  }
+  // Ended only when nothing can still ring or be cancelled: an enabled
+  // record, or any cycle outside the terminal allowlist, is still active.
+  if (definition.enabled || !definition.cycles.every(isTerminalCycle)) {
+    return null;
+  }
+  if (getNextAlarmTime(nowMs, definition.hour, definition.minute, repeat)) {
+    return null;
+  }
+  const [year, month, day] = repeat.dateKey.split('-').map(Number);
+  const date = formatDate(
+    new Date(year, month - 1, day, definition.hour, definition.minute).getTime(),
+  );
+  return {
+    rowLabel: `今日だけ（${date}） ・ 終了`,
+    a11yLabel: `今日だけ、${date}、終了`,
+    explanation:
+      'この日の分は終了しました。もう一度使うには、新しいアラームを追加してください',
+  };
+}
