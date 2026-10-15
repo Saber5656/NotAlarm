@@ -94,6 +94,7 @@ export function readValidSuppressionIntents(
 export function createSuppressionJournal(
   store: KeyValueStore,
   key: string = SUPPRESSION_JOURNAL_KEY,
+  options: { beforeRecord?: () => Promise<void> } = {},
 ): SuppressionJournal {
   let queue: Promise<unknown> = Promise.resolve();
   let lock: Promise<unknown> = Promise.resolve();
@@ -117,8 +118,10 @@ export function createSuppressionJournal(
 
   function mutate(
     update: (entries: SuppressionIntent[]) => SuppressionIntent[],
+    before?: () => Promise<void>,
   ): Promise<void> {
     const operation = queue.then(async () => {
+      await before?.();
       const entries = update(await read());
       if (entries.length === 0) {
         await store.removeItem(key);
@@ -139,10 +142,13 @@ export function createSuppressionJournal(
 
   return {
     record: (intent) =>
-      mutate((entries) => [
-        ...entries.filter((entry) => entry.cycleId !== intent.cycleId),
-        intent,
-      ]),
+      mutate(
+        (entries) => [
+          ...entries.filter((entry) => entry.cycleId !== intent.cycleId),
+          intent,
+        ],
+        options.beforeRecord,
+      ),
     load: () => {
       const operation = queue.then(read);
       queue = operation.then(
