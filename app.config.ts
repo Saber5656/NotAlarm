@@ -1,3 +1,7 @@
+// Register the tsx CommonJS loader so this config can import TypeScript helpers
+// on every supported Node (https://docs.expo.dev/guides/typescript/#appconfigjs).
+import 'tsx/cjs';
+
 import type { ExpoConfig } from 'expo/config';
 
 import { resolveAppIdentity } from './config/appIdentity.ts';

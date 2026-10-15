@@ -1,6 +1,7 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -95,4 +96,12 @@ test('URLs carrying credentials are rejected because extra is public', () => {
   ]) {
     assert.throws(() => prod({ ALREADYUP_SUPPORT_URL: url }), /SUPPORT_URL/, url);
   }
+});
+
+test('app.config.ts registers the tsx/cjs loader before importing TypeScript helpers', () => {
+  const src = readFileSync(new URL('../app.config.ts', import.meta.url), 'utf8');
+  const register = src.indexOf("'tsx/cjs'");
+  const helper = src.indexOf('./config/appIdentity');
+  assert.ok(register >= 0, 'tsx/cjs import missing');
+  assert.ok(helper > register, 'loader must precede helper import');
 });
