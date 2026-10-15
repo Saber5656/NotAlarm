@@ -679,5 +679,25 @@ test('missed cycles are announced by tracked ids without moving focus', () => {
   assert.match(app, /announceForAccessibility\(MISSED_CARD_ANNOUNCEMENT\)/);
   const effect = block('planMissedAnnouncement({', 'MISSED_CARD_ANNOUNCEMENT)');
   assert.doesNotMatch(effect, /setAccessibilityFocus/);
-  assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null\]/);
+  assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
+});
+
+test('missed announcements queue on iOS and wait for the app to be active', () => {
+  const effect = block('planMissedAnnouncement({', '[missedCycleIdsKey');
+  // iOS queues behind current speech; Android keeps the existing API.
+  assert.match(effect, /Platform\.OS === 'ios'/);
+  assert.match(
+    effect,
+    /announceForAccessibilityWithOptions\(\s*MISSED_CARD_ANNOUNCEMENT,\s*\{\s*queue: true\s*\}/,
+  );
+  assert.match(effect, /announceForAccessibility\(MISSED_CARD_ANNOUNCEMENT\)/);
+  // Only a real `active` state announces; inactive/background stay pending.
+  assert.match(app, /setIsAppActive\(state === 'active'\)/);
+  assert.match(app, /useState\(\s*\(\) => AppState\.currentState === 'active',?\s*\)/);
+  const gate = block('const missedAnnouncedRef', 'planMissedAnnouncement({');
+  assert.match(gate, /if \(!isAppActive\)\s*\{\s*return;/);
+  assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
+  // Keep-awake policy is unchanged and the AppState subscription is shared.
+  assert.match(app, /setIsAppForeground\(isForegroundAppState\(state\)\)/);
+  assert.equal(app.match(/setIsAppActive\b/g)?.length, 2);
 });
