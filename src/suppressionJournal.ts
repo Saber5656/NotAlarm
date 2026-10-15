@@ -3,6 +3,7 @@ import type {
   SuppressionJournal,
 } from './alarmOrchestrator';
 import { MAX_ALARM_COUNT } from './alarmSchedule';
+import { AppError } from './errorCatalog';
 
 export const SUPPRESSION_JOURNAL_KEY = 'already-up/suppression-journal/v1';
 
@@ -110,10 +111,10 @@ export function createSuppressionJournal(
     try {
       parsed = JSON.parse(raw);
     } catch {
-      throw new Error('未完了の停止記録を読み取れません。');
+      throw new AppError('STORAGE_JOURNAL_CORRUPT');
     }
     if (!isJournal(parsed)) {
-      throw new Error('未完了の停止記録を読み取れません。');
+      throw new AppError('STORAGE_JOURNAL_CORRUPT');
     }
     return parsed.entries;
   }
@@ -131,7 +132,7 @@ export function createSuppressionJournal(
       }
       const journal: SuppressionJournalV1 = { version: 1, entries };
       if (!isJournal(journal)) {
-        throw new Error('停止記録を保存できません。');
+        throw new AppError('STORAGE_JOURNAL_SAVE_FAILED');
       }
       await store.setItem(key, JSON.stringify(journal));
     });

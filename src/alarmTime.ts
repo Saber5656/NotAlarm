@@ -1,3 +1,5 @@
+import { AppError } from './errorCatalog';
+
 export function getNextAlarmAtMs(
   nowMs: number,
   hour: number,
@@ -12,7 +14,7 @@ export function getNextAlarmAtMs(
     minute < 0 ||
     minute > 59
   ) {
-    throw new Error('有効なアラーム時刻を選択してください。');
+    throw new AppError('TIME_INVALID');
   }
 
   const candidate = new Date(nowMs);

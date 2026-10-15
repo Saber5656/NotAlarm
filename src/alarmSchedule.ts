@@ -1,3 +1,5 @@
+import { AppError } from './errorCatalog';
+
 export const MAX_ALARM_COUNT = 10;
 export const SCHEDULED_OCCURRENCES_PER_ALARM = 3;
 
@@ -27,7 +29,7 @@ const WEEKDAYS_ONLY: Weekday[] = [1, 2, 3, 4, 5];
 
 export function localDateKey(timestampMs: number): string {
   if (!Number.isFinite(timestampMs)) {
-    throw new Error('日付を取得できません。');
+    throw new AppError('TIME_INVALID');
   }
 
   const date = new Date(timestampMs);
@@ -52,7 +54,7 @@ export function makeAlarmRepeat(
     case 'custom': {
       const weekdays = normalizeWeekdays(customWeekdays);
       if (weekdays.length === 0) {
-        throw new Error('繰り返す曜日を1つ以上選択してください。');
+        throw new AppError('REPEAT_INVALID');
       }
       return { kind, weekdays };
     }
@@ -166,7 +168,7 @@ export function getUpcomingAlarmTimes(
 ): number[] {
   validateClock(nowMs, hour, minute);
   if (!isAlarmRepeat(repeat) || !Number.isInteger(count) || count < 1) {
-    throw new Error('繰り返し設定が正しくありません。');
+    throw new AppError('REPEAT_INVALID');
   }
 
   if (repeat.kind === 'today') {
@@ -211,7 +213,7 @@ function validateClock(nowMs: number, hour: number, minute: number): void {
     minute < 0 ||
     minute > 59
   ) {
-    throw new Error('有効なアラーム時刻を選択してください。');
+    throw new AppError('TIME_INVALID');
   }
 }
 
@@ -219,7 +221,7 @@ function dateFromKey(dateKey: string, hour: number, minute: number): number {
   const [year, month, day] = dateKey.split('-').map(Number);
   const candidate = new Date(year, month - 1, day, hour, minute, 0, 0);
   if (localDateKey(candidate.getTime()) !== dateKey) {
-    throw new Error('アラームの日付が正しくありません。');
+    throw new AppError('TIME_INVALID');
   }
   return candidate.getTime();
 }

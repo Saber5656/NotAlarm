@@ -249,11 +249,9 @@ export function AlarmComposerModal({
       setTimeInputError(null);
       setIsTimeEditing(false);
       Keyboard.dismiss();
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : '時は0〜23、分は0〜59で入力してください。';
+    } catch {
+      // Fixed copy: a thrown message is never shown.
+      const message = '時は0〜23、分は0〜59で入力してください。';
       setTimeInputError(message);
       if (Platform.OS === 'ios') {
         AccessibilityInfo.announceForAccessibility(message);

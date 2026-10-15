@@ -91,6 +91,7 @@ export interface StorageResetResult {
 }
 
 export class StorageResetIncompleteError extends Error {
+  readonly code = 'STORAGE_RESET_INCOMPLETE' as const;
   constructor() {
     super(
       '削除を最後まで完了できませんでした。一部の通知やデータはすでに消えている場合があります。もう一度実行すると続きから再開します。',

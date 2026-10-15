@@ -52,7 +52,10 @@ test('custom repeat normalizes weekdays and formats a release-facing label', () 
 });
 
 test('custom repeat rejects an empty weekday selection', () => {
-  assert.throws(() => makeAlarmRepeat('custom', Date.now(), []), /曜日/);
+  assert.throws(
+    () => makeAlarmRepeat('custom', Date.now(), []),
+    (error: unknown) => (error as { code?: string }).code === 'REPEAT_INVALID',
+  );
 });
 
 test('today repeat accepts only real calendar dates', () => {

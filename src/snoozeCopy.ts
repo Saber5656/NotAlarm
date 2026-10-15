@@ -1,4 +1,10 @@
-import { SNOOZE_INTERVAL_MS, SNOOZE_MAX_COUNT, type SnoozeRejection } from './snooze';
+import { type ErrorCode, noticeFromCode } from './errorCatalog';
+import {
+  SNOOZE_INTERVAL_MS,
+  SNOOZE_MAX_COUNT,
+  type SnoozeRecoveryOutcome,
+  type SnoozeRejection,
+} from './snooze';
 
 export interface SnoozeCopy {
   title: string;
@@ -52,40 +58,85 @@ export function getSnoozeCopy(input: {
   };
 }
 
-const FAILURE_COPY: Record<SnoozeRejection, string> = {
-  NOT_FOUND: 'このアラームは見つかりませんでした。',
-  NOT_RINGING: 'このアラームはすでに鳴っていません。',
-  LIMIT_REACHED: 'スヌーズは3回までです。止めるまで鳴り続けます。',
-  TOO_LATE: '次のアラームの時刻に近いため、スヌーズできません。アラームは鳴ったままです。',
-  CAPACITY_FULL:
-    '端末の通知がいっぱいで、スヌーズを設定できませんでした。アラームは鳴ったままです。',
-  LIST_FAILED:
-    'スヌーズを設定できませんでした。アラームは鳴ったままです。止めるか、もう一度お試しください。',
-  INTENT_NOT_SAVED:
-    'スヌーズを設定できませんでした。アラームは鳴ったままです。止めるか、もう一度お試しください。',
-  SCHEDULE_FAILED:
-    'スヌーズを設定できませんでした。アラームは鳴ったままです。止めるか、もう一度お試しください。',
-  VERIFY_FAILED:
-    'スヌーズの設定を確認できませんでした。アラームは鳴ったままです。止めるか、もう一度お試しください。',
-  PERSIST_FAILED:
-    'スヌーズの内容を保存できませんでした。アラームは鳴ったままです。止めるか、もう一度お試しください。',
+const FAILURE_CODE: Record<SnoozeRejection, ErrorCode> = {
+  NOT_FOUND: 'SNOOZE_NOT_FOUND',
+  NOT_RINGING: 'SNOOZE_NOT_RINGING',
+  LIMIT_REACHED: 'SNOOZE_LIMIT_REACHED',
+  TOO_LATE: 'SNOOZE_TOO_LATE',
+  CAPACITY_FULL: 'SNOOZE_CAPACITY_FULL',
+  LIST_FAILED: 'SNOOZE_LIST_FAILED',
+  INTENT_NOT_SAVED: 'SNOOZE_INTENT_NOT_SAVED',
+  SCHEDULE_FAILED: 'SNOOZE_SCHEDULE_FAILED',
+  VERIFY_FAILED: 'SNOOZE_VERIFY_FAILED',
+  PERSIST_FAILED: 'SNOOZE_PERSIST_FAILED',
 };
 
-getSnoozeCopy.failure = (reason: SnoozeRejection): string =>
-  FAILURE_COPY[reason];
+type CleanupReport = { cleanup?: 'unconfirmed'; tracking?: 'memory_only' };
+
+function isMemoryOnly(report: CleanupReport): boolean {
+  return report.tracking === 'memory_only';
+}
 
 /**
- * Said when a notification could not be confirmed cancelled. Never worded as a
- * completed cleanup; a memory-only record also says it does not survive a restart.
+ * Catalog code of a refused snooze. An attempt whose cancellation is unsure
+ * gets its own code: the attempted notification may still exist, and whether
+ * it is recorded durably or only held in memory is told apart.
  */
-getSnoozeCopy.cleanupWarning = (report: {
-  cleanup?: 'unconfirmed';
-  tracking?: 'memory_only';
-}): string => {
+getSnoozeCopy.failureCode = (
+  reason: SnoozeRejection,
+  report: CleanupReport = {},
+): ErrorCode => {
   if (report.cleanup !== 'unconfirmed') {
-    return '';
+    return FAILURE_CODE[reason];
   }
-  return report.tracking === 'memory_only'
-    ? ' 予約済みの通知の取り消しを確認できていません。この記録は保存できず、アプリを閉じると失われます。端末の通知を確認してください。'
-    : ' 予約済みの通知の取り消しを確認できていません。次回の起動時に再確認します。端末の通知も確認してください。';
+  return isMemoryOnly(report)
+    ? 'SNOOZE_CLEANUP_MEMORY_ONLY'
+    : 'SNOOZE_CLEANUP_UNCONFIRMED';
+};
+
+getSnoozeCopy.failure = (
+  reason: SnoozeRejection,
+  report: CleanupReport = {},
+): string => noticeFromCode(getSnoozeCopy.failureCode(reason, report)).text;
+
+/** Warning code when an accepted snooze left a cancellation unconfirmed. */
+getSnoozeCopy.acceptedCleanupCode = (report: CleanupReport): ErrorCode | null => {
+  if (report.cleanup !== 'unconfirmed') {
+    return null;
+  }
+  return isMemoryOnly(report)
+    ? 'SNOOZE_ACCEPTED_CLEANUP_MEMORY_ONLY'
+    : 'SNOOZE_ACCEPTED_CLEANUP_UNCONFIRMED';
+};
+
+/** Warning code when a durable stop left a cancellation unconfirmed. */
+getSnoozeCopy.stopCleanupCode = (report: CleanupReport): ErrorCode | null => {
+  if (report.cleanup !== 'unconfirmed') {
+    return null;
+  }
+  return isMemoryOnly(report)
+    ? 'STOP_CLEANUP_MEMORY_ONLY'
+    : 'STOP_CLEANUP_UNCONFIRMED';
+};
+
+/**
+ * A stop that failed changed nothing: the first write-ahead save is the only
+ * failing step, and no notification was cancelled before it.
+ */
+getSnoozeCopy.stopFailureCode = (
+  _reason: 'CANCEL_FAILED' | 'SAVE_FAILED',
+): ErrorCode => 'STOP_SAVE_FAILED';
+
+/** Notice code for the startup recovery pass, most severe state first. */
+getSnoozeCopy.recoveryCode = (outcome: SnoozeRecoveryOutcome): ErrorCode | null => {
+  if ((outcome.memoryOnly?.length ?? 0) > 0) {
+    return 'SNOOZE_RECOVERY_MEMORY_ONLY';
+  }
+  if (outcome.rearmFailed.length > 0) {
+    return 'SNOOZE_REARM_FAILED';
+  }
+  if (outcome.unresolved.length > 0) {
+    return 'SNOOZE_RECOVERY_UNRESOLVED';
+  }
+  return null;
 };

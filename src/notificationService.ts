@@ -25,6 +25,8 @@ import {
   resolveNotificationDelivery,
   type NotificationDeliveryState,
 } from './notificationDelivery';
+import { AppError } from './errorCatalog';
+import { ensureNotificationPermission } from './notificationPermission';
 
 const ALARM_CHANNEL_ID = 'already-up-alarm';
 const CHECK_IN_CHANNEL_ID = 'already-up-check-in';
@@ -54,22 +56,19 @@ export function installForegroundNotificationHandler(): void {
 
 export async function prepareNotifications(): Promise<void> {
   if (Platform.OS === 'web') {
-    throw new Error('通知を使うにはiPhoneまたはAndroid実機が必要です。');
+    throw new AppError('NTF_UNSUPPORTED_PLATFORM');
   }
 
-  const currentPermission = await Notifications.getPermissionsAsync();
-  const permission =
-    currentPermission.status === 'granted'
-      ? currentPermission
-      : await Notifications.requestPermissionsAsync();
+  await ensureNotificationPermission({
+    getPermission: () => Notifications.getPermissionsAsync(),
+    requestPermission: () => Notifications.requestPermissionsAsync(),
+  });
 
-  if (permission.status !== 'granted') {
-    throw new Error(
-      '通知が許可されていません。設定アプリで通知をオンにしてください。',
-    );
+  try {
+    await registerAlarmNotificationTypes();
+  } catch (error) {
+    throw new AppError('NTF_SETUP_FAILED', error);
   }
-
-  await registerAlarmNotificationTypes();
 }
 
 /**
@@ -316,7 +315,7 @@ export async function cancelNotificationIfPresent(
   await Notifications.cancelScheduledNotificationAsync(notificationId);
   const scheduledAfter = await Notifications.getAllScheduledNotificationsAsync();
   if (scheduledAfter.some((request) => request.identifier === notificationId)) {
-    throw new Error('アラーム通知の解除を確認できませんでした。');
+    throw new AppError('NOTIFICATION_CANCEL_UNVERIFIED');
   }
 }
 

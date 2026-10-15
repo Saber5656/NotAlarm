@@ -16,6 +16,7 @@ import {
   type AlarmRepeat,
 } from './alarmSchedule';
 import { withTrustedOccurrenceMetadata } from './occurrenceIdentity';
+import { AppError } from './errorCatalog';
 import { type ClassificationSource, classifyOverdueCycles } from './missedAlarms';
 import { assertNoPendingReset, stampStorageResult } from './storageResetGate';
 import { hasValidSnoozeState, type SnoozeRecord } from './snooze';
@@ -117,11 +118,21 @@ let cancellationJournalQueue: Promise<void> = Promise.resolve();
 let editJournalQueue: Promise<void> = Promise.resolve();
 
 export async function loadAlarmDefinitions(): Promise<StoredAlarmDefinition[]> {
-  const raw = await AsyncStorage.getItem(ALARM_DEFINITIONS_STORAGE_KEY);
+  let raw: string | null;
+  try {
+    raw = await AsyncStorage.getItem(ALARM_DEFINITIONS_STORAGE_KEY);
+  } catch (error) {
+    throw new AppError('STORAGE_READ_FAILED', error);
+  }
   if (raw) {
-    const parsed: unknown = JSON.parse(raw);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new AppError('STORAGE_CORRUPT', error);
+    }
     if (!isAlarmStoreV2(parsed)) {
-      throw new Error('保存済みのアラーム設定を読み取れません。');
+      throw new AppError('STORAGE_CORRUPT');
     }
     return stampStorageResult(dropUntrustedOccurrenceMetadata(parsed.alarms));
   }
@@ -149,11 +160,18 @@ export async function saveAlarmDefinitions(
 ): Promise<void> {
   const store: AlarmStoreV2 = { version: 2, alarms };
   if (!isAlarmStoreV2(store)) {
-    throw new Error('アラーム設定を保存できません。');
+    throw new AppError('STORAGE_SAVE_FAILED');
   }
   // Fresh check at the write itself, including the legacy migration path.
   await assertNoPendingReset();
-  await AsyncStorage.setItem(ALARM_DEFINITIONS_STORAGE_KEY, JSON.stringify(store));
+  try {
+    await AsyncStorage.setItem(
+      ALARM_DEFINITIONS_STORAGE_KEY,
+      JSON.stringify(store),
+    );
+  } catch (error) {
+    throw new AppError('STORAGE_SAVE_FAILED', error);
+  }
 }
 
 export async function loadPendingAlarmCancellations(): Promise<
@@ -163,9 +181,14 @@ export async function loadPendingAlarmCancellations(): Promise<
   if (!raw) {
     return [];
   }
-  const parsed: unknown = JSON.parse(raw);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new AppError('STORAGE_JOURNAL_CORRUPT', error);
+  }
   if (!isAlarmCancellationJournalV1(parsed)) {
-    throw new Error('未完了のアラーム停止処理を読み取れません。');
+    throw new AppError('STORAGE_JOURNAL_CORRUPT');
   }
   return parsed.entries;
 }
@@ -181,7 +204,7 @@ function mutatePendingAlarmCancellations(
     const entries = mutator(current);
     const journal: AlarmCancellationJournalV1 = { version: 1, entries };
     if (!isAlarmCancellationJournalV1(journal)) {
-      throw new Error('アラーム停止処理を保存できません。');
+      throw new AppError('STORAGE_JOURNAL_SAVE_FAILED');
     }
     if (entries.length === 0) {
       await AsyncStorage.removeItem(ALARM_CANCELLATION_JOURNAL_KEY);

@@ -1,3 +1,4 @@
+import { errorCodeOf } from './errorCatalog';
 import {
   scheduleAlarmNotificationsFailSafe,
   type AlarmSchedulingGateway,
@@ -16,6 +17,7 @@ import {
 } from './alarmSchedule';
 import {
   ScheduledNotificationRollbackError,
+  recordRollbackFailures,
   type ScheduledNotificationRollbackFailure,
 } from './alarmScheduleRollback';
 import { currentPlanningZone } from './planningZone';
@@ -83,6 +85,12 @@ export type AlarmQueueStatus =
 
 export interface ReconcileGateway extends AlarmSchedulingGateway {
   cancelScheduled(notificationId: string): Promise<void>;
+  /**
+   * A main id this pass registered is settled: its definition checkpoint was
+   * saved or its cancellation was confirmed. Until then the registration's
+   * write-ahead record stays, so a crash in between cannot forget the id.
+   */
+  releaseMain?(mainAlarmIds: readonly string[]): Promise<void>;
 }
 
 /**
@@ -175,9 +183,6 @@ function isMonitoring(cycle: StoredAlarm): boolean {
   return cycle.phase === 'armed' || cycle.phase === 'step_candidate';
 }
 
-function messageOf(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
-}
 
 /** An old occurrence and the cycle that takes over its slot. */
 interface ReplacementPair {
@@ -317,6 +322,12 @@ class Run {
     return live;
   }
 
+  private async releaseMain(ids: readonly string[]): Promise<void> {
+    if (ids.length > 0) {
+      await this.input.gateway.releaseMain?.(ids).catch(() => undefined);
+    }
+  }
+
   private async untrack(ids: readonly string[]): Promise<void> {
     if (ids.length > 0) {
       await this.input.orphans?.remove([...ids]).catch(() => undefined);
@@ -355,10 +366,12 @@ class Run {
         this.pendingOrphans.add(notificationId);
         failures.push({
           notificationId,
-          message: messageOf(error, '予約済み通知を解除できませんでした。'),
+          code: errorCodeOf(error, 'NOTIFICATION_CANCEL_UNVERIFIED'),
         });
       }
     }
+    // A confirmed cancel settles a registration this pass still held.
+    await this.releaseMain(cancelled);
     if (tracked) {
       await this.untrack(cancelled);
     } else if (failures.length > 0) {
@@ -467,26 +480,29 @@ class Run {
       for (const notificationId of scheduledIds) {
         try {
           await this.cancelConfirmed(notificationId);
+          // Verified rollback: the registration is settled. An id whose cancel
+          // is unconfirmed keeps its record.
+          await this.releaseMain([notificationId]);
         } catch (cancelError) {
           this.pendingOrphans.add(notificationId);
           failures.push({
             notificationId,
-            message: messageOf(
-              cancelError,
-              '予約済み通知を解除できませんでした。',
-            ),
+            code: errorCodeOf(cancelError, 'NOTIFICATION_CANCEL_UNVERIFIED'),
           });
         }
       }
       if (failures.length > 0) {
         // Not saved and not cancelled: remember the ids so a later pass can.
-        await this.input.orphans
-          ?.add(failures.map((failure) => failure.notificationId))
-          .catch(() => undefined);
-        throw new ScheduledNotificationRollbackError(error, failures);
+        const recorded = await recordRollbackFailures(
+          failures,
+          this.input.orphans,
+        );
+        throw new ScheduledNotificationRollbackError(error, failures, recorded);
       }
       throw error;
     }
+    // The checkpoint holds these ids: the stored cycles now own them.
+    await this.releaseMain(scheduledIds);
     this.alarms = next;
   }
 
@@ -687,7 +703,7 @@ class Run {
           alarmId,
           cycleId: cycle.cycleId,
           dueAtMs: cycle.dueAtMs,
-          message: messageOf(error, 'アラーム通知を再予約できませんでした。'),
+          code: errorCodeOf(error, 'MAIN_REGISTER_FAILED'),
         });
         this.mark(alarmId, failed);
         return;
@@ -708,7 +724,7 @@ class Run {
             alarmId,
             cycleId: cycle.cycleId,
             dueAtMs: cycle.dueAtMs,
-            message: '再予約した通知を端末で確認できませんでした。',
+            code: 'MAIN_UNVERIFIED',
           });
           this.mark(alarmId, failed);
           return;
@@ -786,6 +802,7 @@ class Run {
       }
       try {
         await this.cancelConfirmed(mainAlarmId);
+        await this.releaseMain([mainAlarmId]);
       } catch {
         this.pendingOrphans.add(mainAlarmId);
         await orphans?.add([mainAlarmId]).catch(() => undefined);
@@ -942,7 +959,7 @@ class Run {
           cycleId: cycle.cycleId,
           dueAtMs: cycle.dueAtMs,
           mainAlarmId,
-          message: messageOf(error, '起床確認通知を再予約できませんでした。'),
+          code: errorCodeOf(error, 'CHECKIN_REGISTER_FAILED'),
         });
         this.mark(alarmId, replacingId ? 'unverified' : 'check_in_missing');
         return;
@@ -1183,14 +1200,14 @@ class Run {
         stepCandidateRecorded: false,
         ...stampOccurrence(dueAtMs, planningZone),
       };
-      if (scheduled.checkInWarning) {
+      if (scheduled.checkInErrorCode) {
         this.issues.push({
           kind: 'check_in_schedule_failed',
           alarmId,
           cycleId,
           dueAtMs,
           mainAlarmId: scheduled.mainAlarmId,
-          message: scheduled.checkInWarning,
+          code: scheduled.checkInErrorCode,
         });
         this.mark(alarmId, 'check_in_missing');
       }
@@ -1200,7 +1217,7 @@ class Run {
         alarmId,
         cycleId,
         dueAtMs,
-        message: messageOf(error, 'アラーム通知を再予約できませんでした。'),
+        code: errorCodeOf(error, 'MAIN_REGISTER_FAILED'),
       });
       // Keep every old occurrence: ringing at the old time beats not ringing.
       // settleReplan reports it as missing or duplicated.
@@ -1477,7 +1494,7 @@ export function summarizeReconciliation(
       problemKeys,
       notice: {
         tone: 'danger',
-        text: '端末の通知予約が上限(64件)に近く、アラームを再予約できませんでした。不要な通知を整理してから開き直してください。',
+        text: '端末の通知予約が上限(64件)に近く、アラームを再予約できませんでした。不要なアラームを削除または無効にしてから、アプリを開き直してください。',
       },
     };
   }

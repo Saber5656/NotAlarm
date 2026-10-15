@@ -18,14 +18,17 @@ import {
   shouldCaptureNoticeSwipe,
   shouldDismissNoticeSwipe,
 } from '../noticeGesture';
+import type { NoticeTone } from '../noticeTone';
 import { GlassSurface } from './GlassSurface';
 import { useReducedMotion } from './useReducedMotion';
 
-export type NoticeTone = 'neutral' | 'success' | 'warning' | 'danger';
+export type { NoticeTone };
 
 export interface AppNotice {
   text: string;
   tone: NoticeTone;
+  /** Secondary detail for reports; the sentence in `text` stands on its own. */
+  code?: string;
 }
 
 interface NoticeBannerProps {
@@ -209,7 +212,19 @@ export function NoticeBanner({ notice, onDismiss }: NoticeBannerProps) {
               {SYMBOLS[notice.tone]}
             </Text>
           </View>
-          <Text style={styles.text}>{notice.text}</Text>
+          <View style={styles.textColumn}>
+            <Text style={styles.text}>{notice.text}</Text>
+            {notice.code ? (
+              <Text
+                accessibilityLabel={`エラーコード ${notice.code}`}
+                selectable
+                style={styles.code}
+                testID="notice-error-code"
+              >
+                {notice.code}
+              </Text>
+            ) : null}
+          </View>
           <Pressable
             accessibilityHint="上にスワイプしても閉じられます"
             accessibilityLabel="お知らせを閉じる"
@@ -311,8 +326,17 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '900',
   },
-  text: {
+  textColumn: {
     flex: 1,
+    gap: 3,
+  },
+  code: {
+    color: '#5A657F',
+    fontSize: 11,
+    fontWeight: '600',
+    lineHeight: 14,
+  },
+  text: {
     color: '#25304C',
     fontSize: 13,
     fontWeight: '800',

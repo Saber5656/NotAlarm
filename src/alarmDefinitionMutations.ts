@@ -3,6 +3,7 @@ import { getNextAlarmTime } from './alarmSchedule';
 import { MIN_ARM_LEAD_MS } from './alarmPolicy';
 import { classifyDueCycle } from './missedAlarms';
 import { applySuppressionStepFloor, mergeWindowStepCount } from './stepWindow';
+import { AppError, type ErrorCode } from './errorCatalog';
 
 export type MonitoringStepUpdateStatus =
   | 'updated'
@@ -24,7 +25,7 @@ export function updateMonitoringCycleStepCount(
   countedFromMs: number,
 ): MonitoringStepUpdateResult {
   if (!Number.isFinite(stepCount) || !Number.isFinite(countedFromMs)) {
-    throw new Error('歩数が不正です。');
+    throw new AppError('STEP_COUNT_INVALID');
   }
 
   const target = alarms
@@ -91,7 +92,7 @@ export function replaceStoredCycle(
   });
 
   if (!found) {
-    throw new Error('対象のアラーム周期が見つかりません。');
+    throw new AppError('ALARM_NOT_FOUND');
   }
   return cycle.phase === 'suppressed'
     ? applySuppressionStepFloor(next, cycle)
@@ -194,7 +195,7 @@ export function markCycleRinging(
 
 export type AlarmEnablePreparation =
   | { ok: true; definition: StoredAlarmDefinition }
-  | { ok: false; message: string };
+  | { ok: false; code: ErrorCode };
 
 /**
  * Turning an alarm on never changes what it is: a today-only alarm keeps its
@@ -213,10 +214,10 @@ export function prepareAlarmEnable(
   if (!nextAtMs || nextAtMs - nowMs < MIN_ARM_LEAD_MS) {
     return {
       ok: false,
-      message:
+      code:
         definition.repeat.kind === 'today'
-          ? 'この「今日だけ」アラームは終了しています。削除して新しいアラームを追加してください。'
-          : 'アラーム時刻まで10秒未満のため、オンにできません。時刻を過ぎてからもう一度お試しください。',
+          ? 'ALARM_TODAY_ENDED'
+          : 'ARM_LEAD_TOO_SHORT',
     };
   }
   return {

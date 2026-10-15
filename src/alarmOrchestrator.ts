@@ -7,6 +7,7 @@ import {
   finalizeSuppression,
   type SuppressionDecision,
 } from './alarmPolicy';
+import type { ErrorCode } from './errorCatalog';
 import type { StoredAlarm } from './alarmStorage';
 import { mergeWindowStepCount } from './stepWindow';
 
@@ -34,7 +35,8 @@ export interface ScheduledAlarmNotifications {
   mainAlarmId: string;
   checkInNotificationId?: string;
   checkInAtMs: number;
-  checkInWarning?: string;
+  /** Set when the check-in could not be reserved; the main alarm is kept. */
+  checkInErrorCode?: ErrorCode;
 }
 
 export async function scheduleAlarmNotificationsFailSafe(
@@ -67,14 +69,12 @@ export async function scheduleAlarmNotificationsFailSafe(
       checkInNotificationId,
       checkInAtMs: input.checkInAtMs,
     };
-  } catch (error) {
+  } catch {
+    // The cause is dropped on purpose: only the code reaches the UI.
     return {
       mainAlarmId,
       checkInAtMs: input.checkInAtMs,
-      checkInWarning:
-        error instanceof Error
-          ? error.message
-          : '起床確認通知を予約できませんでした。',
+      checkInErrorCode: 'CHECKIN_REGISTER_FAILED',
     };
   }
 }
@@ -123,6 +123,7 @@ export interface SuppressionJournal {
 }
 
 export class SuppressionSaveError extends Error {
+  readonly code = 'SUPPRESSION_SAVE_FAILED' as const;
   readonly cycleId: string;
   constructor(cycleId: string, readonly originalError: unknown) {
     super(
@@ -139,6 +140,7 @@ export class SuppressionSaveError extends Error {
  * journal as 'cancelling' and the app must not claim either outcome.
  */
 export class SuppressionCancelUnknownError extends Error {
+  readonly code = 'CANCEL_UNKNOWN' as const;
   readonly cycleId: string;
   constructor(cycleId: string, readonly originalError: unknown) {
     super(

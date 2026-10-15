@@ -69,6 +69,7 @@ import {
   getRingingCycle,
   fillAlarmDefinitionSchedule,
   getAlarmScheduleIssueKey,
+  describeScheduleIssues,
   getAlarmScheduleIssueSeverity,
   getSkippedRefillAttempt,
   reconcileReportedScheduleProblems,
@@ -82,7 +83,6 @@ import {
   getMissedPreview,
 } from './src/missedAlarms';
 import {
-  ScheduledNotificationRollbackError,
   withScheduledNotificationRollback,
 } from './src/alarmScheduleRollback';
 import { prepareAlarmEnable } from './src/alarmDefinitionMutations';
@@ -217,8 +217,9 @@ import {
 } from './src/snooze';
 import { getSnoozeCopy } from './src/snoozeCopy';
 import {
-  adoptStoredAlarms,
-  presentCommittedOutcome,
+  presentSnoozeRejected,
+  presentSnoozed,
+  presentStopped,
 } from './src/snoozeOutcome';
 import { createSnoozeTransaction } from './src/snoozeTransaction';
 import { createStorageResetService } from './src/storageReset';
@@ -253,6 +254,16 @@ import {
   type ReconcileOutcome,
 } from './src/scheduleReconciliation';
 import {
+  AppError,
+  type ErrorCode,
+  describeError,
+  describeErrorCode,
+  errorCodeOf,
+  noticeFromCode,
+} from './src/errorCatalog';
+import { withMainVerification } from './src/mainAlarmVerification';
+import { resolvePedometerAccess } from './src/pedometerAccess';
+import {
   describeScheduleCoverage,
   getScheduleCoverageLine,
 } from './src/scheduleCoverage';
@@ -261,10 +272,19 @@ installForegroundNotificationHandler();
 
 type Notice = AppNotice;
 
-const schedulingGateway = {
-  scheduleMain: scheduleMainAlarmNotification,
-  scheduleCheckIn: scheduleCheckInNotification,
-};
+const orphanStore = createOrphanStore(AsyncStorage);
+
+// A main alarm only counts as reserved once the OS lists it. An id that could
+// not be verified is journaled (cancelled by reconciliation or reset), and new
+// reservations wait until it is resolved.
+const schedulingGateway = withMainVerification(
+  {
+    scheduleMain: scheduleMainAlarmNotification,
+    scheduleCheckIn: scheduleCheckInNotification,
+  },
+  listScheduledNotificationIds,
+  { orphans: orphanStore, cancelScheduled: cancelNotificationIfPresent },
+);
 
 // Snooze and stop of a ringing occurrence share one queue, so a double press
 // or a stop racing a snooze cannot schedule or count twice.
@@ -305,12 +325,20 @@ const storageReset = createStorageResetService({
   exclusive: (run) =>
     suppressionJournal.exclusive(() => runExclusiveAlarmStorage(run)),
   nowMs: Date.now,
-  // Ids only the snooze service remembers are cancelled with the stored ones
-  // and forgotten once the deletion confirmed everything gone.
-  extraKnownIds: () => snoozeService.unsettledIds(),
+  // Ids only memory remembers (the snooze service's unsettled ids, main ids the
+  // OS returned but could not be verified or journaled) are cancelled with the
+  // stored ones, and forgotten only once the deletion confirmed everything gone.
+  extraKnownIds: () => [
+    ...new Set([
+      ...snoozeService.unsettledIds(),
+      ...schedulingGateway.unresolvedMainIds(),
+    ]),
+  ],
   onCompleted: () => {
     advanceStorageEpoch();
     snoozeService.forgetUnsettled();
+    // The reset confirmed every owned notification cancelled, held ids included.
+    schedulingGateway.clearUnresolved();
   },
 });
 // Every alarm write and reservation re-checks this inside the storage locks.
@@ -336,7 +364,7 @@ async function cancelAlarmDefinitionPersistently(
   const next = await transactAlarmDefinitions(async (current, checkpoint) => {
     const latest = current.find((alarm) => alarm.id === alarmId);
     if (!latest) {
-      throw new Error('対象のアラームが見つかりません。');
+      throw new AppError('ALARM_NOT_FOUND');
     }
     const targetCycleIds = latest.cycles.map((cycle) => cycle.cycleId);
     await upsertPendingAlarmCancellation({
@@ -364,13 +392,34 @@ const alarmEditJournal: AlarmEditJournal = {
   remove: removePendingAlarmEdit,
 };
 
-const PENDING_EDIT_COPY =
-  '前回のアラーム編集が完了していません。アプリを開き直すと続きを処理します。';
 
 async function hasPendingAlarmEdit(alarmId: string): Promise<boolean> {
   return (await loadPendingAlarmEdits()).some(
     (entry) => entry.alarmId === alarmId,
   );
+}
+
+/**
+ * The cancellation failure copy promises a resume on the next launch, so it is
+ * only used when that resume record is really stored (and readable).
+ */
+async function cancellationFailureNotice(
+  alarmId: string,
+  error: unknown,
+  incomplete: 'DISABLE_CANCEL_INCOMPLETE' | 'DELETE_CANCEL_INCOMPLETE',
+) {
+  try {
+    if (
+      (await loadPendingAlarmCancellations()).some(
+        (pending) => pending.alarmId === alarmId,
+      )
+    ) {
+      return noticeFromCode(incomplete);
+    }
+  } catch {
+    // Unreadable record: nothing can be promised.
+  }
+  return describeError(error);
 }
 
 const alarmEditGateway = {
@@ -419,7 +468,7 @@ async function editAlarmPersistently(input: {
       return result.alarms;
     });
     if (!result) {
-      throw new Error('アラームを編集できませんでした。');
+      throw new AppError('UNEXPECTED_FAILURE');
     }
     return result as Awaited<ReturnType<typeof editAlarmDefinition>>;
   });
@@ -517,11 +566,11 @@ function reconcileSuppressions(): Promise<SuppressionReconcileResult> {
   return run;
 }
 
-const orphanStore = createOrphanStore(AsyncStorage);
-
 const reconcileGateway: ReconcileGateway = {
-  ...schedulingGateway,
+  scheduleMain: schedulingGateway.scheduleMainForReconcile,
+  scheduleCheckIn: schedulingGateway.scheduleCheckIn,
   cancelScheduled: cancelNotificationIfPresent,
+  releaseMain: (ids) => schedulingGateway.releaseProvisional(ids),
 };
 
 /**
@@ -538,6 +587,19 @@ async function reconcileScheduleWithQueueOnce(
     return null;
   }
   const zone = currentPlanningZone();
+  // Main ids this pass registered. Each stays on the write-ahead record until
+  // the pass saves its checkpoint or confirms the cancel; whatever is still
+  // unsettled when the pass ends (an early failure) turns into a plain record
+  // that blocks new reservations until the next reconciliation resolves it.
+  const registered: string[] = [];
+  const passGateway: ReconcileGateway = {
+    ...reconcileGateway,
+    scheduleMain: async (input) => {
+      const id = await schedulingGateway.scheduleMainForReconcile(input);
+      registered.push(id);
+      return id;
+    },
+  };
   try {
     return await suppressionJournal.exclusive(async () => {
       if (await storageReset.hasPendingReset()) {
@@ -554,6 +616,8 @@ async function reconcileScheduleWithQueueOnce(
           orphansUnreadable: false,
         };
       }
+      // Ids held only in memory become durable (or are cancelled) first.
+      await schedulingGateway.flushUnresolved();
       let canSchedule = false;
       try {
         canSchedule = await prepareNotificationsIfGranted();
@@ -591,7 +655,7 @@ async function reconcileScheduleWithQueueOnce(
             currentZone: zone,
             canSchedule,
             nowMs: Date.now,
-            gateway: reconcileGateway,
+            gateway: passGateway,
             checkpoint,
           });
           return outcome.alarms;
@@ -647,6 +711,8 @@ async function reconcileScheduleWithQueueOnce(
       queueVerified: false,
       orphansUnreadable: false,
     };
+  } finally {
+    schedulingGateway.abandonProvisional(registered);
   }
 }
 
@@ -778,10 +844,7 @@ async function fillEnabledSchedules(
         alarmId: alarm.id,
         cycleId: 'schedule-recovery',
         dueAtMs: nowMs,
-        message:
-          error instanceof Error
-            ? `${formatAlarmTime(alarm.hour, alarm.minute)}: ${error.message}`
-            : `${formatAlarmTime(alarm.hour, alarm.minute)}の通知を予約できませんでした。`,
+        code: errorCodeOf(error, 'MAIN_REGISTER_FAILED'),
       });
     }
   }
@@ -858,6 +921,8 @@ async function refillEnabledSchedulesOnce(
           return filled.alarms;
         }),
       cancellationGateway,
+      orphanStore,
+      schedulingGateway,
     );
     const severity = getAlarmScheduleIssueSeverity(fillIssues);
     return {
@@ -868,31 +933,15 @@ async function refillEnabledSchedulesOnce(
         skippedAlarmIds: [...pendingAlarmIds, ...unverifiedAlarmIds],
       },
       problemKeys: fillIssues.map(getAlarmScheduleIssueKey),
-      notice:
-        severity === 'none'
-          ? null
-          : {
-              tone: severity,
-              text:
-                severity === 'danger'
-                  ? '一部のメイン通知を再予約できませんでした。各アラームの状態を確認してください。'
-                  : '一部の起床確認通知を再予約できませんでした。',
-            },
+      notice: describeScheduleIssues(fillIssues, ''),
     };
   } catch (error) {
-    const text =
-      error instanceof Error ? error.message : '通知状態を更新できませんでした。';
+    const code = errorCodeOf(error, 'REFILL_FAILED');
     return {
       alarms: null,
       attempt: getSkippedRefillAttempt(knownAlarms),
-      problemKeys: [`refill_failed:${text}`],
-      notice: {
-        tone:
-          error instanceof ScheduledNotificationRollbackError
-            ? 'danger'
-            : 'warning',
-        text,
-      },
+      problemKeys: [`refill_failed:${code}`],
+      notice: noticeFromCode(code),
     };
   }
 }
@@ -959,6 +1008,9 @@ function AlarmApp() {
   const reportedQueueProblemsRef = useRef<ReadonlySet<string>>(new Set());
   // Saved alarms could not be read: this is not the same as having none.
   const [loadFailed, setLoadFailed] = useState(false);
+  const [loadFailureCode, setLoadFailureCode] = useState<ErrorCode | null>(
+    null,
+  );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [deletionPending, setDeletionPending] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
@@ -1010,7 +1062,7 @@ function AlarmApp() {
       return false;
     }
     setDeletionPending(true);
-    setNotice({ tone: 'danger', text: error.message });
+    setNotice(noticeFromCode('STORAGE_RESET_PENDING'));
     return true;
   }, []);
 
@@ -1069,10 +1121,7 @@ function AlarmApp() {
 
   const openNotificationSettings = useCallback(() => {
     void Linking.openSettings().catch(() => {
-      setNotice({
-        tone: 'danger',
-        text: '設定を開けませんでした。設定アプリで通知をオンにしてください。',
-      });
+      setNotice(noticeFromCode('SETTINGS_OPEN_FAILED'));
     });
   }, []);
 
@@ -1150,6 +1199,9 @@ function AlarmApp() {
             return updated;
           }),
         cancellationGateway,
+
+        orphanStore,
+        schedulingGateway,
       ).catch((error: unknown) => {
         // Nothing new was reserved, so the row must not promise a refill.
         recordRefill({
@@ -1162,14 +1214,9 @@ function AlarmApp() {
       recordRefill({ attemptedAlarmIds, issues });
       setCurrentAlarms(next);
       const severity = getAlarmScheduleIssueSeverity(issues);
-      if (severity !== 'none') {
-        setNotice({
-          tone: severity,
-          text:
-            severity === 'danger'
-              ? '次回分のメイン通知を一部予約できませんでした。アラーム状態を確認してください。'
-              : '次回分の起床確認通知を一部予約できませんでした。',
-        });
+      const issueNotice = describeScheduleIssues(issues, '次回分: ');
+      if (issueNotice) {
+        setNotice(issueNotice);
       }
       return severity === 'none' ? 'none' : severity === 'danger' ? 'danger' : 'warning';
     },
@@ -1194,14 +1241,13 @@ function AlarmApp() {
     }
     try {
       const outcome = await snoozeService.recover();
-      if (outcome.rearmFailed.length > 0 || outcome.unresolved.length > 0) {
-        setNotice({
-          tone: 'warning',
-          text: 'スヌーズの再設定を確認できませんでした。アプリを開いている間は時刻に鳴りますが、閉じると鳴らない場合があります。',
-        });
+      const recoveryCode = getSnoozeCopy.recoveryCode(outcome);
+      if (recoveryCode) {
+        setNotice(noticeFromCode(recoveryCode));
       }
     } catch {
       // Overdue handling below still rings or marks the snooze as missed.
+      setNotice(noticeFromCode('SNOOZE_RECOVERY_FAILED'));
     }
   }, []);
 
@@ -1214,7 +1260,7 @@ function AlarmApp() {
         if (await storageReset.hasPendingReset()) {
           // An earlier reset stopped halfway: stay on the recovery card so the
           // user can finish it. Nothing is resumed automatically.
-          throw new Error('storage reset is unfinished');
+          throw new AppError('STORAGE_RESET_PENDING');
         }
         try {
           if ((await storageReset.readAmbiguousCount()) > 0 && mounted) {
@@ -1231,22 +1277,16 @@ function AlarmApp() {
         } catch {
           cancellationRecoveryFailed = true;
           if (mounted) {
-            setNotice({
-              tone: 'danger',
-              text: '前回のアラーム停止処理を完了できませんでした。端末の通知一覧を確認してください。',
-            });
+            setNotice(noticeFromCode('CANCEL_RECOVERY_INCOMPLETE'));
           }
         }
         let editRecoveryFailed = false;
         try {
           await recoverPendingAlarmEdits();
-        } catch {
+        } catch (error) {
           editRecoveryFailed = true;
           if (mounted) {
-            setNotice({
-              tone: 'danger',
-              text: '前回のアラーム編集を完了できませんでした。端末の通知一覧を確認してください。',
-            });
+            setNotice(describeError(error, 'EDIT_CLEANUP_INCOMPLETE'));
           }
         }
         // Finish or report half-done stops before anything is marked due.
@@ -1289,10 +1329,11 @@ function AlarmApp() {
           setCurrentAlarms(restored);
           setIsComposerOpen(false);
         }
-      } catch {
+      } catch (error) {
         if (mounted) {
           // A persistent card explains this state; a banner would be lost
           // on the next tap.
+          setLoadFailureCode(errorCodeOf(error, 'STORAGE_READ_FAILED'));
           setLoadFailed(true);
         }
       } finally {
@@ -1524,10 +1565,7 @@ function AlarmApp() {
     }
 
     void startForegroundAlarmSound().catch(() => {
-      setNotice({
-        tone: 'danger',
-        text: '端末内のアラーム音を開始できませんでした。通知音と画面で確認してください。',
-      });
+      setNotice(noticeFromCode('SOUND_START_FAILED'));
     });
     return stopForegroundAlarmSound;
   }, [ringingCycle?.cycleId]);
@@ -1597,18 +1635,12 @@ function AlarmApp() {
         const failure = classifySuppressionFailure(error);
         if (failure) {
           setSuppressionWarning(failure.warning);
-          setNotice({ tone: 'danger', text: failure.notice });
+          setNotice(failure.notice);
         } else if (suppressedConfirmed) {
           // The stop itself succeeded; only the follow-up failed.
-          setNotice({
-            tone: 'warning',
-            text: '起床を確認し、この回のアラームは停止しました。次回分の予約更新に失敗したため、アラームの状態を確認してください。',
-          });
+          setNotice(noticeFromCode('SUPPRESSION_FOLLOWUP_FAILED'));
         } else {
-          setNotice({
-            tone: 'danger',
-            text: '起床確認の処理に失敗しました。安全のためアラームは維持します。',
-          });
+          setNotice(noticeFromCode('CHECKIN_PROCESS_FAILED'));
         }
       } finally {
         responseInFlightRef.current = null;
@@ -1661,7 +1693,7 @@ function AlarmApp() {
         const failure = classifySuppressionFailure(error);
         if (failure) {
           setSuppressionWarning(failure.warning);
-          setNotice({ tone: 'danger', text: failure.notice });
+          setNotice(failure.notice);
         } else if (suppressedConfirmed) {
           setNotice({
             tone: 'warning',
@@ -1795,13 +1827,10 @@ function AlarmApp() {
             // The record is not updated while a deletion is unfinished; the
             // notification itself still rings.
             setDeletionPending(true);
-            setNotice({ tone: 'danger', text: error.message });
+            setNotice(noticeFromCode('STORAGE_RESET_PENDING'));
             return;
           }
-          setNotice({
-            tone: 'danger',
-            text: 'アラーム時刻になりましたが、状態更新に失敗しました。',
-          });
+          setNotice(noticeFromCode('DUE_TRANSITION_FAILED'));
         })
         .finally(() => {
           dueTransitionInFlightRef.current = false;
@@ -1911,7 +1940,7 @@ function AlarmApp() {
               return;
             }
             setNotice({
-              tone: 'danger',
+              ...noticeFromCode('CANCEL_NOT_VERIFIED'),
               text: '100歩を検知しましたが、通知の停止を確認できませんでした。アラームは有効です。',
             });
           })
@@ -1919,17 +1948,11 @@ function AlarmApp() {
             const failure = classifySuppressionFailure(error);
             if (failure) {
               setSuppressionWarning(failure.warning);
-              setNotice({ tone: 'danger', text: failure.notice });
+              setNotice(failure.notice);
             } else if (suppressedConfirmed) {
-              setNotice({
-                tone: 'warning',
-                text: '100歩を検知し、この回のアラームは停止しました。次回分の予約更新に失敗したため、アラームの状態を確認してください。',
-              });
+              setNotice(noticeFromCode('SUPPRESSION_FOLLOWUP_FAILED'));
             } else {
-              setNotice({
-                tone: 'danger',
-                text: '100歩の確認処理に失敗しました。アラームの状態を確認してください。',
-              });
+              setNotice(noticeFromCode('STEP_PROCESS_FAILED'));
             }
           })
           .finally(() => {
@@ -1957,15 +1980,15 @@ function AlarmApp() {
     setPedometerState('preparing');
     void (async () => {
       try {
-        const available = await Pedometer.isAvailableAsync();
-        if (!available || disposed) {
-          setPedometerState('unavailable');
+        const access = await resolvePedometerAccess({
+          isAvailable: () => Pedometer.isAvailableAsync(),
+          requestPermission: () => Pedometer.requestPermissionsAsync(),
+        });
+        if (disposed) {
           return;
         }
-
-        const permission = await Pedometer.requestPermissionsAsync();
-        if (permission.status !== 'granted' || disposed) {
-          setPedometerState('denied');
+        if (access !== 'ready') {
+          setPedometerState(access);
           return;
         }
 
@@ -2018,10 +2041,8 @@ function AlarmApp() {
         repeat,
       );
       if (!nextAtMs || nextAtMs - createdAtMs < MIN_ARM_LEAD_MS) {
-        throw new Error(
-          repeatKind === 'today'
-            ? '「今日だけ」は現在より後の時刻を選択してください。'
-            : '次回のアラーム時刻を計算できません。',
+        throw new AppError(
+          repeatKind === 'today' ? 'TIME_PAST_TODAY' : 'TIME_UNCOMPUTABLE',
         );
       }
 
@@ -2040,9 +2061,7 @@ function AlarmApp() {
         (track) =>
           mutateAlarmDefinitions(async (current) => {
             if (current.length >= MAX_ALARM_COUNT) {
-              throw new Error(
-                `登録できるアラームは最大${MAX_ALARM_COUNT}件です。`,
-              );
+              throw new AppError('ALARM_LIMIT_REACHED');
             }
 
             const filled = await fillAlarmDefinitionSchedule(
@@ -2056,15 +2075,18 @@ function AlarmApp() {
               getAlarmScheduleIssueSeverity(filled.issues) === 'danger' &&
               filled.scheduledCycles.length === 0
             ) {
-              throw new Error(
+              throw new AppError(
                 filled.issues.find(
                   (issue) => issue.kind === 'main_schedule_failed',
-                )?.message ?? 'メインのアラーム通知を予約できませんでした。',
+                )?.code ?? 'MAIN_REGISTER_FAILED',
               );
             }
             return [...current, filled.definition];
           }),
         cancellationGateway,
+
+        orphanStore,
+        schedulingGateway,
       );
       recordRefill({ attemptedAlarmIds: [definition.id], issues: fillIssues });
       clearQueueStatus(definition.id);
@@ -2074,27 +2096,18 @@ function AlarmApp() {
         definition.hour,
         definition.minute,
       )}`;
-      const severity = getAlarmScheduleIssueSeverity(fillIssues);
-      setNotice({
-        tone: severity === 'none' ? 'success' : severity,
-        text:
-          severity === 'danger'
-            ? 'アラームは追加しましたが、メイン通知の一部を予約できていません。状態を確認してください。'
-            : severity === 'warning'
-              ? 'アラームは登録しましたが、一部の起床確認通知を予約できませんでした。'
-              : `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。初回は${firstRingLabel}に鳴ります。`,
-      });
+      // "Added ... rings at" is only said when nothing is missing or unverified.
+      setNotice(
+        describeScheduleIssues(fillIssues, 'アラームは追加しました。') ?? {
+          tone: 'success',
+          text: `${formatAlarmTime(definition.hour, definition.minute)}のアラームを追加しました。初回は${firstRingLabel}に鳴ります。`,
+        },
+      );
     } catch (error) {
       if (reportResetPending(error)) {
         return;
       }
-      setNotice({
-        tone: 'danger',
-        text:
-          error instanceof Error
-            ? error.message
-            : 'アラームを追加できませんでした。',
-      });
+      setNotice(describeError(error));
     } finally {
       setIsBusy(false);
       // The permission prompt or a failure may have changed what can ring.
@@ -2122,7 +2135,7 @@ function AlarmApp() {
       setNotice(null);
       try {
         if (await hasPendingAlarmEdit(definition.id)) {
-          setNotice({ tone: 'warning', text: PENDING_EDIT_COPY });
+          setNotice(noticeFromCode('EDIT_UNSETTLED'));
           return;
         }
         if (!enabled) {
@@ -2143,13 +2156,13 @@ function AlarmApp() {
                 (alarm) => alarm.id === definition.id,
               );
               if (!latest) {
-                throw new Error('対象のアラームが見つかりません。');
+                throw new AppError('ALARM_NOT_FOUND');
               }
 
               const now = Date.now();
               const prepared = prepareAlarmEnable(latest, now);
               if (!prepared.ok) {
-                throw new Error(prepared.message);
+                throw new AppError(prepared.code);
               }
               const enabledDefinition = prepared.definition;
               const filled = await fillAlarmDefinitionSchedule(
@@ -2166,10 +2179,10 @@ function AlarmApp() {
                 getAlarmScheduleIssueSeverity(filled.issues) === 'danger' &&
                 filled.scheduledCycles.length === 0
               ) {
-                throw new Error(
+                throw new AppError(
                   filled.issues.find(
                     (issue) => issue.kind === 'main_schedule_failed',
-                  )?.message ?? 'メインのアラーム通知を予約できませんでした。',
+                  )?.code ?? 'MAIN_REGISTER_FAILED',
                 );
               }
               return current.map((alarm) =>
@@ -2177,6 +2190,9 @@ function AlarmApp() {
               );
             }),
           cancellationGateway,
+
+          orphanStore,
+        schedulingGateway,
         );
         recordRefill({
           attemptedAlarmIds: [definition.id],
@@ -2184,15 +2200,12 @@ function AlarmApp() {
         });
         clearQueueStatus(definition.id);
         setCurrentAlarms(next);
-        const severity = getAlarmScheduleIssueSeverity(fillIssues);
-        if (severity !== 'none') {
-          setNotice({
-            tone: severity,
-            text:
-              severity === 'danger'
-                ? 'アラームはオンにしましたが、メイン通知の一部を予約できていません。状態を確認してください。'
-                : 'アラームはオンにしましたが、一部の起床確認通知を予約できませんでした。',
-          });
+        const issueNotice = describeScheduleIssues(
+          fillIssues,
+          'アラームはオンにしました。',
+        );
+        if (issueNotice) {
+          setNotice(issueNotice);
         }
       } catch (error) {
         if (reportResetPending(error)) {
@@ -2203,15 +2216,15 @@ function AlarmApp() {
         } catch {
           // Keep the last in-memory snapshot if storage cannot be read either.
         }
-        setNotice({
-          tone: 'danger',
-          text:
-            error instanceof Error
-              ? !enabled
-                ? '通知の解除を完了できませんでした。次回起動時に停止処理を再試行します。'
-                : error.message
-              : 'アラームの状態を変更できませんでした。',
-        });
+        setNotice(
+          enabled
+            ? describeError(error)
+            : await cancellationFailureNotice(
+                definition.id,
+                error,
+                'DISABLE_CANCEL_INCOMPLETE',
+              ),
+        );
       } finally {
         setIsBusy(false);
         // The permission prompt or a failure may have changed what can ring.
@@ -2237,7 +2250,7 @@ function AlarmApp() {
       setIsBusy(true);
       try {
         if (await hasPendingAlarmEdit(definition.id)) {
-          setNotice({ tone: 'warning', text: PENDING_EDIT_COPY });
+          setNotice(noticeFromCode('EDIT_UNSETTLED'));
           return;
         }
         const next = await cancelAlarmDefinitionPersistently(
@@ -2255,10 +2268,13 @@ function AlarmApp() {
         } catch {
           // Keep the last in-memory snapshot if storage cannot be read either.
         }
-        setNotice({
-          tone: 'danger',
-          text: 'アラームの削除を完了できませんでした。次回起動時に停止処理を再試行します。',
-        });
+        setNotice(
+          await cancellationFailureNotice(
+            definition.id,
+            error,
+            'DELETE_CANCEL_INCOMPLETE',
+          ),
+        );
       } finally {
         setIsBusy(false);
       }
@@ -2277,7 +2293,7 @@ function AlarmApp() {
       try {
         const target = alarmsRef.current.find((alarm) => alarm.id === alarmId);
         if (!target) {
-          throw new Error('対象のアラームが見つかりません。');
+          throw new AppError('ALARM_NOT_FOUND');
         }
         const hour = selectedTime.getHours();
         const minute = selectedTime.getMinutes();
@@ -2313,15 +2329,12 @@ function AlarmApp() {
         const clockLabel = formatAlarmTime(hour, minute);
         const severity = getAlarmScheduleIssueSeverity(result.issues);
         if (result.cleanupPending) {
-          setNotice({
-            tone: 'warning',
-            text: `${clockLabel}に変更しましたが、古い通知の一部を解除できていません。旧い時刻の通知が鳴る可能性があります。アプリを開き直すと再試行します。`,
-          });
+          setNotice(noticeFromCode('EDIT_CLEANUP_PENDING'));
         } else if (severity !== 'none') {
-          setNotice({
-            tone: 'warning',
-            text: `${clockLabel}に変更しましたが、一部の起床確認通知を予約できませんでした。`,
-          });
+          setNotice(
+            describeScheduleIssues(result.issues, `${clockLabel}に変更しました。`) ??
+              noticeFromCode('CHECKIN_PARTIAL'),
+          );
         } else {
           setNotice({
             tone: 'success',
@@ -2349,13 +2362,7 @@ function AlarmApp() {
           setIsComposerOpen(false);
           setEditingAlarmId(null);
         }
-        setNotice({
-          tone: 'danger',
-          text:
-            error instanceof Error
-              ? error.message
-              : 'アラームを編集できませんでした。',
-        });
+        setNotice(describeError(error));
       } finally {
         setIsBusy(false);
         void refreshNotificationDelivery();
@@ -2472,6 +2479,7 @@ function AlarmApp() {
     setRefillFailedAlarmIds(new Set());
     setSuppressionWarning(null);
     setLoadFailed(false);
+    setLoadFailureCode(null);
     setDeletionPending(false);
   }, [setCurrentAlarms]);
 
@@ -2495,7 +2503,7 @@ function AlarmApp() {
       // The failure card stays; part of the data may already be gone and a
       // retry resumes from the saved intent.
       sun.failDeletion();
-      setNotice({ tone: 'danger', text: STORAGE_RESET_COPY.failed });
+      setNotice(noticeFromCode('STORAGE_RESET_INCOMPLETE'));
     } finally {
       setIsBusy(false);
     }
@@ -2633,13 +2641,11 @@ function AlarmApp() {
         refill: refreshAfterCycleCompletion,
       });
       if (result.status === 'persist_failed') {
-        setNotice({
-          tone: 'danger',
-          text: '確認済みにできませんでした。もう一度お試しください。',
-        });
+        setNotice(noticeFromCode('MISSED_ACK_FAILED'));
       } else if (result.status === 'refill_failed') {
         setNotice({
           tone: 'danger',
+          code: 'REFILL_FAILED',
           text: '確認済みにしましたが、次回分のアラームを予約できませんでした。アラーム状態を確認してください。',
         });
       } else if (
@@ -2649,14 +2655,22 @@ function AlarmApp() {
         setNotice({ tone: 'neutral', text: '見逃したアラームを確認済みにしました。' });
       }
     } catch {
-      setNotice({
-        tone: 'danger',
-        text: '確認済みにできませんでした。もう一度お試しください。',
-      });
+      setNotice(noticeFromCode('MISSED_ACK_FAILED'));
     } finally {
       setIsBusy(false);
     }
   }, [isBusy, missedCycles, refreshAfterCycleCompletion, setCurrentAlarms]);
+
+  const outcomeEffects = useCallback(
+    () => ({
+      stopSound: stopForegroundAlarmSound,
+      apply: setCurrentAlarms,
+      reload: loadAlarmDefinitions,
+      refill: async () => undefined,
+      isResetPending: isStorageResetPendingError,
+    }),
+    [setCurrentAlarms],
+  );
 
   const stopOccurrence = useCallback(
     async (cycle: StoredAlarm) => {
@@ -2665,55 +2679,35 @@ function AlarmApp() {
       }
 
       setIsBusy(true);
+      // The stop is "applied" once the service reports it; only then is a
+      // later failure a failed refill rather than a failed stop.
+      let stoppedCycle: StoredAlarm | null = null;
       try {
         // Also cancels a waiting snooze, so nothing rings after the stop.
         const result = await snoozeService.stop(cycle.cycleId);
         if (result.status !== 'stopped') {
-          setNotice({
-            tone: 'danger',
-            text:
+          setNotice(
+            noticeFromCode(
               result.status === 'failed'
-                ? '停止処理に失敗しました。アラームは維持しています。もう一度お試しください。'
-                : 'このアラームはすでに終わっています。',
-          });
+                ? getSnoozeCopy.stopFailureCode(result.reason)
+                : 'STOP_ALREADY_ENDED',
+            ),
+          );
           return;
         }
-        // The persisted stop reaches the screen and the sound stops before any
-        // fallible refill, so a later failure cannot leave the ringing card up.
-        presentCommittedOutcome(result, {
-          stopSound: stopForegroundAlarmSound,
-          apply: setCurrentAlarms,
+        stoppedCycle = result.cycle;
+        // Sound, then the committed snapshot, then the fallible refill: a later
+        // failure can neither leave the ringing card up nor hide a cleanup warning.
+        const presented = await presentStopped(result, {
+          ...outcomeEffects(),
+          refill: refreshAfterCycleCompletion,
         });
-        let refillError: unknown = null;
-        try {
-          await refreshAfterCycleCompletion(result.cycle);
-        } catch (error) {
-          refillError = error;
-        }
-        await adoptStoredAlarms(result, {
-          apply: setCurrentAlarms,
-          reload: loadAlarmDefinitions,
-        });
-        const warning = getSnoozeCopy.cleanupWarning(result);
-        if (isStorageResetPendingError(refillError)) {
+        if (presented.deletionPending) {
           setDeletionPending(true);
-          setNotice({
-            tone: 'danger',
-            text: `アラームは停止しました。データの削除が途中のため次回分の予約は更新していません。${refillError.message}${warning}`,
-          });
-        } else if (refillError) {
-          setNotice({
-            tone: 'danger',
-            text: `アラームは停止しました。次回分の予約を更新できませんでした。アラーム一覧を確認してください。${warning}`,
-          });
-        } else {
-          setNotice({
-            tone: warning ? 'warning' : 'neutral',
-            text: `アラームを停止しました。${warning}`.trim(),
-          });
         }
+        setNotice(presented.notice);
       } catch (error) {
-        if (isStorageResetPendingError(error)) {
+        if (isStorageResetPendingError(error) && !stoppedCycle) {
           // Fail-safe: the sound and the delivered notification are stopped
           // here, but the stop is not written while a deletion is unfinished,
           // so no old alarm record is brought back. The retried deletion
@@ -2723,21 +2717,21 @@ function AlarmApp() {
             () => undefined,
           );
           setDeletionPending(true);
-          setNotice({
-            tone: 'danger',
-            text: `音と通知は止めましたが、データの削除が途中のため停止の記録は保存していません。${error.message}`,
-          });
+          setNotice(noticeFromCode('STOP_RESET_PENDING'));
+        } else if (stoppedCycle) {
+          if (isStorageResetPendingError(error)) {
+            setDeletionPending(true);
+          }
+          // The stop is saved; only reading back or refilling failed.
+          setNotice(noticeFromCode('STOP_FOLLOWUP_FAILED'));
         } else {
-          setNotice({
-            tone: 'danger',
-            text: '停止処理に失敗しました。端末の通知から停止してください。',
-          });
+          setNotice(noticeFromCode('STOP_RINGING_FAILED'));
         }
       } finally {
         setIsBusy(false);
       }
     },
-    [isBusy, refreshAfterCycleCompletion, setCurrentAlarms],
+    [isBusy, outcomeEffects, refreshAfterCycleCompletion],
   );
 
   const stopRinging = useCallback(async () => {
@@ -2759,58 +2753,24 @@ function AlarmApp() {
       if (result.status === 'snoozed') {
         // Sound and the committed snapshot first: nothing fallible runs
         // between the accepted snooze and the screen showing it.
-        const applied = presentCommittedOutcome(result, {
-          stopSound: stopForegroundAlarmSound,
-          apply: setCurrentAlarms,
-        });
-        const warning = getSnoozeCopy.cleanupWarning(result);
-        setNotice({
-          tone: warning ? 'warning' : 'neutral',
-          text: `スヌーズしました。${formatAlarmTime(
-            new Date(result.dueAtMs).getHours(),
-            new Date(result.dueAtMs).getMinutes(),
-          )}にもう一度鳴ります。${warning}`,
-        });
-        if (!applied) {
-          await adoptStoredAlarms(result, {
-            apply: setCurrentAlarms,
-            reload: loadAlarmDefinitions,
-          });
-        }
+        setNotice(await presentSnoozed(result, outcomeEffects()));
         return;
       }
-      // Rejected: the stored state is still the truth; reading it is best
-      // effort and never turns the rejection into another failure.
-      await adoptStoredAlarms(
-        {},
-        { apply: setCurrentAlarms, reload: loadAlarmDefinitions },
-      );
-      setNotice({
-        tone: 'danger',
-        text: `${getSnoozeCopy.failure(result.reason)}${
-          result.cleanup === 'unconfirmed'
-            ? getSnoozeCopy.cleanupWarning(result)
-            : ''
-        }`,
-      });
+      // Rejected: the alarm keeps ringing and stored state is the truth; reading
+      // it is best effort and never turns the rejection into another failure.
+      setNotice(await presentSnoozeRejected(result, outcomeEffects()));
     } catch (error) {
       if (isStorageResetPendingError(error)) {
         // Nothing was scheduled or written; the alarm keeps ringing.
         setDeletionPending(true);
-        setNotice({
-          tone: 'danger',
-          text: `データの削除が途中のため、スヌーズはできません。アラームは鳴ったままです。${error.message}`,
-        });
+        setNotice(noticeFromCode('SNOOZE_RESET_PENDING'));
       } else {
-        setNotice({
-          tone: 'danger',
-          text: getSnoozeCopy.failure('SCHEDULE_FAILED'),
-        });
+        setNotice(noticeFromCode('SNOOZE_UNEXPECTED_FAILURE'));
       }
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, ringingCycle, setCurrentAlarms]);
+  }, [isBusy, outcomeEffects, ringingCycle]);
 
   const orderedAlarms = useMemo(
     () =>
@@ -3281,6 +3241,17 @@ function AlarmApp() {
             <Text style={styles.deliveryWarningBody}>
               {STORAGE_RESET_COPY.lastResort}
             </Text>
+            {loadFailureCode ? (
+              <Text
+                selectable
+                style={styles.errorCodeDetail}
+                testID="storage-load-failed-code"
+              >
+                {describeErrorCode(loadFailureCode).message}
+                {'\n'}
+                エラーコード: {loadFailureCode}
+              </Text>
+            ) : null}
             <Pressable
               accessibilityHint={STORAGE_RESET_COPY.hint}
               accessibilityLabel={STORAGE_RESET_COPY.action}
@@ -3383,7 +3354,14 @@ function AlarmApp() {
               </View>
             ) : !stepGuidance.showProgress ? (
               <View style={[styles.progressCopy, styles.progressCopyPending]}>
-                <Text style={styles.progressStatus}>{stepGuidance.message}</Text>
+                <Text style={styles.progressStatus}>
+                  {stepGuidance.message}
+                  {stepGuidance.code ? (
+                    <Text style={styles.errorCodeInline}>
+                      {'\n'}コード {stepGuidance.code}
+                    </Text>
+                  ) : null}
+                </Text>
                 {stepGuidance.canOpenSettings ? (
                   <Pressable
                     accessibilityRole="button"
@@ -4069,6 +4047,18 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 14,
     fontWeight: '900',
+  },
+  errorCodeDetail: {
+    marginTop: 10,
+    color: '#FECDCA',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '600',
+  },
+  errorCodeInline: {
+    fontSize: 10,
+    lineHeight: 14,
+    opacity: 0.85,
   },
   progressStatus: {
     flex: 1,

@@ -1,5 +1,6 @@
 import { STEP_WINDOW_LEAD_MS } from './alarmPolicy';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
+import { AppError } from './errorCatalog';
 
 /**
  * The span in which steps may count as wake evidence for one alarm cycle:
@@ -153,7 +154,7 @@ export function mergeWindowStepCount(
   countedFromMs: number,
 ): Pick<StoredAlarm, 'stepCount' | 'stepCountFromMs'> {
   if (!Number.isFinite(stepCount) || !Number.isFinite(countedFromMs)) {
-    throw new Error('歩数が不正です。');
+    throw new AppError('STEP_COUNT_INVALID');
   }
   return {
     stepCount:

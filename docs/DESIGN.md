@@ -448,6 +448,34 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 - 削除の失敗時は画面上のアラームを書き換えない（保存側は一部がすでに消えている場合がある）。その旨と、再実行で続きから再開すること、削除が終わるまでアラームの追加・変更ができないことを sheet 内に残す。再起動後は未完了の削除意図が残るため、既存の復旧カードから続行する。自動では削除しない。
 - 既存の「通知を解除してリセット」（保存読込失敗カード）は同じ `createStorageResetService` を使い、挙動を変えない。
 
+### 11.5 診断コードと復旧文言（Issue #20、2026-10-15）
+
+**設計ターゲット。** 新しい外観・素材は作らない。既存の `NoticeBanner`（ガラスのバナー）と保存失敗カード、歩数の状態行の見た目を保ち、診断コードは本文の下に小さく添える二次情報にする。開発者向けの画面・ダイアログ・コピー操作は追加しない。Product Design の公式 skill をこのセッションで別途実行してはおらず、画像生成もしていない。
+
+**カタログ（`src/errorCatalog.ts`）。** 失敗点ごとに、安定した機械コード（例 `MAIN_UNVERIFIED`）、事実だけを述べる日本語の `message`、回復手順 `recovery`、`tone`、`retry`（`none` / `manual` / `next_launch`）を持つ。翻訳用に `errors.<CODE>.message` / `.recovery` のキーを返す（Issue #22 はこのキーで差し替える。i18n 本体は未実装）。
+
+| 区分 | コード |
+| --- | --- |
+| 通知権限 | `NTF_PERMISSION_DENIED`（拒否）、`NTF_PERMISSION_CHECK_FAILED`（状態を読めない）、`NTF_SETUP_FAILED`、`NTF_UNSUPPORTED_PLATFORM` |
+| メイン登録・確認 | `MAIN_REGISTER_FAILED`、`MAIN_UNVERIFIED`（登録後に OS の予約一覧で確認できない・一覧を読めない）、`MAIN_PARTIAL` |
+| 起床確認のみ | `CHECKIN_REGISTER_FAILED`（メインは残る、tone=warning）、`CHECKIN_PARTIAL` |
+| 歩数センサー | `SENSOR_UNAVAILABLE`、`SENSOR_AVAILABILITY_UNKNOWN`、`SENSOR_PERMISSION_DENIED`、`SENSOR_PERMISSION_UNKNOWN`、`SENSOR_READ_FAILED` |
+| 保存 | `STORAGE_READ_FAILED`、`STORAGE_CORRUPT`、`STORAGE_SAVE_FAILED`、`STORAGE_JOURNAL_CORRUPT`、`STORAGE_JOURNAL_SAVE_FAILED`、`STORAGE_RESET_PENDING`、`STORAGE_RESET_INCOMPLETE` |
+| 無効な操作・期限 | `ACTION_INVALID`、`ACTION_STALE`、`DEADLINE_PASSED`、`TIME_*`、`REPEAT_INVALID`、`ALARM_*`、`ARM_LEAD_TOO_SHORT`、`STEP_COUNT_INVALID` |
+| 取り消し | `CANCEL_UNKNOWN`、`CANCEL_NOT_VERIFIED`、`SUPPRESSION_JOURNAL_NOT_WRITTEN`、`SUPPRESSION_SAVE_FAILED`、`CANCEL_RECOVERY_INCOMPLETE`、`DISABLE_CANCEL_INCOMPLETE`、`DELETE_CANCEL_INCOMPLETE`、`ROLLBACK_INCOMPLETE`、`NOTIFICATION_CANCEL_UNVERIFIED` |
+
+全コードの一覧は `ERROR_CODES`。名前の変更・再利用はしない（追加のみ）。
+
+**不変条件。**
+- UI は `error.message` を読まない。コードは `errorCodeOf`（既知のカタログコードを持つ値だけ）で取り、文言は必ずカタログから出す。ファイルパスやトークンを含み得る OS・保存層の例外文は、`AppError.cause` に保持するだけで画面・notice に出さない。
+- メイン通知は予約直後に OS の予約一覧で ID を確認する（`withMainVerification`、読み取りのみ）。確認できない・一覧を読めない場合は `MAIN_UNVERIFIED` とし、周期を保存せず、成功表示を出さない。一覧を読めないだけで通知が実在する場合があるため、文言は「鳴るかどうか分かりません。別の目覚ましを併用」とする。この確認に失敗しても自動で取り消し・再予約しない。
+- 起床確認だけが失敗した場合はメインを残し、warning と `CHECKIN_REGISTER_FAILED` を出す（その回は起床確認による停止を使えない）。
+- 取り消しの失敗・不明（`CANCEL_UNKNOWN` / `CANCEL_NOT_VERIFIED`）は破壊的操作のため自動再試行しない。`retry: 'next_launch'` を持つのは、既存の耐久ジャーナルを続きから実行するもの（停止の保存復旧、無効化・削除の取り消し）だけ。有限の再試行は、取り消し確認後の保存 2 回（既存）以外に増やしていない。
+- スヌーズ・停止の結果は「操作の成否」「通知の取り消し確認（`cleanup`）」「追跡の保存先（`tracking: 'memory_only'`）」「後続処理（refill）」を別々に扱い、片方の成功でもう片方の警告を消さない。拒否されたスヌーズ（`SNOOZE_CLEANUP_UNCONFIRMED` / `SNOOZE_CLEANUP_MEMORY_ONLY`）、受理されたスヌーズ（`SNOOZE_ACCEPTED_CLEANUP_*`）、成立した停止（`STOP_CLEANUP_*`）、起動時の復旧（`SNOOZE_RECOVERY_MEMORY_ONLY`）は別コード。メモリのみの追跡は「端末に記録している」と言わず、アプリ終了で失われると伝える。`STOP_SAVE_FAILED` は最初の保存の失敗＝通知を一つも取り消していない状態（旧 `STOP_CANCEL_FAILED` は停止が cancel 失敗を返さなくなったため削除）。停止成功後の refill 失敗と取り消し未確認は `noticeFromCodes` で両方の文を表示する。表示順は `presentStopped` / `presentSnoozed`（音 → 確定済みスナップショット → refill）。
+- 診断コードは notice の二次行（小さい文字、`selectable`、VoiceOver は「エラーコード …」）、保存失敗カードの末尾、歩数の状態行に出す。本文の文は、コードがなくても意味が通る。
+
+**未統合（他 Issue のマージ後）。** `docs/REMAINING_ISSUES.md` の ALR-009「Issue #20 の状況」に記録。
+
 ## 12. Platform 制約
 
 | 制約 | 現行動作 |

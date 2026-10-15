@@ -129,42 +129,29 @@ test('without a snapshot the readback is best-effort: applied when it works, sil
   assert.equal(applied.length, 1);
 });
 
-test('App applies the committed snapshot before any fallible reload or refill', () => {
+test('App hands stop and snooze to the shared presenters, never reloading before the sound stops', () => {
   const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
-  assert.match(snooze, /presentCommittedOutcome\(/);
-  assert.ok(
-    snooze.indexOf('presentCommittedOutcome(') <
-      snooze.indexOf("result.status === 'snoozed'") ||
-      snooze.indexOf('presentCommittedOutcome(') < snooze.indexOf('スヌーズしました'),
-  );
-  // The success path no longer awaits a storage read before the sound stops.
-  assert.doesNotMatch(
-    snooze,
-    /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/,
-  );
+  assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\)\)/);
+  assert.doesNotMatch(snooze, /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/);
 
   const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
-  assert.match(stop, /presentCommittedOutcome\(/);
-  assert.ok(
-    stop.indexOf('presentCommittedOutcome(') <
-      stop.indexOf('refreshAfterCycleCompletion(result.cycle)'),
-  );
+  assert.match(stop, /presentStopped\(result,/);
   assert.doesNotMatch(stop, /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/);
+  // The presenters own the order: sound, snapshot, refill (tests/outcomeCodes.test.ts).
+  const effects = block('const outcomeEffects = useCallback', 'const stopOccurrence');
+  assert.match(effects, /stopSound: stopForegroundAlarmSound/);
+  assert.match(effects, /apply: setCurrentAlarms/);
 });
 
-test('a failing refill after a persisted stop is reported as a refill problem, not a failed stop', () => {
+test('a failing refill after a persisted stop is not reported as a failed stop', () => {
   const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
-  const refill = stop.indexOf('refreshAfterCycleCompletion(result.cycle)');
-  const around = stop.slice(refill - 200, refill + 900);
-  assert.match(around, /catch/);
-  assert.match(stop, /アラームを停止しました/);
-  // The generic "stop failed" copy belongs to the service-level failure only.
-  const tail = stop.slice(refill);
-  assert.doesNotMatch(tail.slice(0, 400), /停止処理に失敗しました/);
+  // Only the service-level failure uses the stop-failure code.
+  assert.match(stop, /getSnoozeCopy\.stopFailureCode\(result\.reason\)/);
+  assert.doesNotMatch(stop, /停止処理に失敗しました/);
 });
 
 test('reset and recovery wiring covers the snooze service memory', () => {
   const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
-  assert.match(reset, /extraKnownIds: \(\) => snoozeService\.unsettledIds\(\)/);
+  assert.match(reset, /snoozeService\.unsettledIds\(\)/);
   assert.match(reset, /snoozeService\.forgetUnsettled\(\)/);
 });

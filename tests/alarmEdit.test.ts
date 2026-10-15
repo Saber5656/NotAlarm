@@ -15,6 +15,7 @@ import {
   type PendingAlarmEdit,
 } from '../src/alarmEdit';
 import { getCheckInAtMs } from '../src/alarmPolicy';
+import { describeError, describeErrorCode } from '../src/errorCatalog';
 import { localDateKey, makeAlarmRepeat } from '../src/alarmSchedule';
 import { dateKeyInZone, readOccurrenceIdentity } from '../src/occurrenceIdentity';
 import { currentPlanningZone } from '../src/planningZone';
@@ -471,6 +472,39 @@ describe('editAlarmDefinition', () => {
     for (const id of OLD_IDS('a1')) {
       assert.ok(h.scheduled.has(id));
     }
+  });
+
+  test('an edit failure is worded from the catalog, never from the underlying error', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    h.throwAfterCreate = (identifier) => identifier === NEW_MAINS[1];
+
+    await assert.rejects(editAlarmDefinition(h.input([a1])), (error: unknown) => {
+      assert.ok(error instanceof AlarmEditError);
+      assert.equal(error.catalogCode, 'EDIT_SCHEDULE_FAILED');
+      assert.equal(describeError(error).code, 'EDIT_SCHEDULE_FAILED');
+      assert.equal(error.message, describeErrorCode('EDIT_SCHEDULE_FAILED').message);
+      return true;
+    });
+  });
+
+  test('a rollback that cannot cancel keeps the ids journaled and says so truthfully', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    h.throwAfterCreate = (identifier) => identifier === NEW_MAINS[1];
+    h.failCancel.add(NEW_MAINS[0]);
+
+    await assert.rejects(editAlarmDefinition(h.input([a1])), (error: unknown) => {
+      assert.ok(error instanceof AlarmEditError);
+      assert.equal(error.code, 'rollback_incomplete');
+      assert.equal(error.catalogCode, 'EDIT_ROLLBACK_INCOMPLETE');
+      assert.equal(error.rolledBack, false);
+      return true;
+    });
+    // The claim "recorded" holds: the journal still names the stuck id.
+    const entry = h.journalEntries.get('a1');
+    assert.ok(entry?.newNotificationIds.includes(NEW_MAINS[0]));
+    assert.ok(h.scheduled.has(NEW_MAINS[0]));
   });
 
   test('a journal failure before a new main is requested schedules nothing more', async () => {
