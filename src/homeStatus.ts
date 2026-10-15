@@ -173,8 +173,27 @@ export const STORAGE_LOAD_FAILED_COPY = {
   restartSteps: [
     'アプリを上にスワイプして完全に終了し、開き直してください。',
     '直らない場合は、端末を再起動してからアプリを開いてください。',
-    'アラームの情報や通知は消さないでください。確認が取れるまで、別の目覚ましも併用してください。',
+    '確認が取れるまで、別の目覚ましも併用してください。',
   ],
+} as const;
+
+/** Shown only on the load-failed card; every step needs a user tap. */
+export const STORAGE_RESET_COPY = {
+  lastResort:
+    '再起動しても直らない場合の最後の手段として、このアプリの予約通知を解除し、保存データをリセットできます。他のアプリの通知は解除しません。',
+  action: '通知を解除してリセット',
+  hint: 'このアプリのものと確認できる予約済み通知を解除し、保存データを消します。確認が2回あります。',
+  firstConfirmTitle: '通知を解除してリセットしますか？',
+  firstConfirmBody:
+    'このアプリのものと確認できる予約済み通知を解除し、保存されたアラーム情報を消します。リセット後は、アラームを作り直す必要があります。',
+  finalConfirmTitle: '本当にリセットしますか？',
+  finalConfirmBody:
+    '解除した通知と消した情報は元に戻せません。リセットが終わるまで、別の目覚ましを併用してください。',
+  done: 'リセットしました。アラームを追加できます。',
+  ambiguousWarning:
+    'リセットしました。ただし、このアプリのものか判別できない古い形式の通知が残っています。他のアプリの通知の可能性があるため解除していません。判別できない通知は鳴る場合があるので、端末の通知設定やスケジュールを確認してください。',
+  failed:
+    '通知の解除を確認できなかったため、保存データは消していません。もう一度お試しください。',
 } as const;
 
 export type SuppressionWarningKind = 'save_failed' | 'status_unknown';

@@ -270,12 +270,48 @@ export function markDueCyclesRinging(
   );
 }
 
-export async function clearAlarmStorage(): Promise<void> {
-  await Promise.all([
-    AsyncStorage.removeItem(ALARM_DEFINITIONS_STORAGE_KEY),
-    AsyncStorage.removeItem(ACTIVE_ALARM_STORAGE_KEY),
-    AsyncStorage.removeItem(ALARM_CANCELLATION_JOURNAL_KEY),
-  ]);
+/**
+ * Runs `run` after every queued definition and cancellation-journal mutation
+ * and blocks the next ones until it finishes, so a storage reset cannot
+ * interleave with an add, stop or refill in this process.
+ */
+export function runExclusiveAlarmStorage<T>(run: () => Promise<T>): Promise<T> {
+  const operation = Promise.all([mutationQueue, cancellationJournalQueue]).then(
+    run,
+  );
+  const settled = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  mutationQueue = settled;
+  cancellationJournalQueue = settled;
+  return operation;
+}
+
+/** Strictly validated read for recovery code; unreadable data yields null. */
+export function readValidAlarmDefinitions(
+  raw: string,
+): StoredAlarmDefinition[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isAlarmStoreV2(parsed) ? parsed.alarms : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Strictly validated read of the pre-v2 single-alarm record, or null. */
+export function readValidLegacyAlarm(
+  raw: string,
+): Omit<StoredAlarm, 'alarmId'> | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<Omit<StoredAlarm, 'alarmId'>>;
+    return parsed && typeof parsed === 'object' && isLegacyStoredAlarm(parsed)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function isAlarmCancellationJournalV1(

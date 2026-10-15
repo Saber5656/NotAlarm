@@ -2,12 +2,15 @@ import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
 import {
+  ALREADY_UP_OWNER,
   AWAKE_CHECKIN_CATEGORY,
   CHECK_IN_KIND,
   CONFIRM_AWAKE_ACTION,
   MAIN_ALARM_KIND,
+  parseAlarmNotificationData,
   type AlarmNotificationData,
 } from './alarmContracts';
+import type { ScheduledNotificationSnapshot } from './alarmNotificationOwnership';
 import { getMainAlarmNotificationBody } from './alarmNotificationContent';
 import {
   assessNotificationDelivery,
@@ -150,6 +153,7 @@ function checkInContent(
     sound: false,
     categoryIdentifier: AWAKE_CHECKIN_CATEGORY,
     data: {
+      owner: ALREADY_UP_OWNER,
       kind: CHECK_IN_KIND,
       alarmId,
       cycleId,
@@ -172,6 +176,7 @@ export async function scheduleMainAlarmNotification(input: {
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
       data: {
+        owner: ALREADY_UP_OWNER,
         kind: MAIN_ALARM_KIND,
         alarmId: input.alarmId,
         cycleId: input.cycleId,
@@ -253,20 +258,35 @@ export async function dismissDeliveredNotification(
 export function readAlarmNotificationData(
   response: Notifications.NotificationResponse,
 ): AlarmNotificationData | null {
-  const data = response.notification.request.content.data;
-  const kind = data?.kind;
-  const alarmId = data?.alarmId;
-  const cycleId = data?.cycleId;
-  const mainAlarmId = data?.mainAlarmId;
+  return parseAlarmNotificationData(
+    response.notification.request.content.data,
+  );
+}
 
-  if (
-    (kind !== MAIN_ALARM_KIND && kind !== CHECK_IN_KIND) ||
-    (alarmId !== undefined && typeof alarmId !== 'string') ||
-    typeof cycleId !== 'string' ||
-    (mainAlarmId !== undefined && typeof mainAlarmId !== 'string')
-  ) {
-    return null;
+/** Read-only snapshot of what the OS has scheduled, for ownership checks. */
+export async function listScheduledNotificationSnapshots(): Promise<
+  ScheduledNotificationSnapshot[]
+> {
+  if (Platform.OS === 'web') {
+    return [];
   }
+  const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+  return scheduled.map((request) => ({
+    identifier: request.identifier,
+    content: {
+      title: request.content.title,
+      categoryIdentifier: request.content.categoryIdentifier,
+      data: request.content.data,
+    },
+  }));
+}
 
-  return { kind, alarmId, cycleId, mainAlarmId };
+/** Cancels exactly one identifier; never the whole shared queue. */
+export async function cancelScheduledNotificationById(
+  notificationId: string,
+): Promise<void> {
+  if (Platform.OS === 'web') {
+    return;
+  }
+  await Notifications.cancelScheduledNotificationAsync(notificationId);
 }

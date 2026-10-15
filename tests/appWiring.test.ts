@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 // App.tsx cannot be rendered under tsx, so these checks read its source to
@@ -73,4 +73,44 @@ test('refill skips alarms with unsettled suppressions and fails closed if unread
 test('suppression failures are shown through the dedicated warning, not "alarm on"', () => {
   assert.equal(app.match(/classifySuppressionFailure\(error\)/g)?.length, 2);
   assert.match(app, /testID="suppression-warning"/);
+});
+
+test('storage reset is reachable only from two confirmations in the load-failed card', () => {
+  const sources = ['App.tsx', ...readdirSync(new URL('../src', import.meta.url))
+    .filter((name) => /\.tsx?$/.test(name))
+    .map((name) => `src/${name}`)];
+  for (const name of sources) {
+    const text = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(
+      text,
+      /cancelAllScheduledNotificationsAsync/,
+      `${name} must never cancel the shared queue`,
+    );
+    if (name !== 'App.tsx') {
+      assert.doesNotMatch(text, /storageReset\.reset\(/);
+    }
+  }
+
+  assert.equal(app.match(/storageReset\.reset\(/g)?.length, 1);
+  const perform = block('const performStorageReset = useCallback', 'const confirmStorageReset');
+  assert.match(perform, /storageReset\.reset\(/);
+  assert.match(perform, /!loadFailed/);
+
+  const confirm = block('const confirmStorageReset = useCallback', 'const stopRinging');
+  assert.equal(confirm.match(/Alert\.alert\(/g)?.length, 2);
+  assert.match(confirm, /!loadFailed/);
+  // The reset runs only from the second dialog's destructive button.
+  const second = confirm.slice(confirm.lastIndexOf('Alert.alert('));
+  assert.match(second, /performStorageReset\(\)/);
+  assert.equal(confirm.match(/performStorageReset\(\)/g)?.length, 1);
+
+  const card = block('testID="storage-load-failed"', ') : deliveryWarningCopy');
+  assert.match(card, /confirmStorageReset/);
+  assert.equal(app.match(/onPress=\{confirmStorageReset\}/g)?.length, 1);
+});
+
+test('startup keeps the failure card while an earlier reset is unfinished', () => {
+  const startup = block('let cancellationRecoveryFailed = false;', 'await recoverPendingAlarmCancellations');
+  assert.match(startup, /storageReset\.hasPendingReset\(\)/);
+  assert.match(startup, /throw /);
 });

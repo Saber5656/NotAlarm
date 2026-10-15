@@ -74,6 +74,18 @@ function isJournal(value: unknown): value is SuppressionJournalV1 {
   );
 }
 
+/** Strictly validated read for recovery code; unreadable data yields null. */
+export function readValidSuppressionIntents(
+  raw: string,
+): SuppressionIntent[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isJournal(parsed) ? parsed.entries : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Durable record of suppressions that may be half done. Every mutation is
  * serialised and validated; unreadable data rejects and is never overwritten,

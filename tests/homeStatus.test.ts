@@ -152,7 +152,7 @@ describe('STORAGE_LOAD_FAILED_COPY', () => {
     assert.match(STORAGE_LOAD_FAILED_COPY.addDisabledReason, /追加できません/);
   });
 
-  test('gives non-destructive restart steps and never suggests a reset', () => {
+  test('keeps the restart steps non-destructive', () => {
     const steps = STORAGE_LOAD_FAILED_COPY.restartSteps.join('\n');
     assert.match(steps, /完全に終了/);
     assert.match(steps, /開き直/);
