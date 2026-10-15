@@ -8,6 +8,8 @@ import {
 import type { AlarmScheduleIssue } from './alarmScheduling';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 import { findAlarmListLock } from './homeStatus';
+import { readOccurrenceIdentity, stampOccurrence } from './occurrenceIdentity';
+import { currentPlanningZone } from './planningZone';
 
 export const MAX_PENDING_NOTIFICATIONS = 64;
 
@@ -76,6 +78,8 @@ export interface AlarmEditInput {
   checkpoint(alarms: StoredAlarmDefinition[]): Promise<void>;
   hasUnsettledWork(alarmId: string, cycleIds: string[]): Promise<boolean>;
   makeCycleId?: () => string;
+  /** Zone the replacement occurrences are planned in; defaults to this device's. */
+  planningZone?: string;
 }
 
 export interface AlarmEditResult {
@@ -180,6 +184,21 @@ function withoutCheckIn(cycle: StoredAlarm): StoredAlarm {
   return rest;
 }
 
+/**
+ * A journaled cycle's occurrence metadata is advisory: a half-written or
+ * malformed pair is dropped (the cycle becomes legacy), never repaired.
+ */
+function withTrustedOccurrenceMetadata(cycle: StoredAlarm): StoredAlarm {
+  if (cycle.logicalDateKey === undefined && cycle.planningZone === undefined) {
+    return cycle;
+  }
+  if (readOccurrenceIdentity(cycle)) {
+    return cycle;
+  }
+  const { logicalDateKey: _date, planningZone: _zone, ...rest } = cycle;
+  return rest;
+}
+
 function replaceDefinition(
   alarms: StoredAlarmDefinition[],
   next: StoredAlarmDefinition,
@@ -246,6 +265,9 @@ export async function editAlarmDefinition(
 ): Promise<AlarmEditResult> {
   const { alarms, alarmId, hour, minute, repeat, gateway, journal, now } = input;
   const startMs = now();
+  // Captured before any await: the stamp must describe the zone the plan was
+  // computed in, even if the device zone changes while scheduling.
+  const planningZone = input.planningZone ?? currentPlanningZone();
   const target = alarms.find((alarm) => alarm.id === alarmId);
   if (!target) {
     throw new AlarmEditError(
@@ -455,6 +477,7 @@ export async function editAlarmDefinition(
     phase: 'armed',
     stepCount: 0,
     stepCandidateRecorded: false,
+    ...stampOccurrence(planned.dueAtMs, planningZone),
   }));
   entry = {
     ...entry,
@@ -698,7 +721,8 @@ export async function recoverPendingAlarmEdit(input: {
   }
 
   const nowFn = input.now ?? Date.now;
-  const newCycleIds = new Set(entry.newCycles.map((cycle) => cycle.cycleId));
+  const journaledCycles = entry.newCycles.map(withTrustedOccurrenceMetadata);
+  const newCycleIds = new Set(journaledCycles.map((cycle) => cycle.cycleId));
   // Old cycles whose main was never cancelled stay tracked; those that come due
   // before their cancellation keep their data and their notifications.
   const pendingOld = target.cycles.filter(
@@ -708,11 +732,11 @@ export async function recoverPendingAlarmEdit(input: {
   );
 
   let alarms = input.alarms;
-  const applied = entry.newCycles.every((cycle) =>
+  const applied = journaledCycles.every((cycle) =>
     target.cycles.some((existing) => existing.cycleId === cycle.cycleId),
   );
   if (!applied) {
-    let newCycles = entry.newCycles;
+    let newCycles = journaledCycles;
     if (gateway.listScheduledIds) {
       try {
         const scheduled = await gateway.listScheduledIds();

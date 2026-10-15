@@ -15,6 +15,7 @@ import {
   localDateKey,
   type AlarmRepeat,
 } from './alarmSchedule';
+import { readOccurrenceIdentity } from './occurrenceIdentity';
 import { type ClassificationSource, classifyOverdueCycles } from './missedAlarms';
 import { assertNoPendingReset, stampStorageResult } from './storageResetGate';
 import { hasValidSnoozeState, type SnoozeRecord } from './snooze';
@@ -64,6 +65,13 @@ export interface StoredAlarm {
   skippedAtMs?: number;
   stepCandidateRecorded: boolean;
   snooze?: SnoozeRecord;
+  /**
+   * Logical calendar date (`YYYY-MM-DD` in `planningZone`) this occurrence was
+   * planned for. Stamped when the cycle is created; absent on cycles written by
+   * older builds, which are legacy evidence only (never given an invented zone).
+   */
+  logicalDateKey?: string;
+  planningZone?: string;
 }
 
 export interface StoredAlarmDefinition {
@@ -115,11 +123,37 @@ export async function loadAlarmDefinitions(): Promise<StoredAlarmDefinition[]> {
     if (!isAlarmStoreV2(parsed)) {
       throw new Error('保存済みのアラーム設定を読み取れません。');
     }
-    return stampStorageResult(parsed.alarms);
+    return stampStorageResult(dropUntrustedOccurrenceMetadata(parsed.alarms));
   }
 
   const migrated = await migrateLegacyAlarm();
   return stampStorageResult(migrated ? [migrated] : []);
+}
+
+/**
+ * The occurrence metadata is optional and advisory: a half-written or
+ * malformed pair is dropped (the cycle becomes legacy) instead of making the
+ * whole alarm store unreadable, and nothing is filled in to replace it.
+ */
+export function dropUntrustedOccurrenceMetadata(
+  alarms: StoredAlarmDefinition[],
+): StoredAlarmDefinition[] {
+  return alarms.map((definition) => ({
+    ...definition,
+    cycles: definition.cycles.map((cycle) => {
+      if (
+        cycle.logicalDateKey === undefined &&
+        cycle.planningZone === undefined
+      ) {
+        return cycle;
+      }
+      if (readOccurrenceIdentity(cycle)) {
+        return cycle;
+      }
+      const { logicalDateKey: _date, planningZone: _zone, ...rest } = cycle;
+      return rest;
+    }),
+  }));
 }
 
 export async function saveAlarmDefinitions(

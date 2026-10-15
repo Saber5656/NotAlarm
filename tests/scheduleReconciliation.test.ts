@@ -6,6 +6,7 @@ import test, { describe } from 'node:test';
 import { ALREADY_UP_OWNER, CHECK_IN_KIND, MAIN_ALARM_KIND } from '../src/alarmContracts';
 import { getCheckInAtMs } from '../src/alarmPolicy';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
+import { dropUntrustedOccurrenceMetadata } from '../src/alarmStorage';
 import { ScheduledNotificationRollbackError } from '../src/alarmScheduleRollback';
 import type {
   AlarmPhase,
@@ -270,6 +271,7 @@ function harness(
         excluded?: string[];
         canSchedule?: boolean;
         nowMs?: () => number;
+        originZone?: string | null;
       } = {},
     ) =>
       reconcileAlarmSchedules({
@@ -280,6 +282,7 @@ function harness(
         nowMs: extra.nowMs ?? (() => options.now?.value ?? NOW),
         gateway,
         orphans,
+        originZone: extra.originZone,
         checkpoint: async (next) => {
           calls.push('checkpoint');
           checkpoints += 1;
@@ -1638,6 +1641,278 @@ describe('post-merge findings: every scheduled id is tracked until its absence i
       [kept],
     );
     assert.deepEqual([...h.orphanIds], []);
+  });
+});
+
+describe('post-merge findings: a time-zone replan', () => {
+  async function withTimeZone<T>(zone: string, run: () => Promise<T> | T) {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+  const tokyoNow = new Date(Date.UTC(2026, 9, 14, 21, 0)).getTime(); // Oct 15 06:00 JST
+  const jstDue = (d: number) => Date.UTC(2026, 9, d, 7 - 9, 0);
+
+  test('verifies the replacement check-in and repairs it in the same pass', async () => {
+    const alarms = [
+      definition([16, 17].map((d) => cycle(jstDue(d), 'armed', { armedAtMs: tokyoNow })), {
+        repeat: makeAlarmRepeat('daily', tokyoNow),
+      }),
+    ];
+    await withTimeZone('America/Los_Angeles', async () => {
+      const os = osFor(alarms);
+      os.dropNextCheckIns = 1;
+      const h = harness(os);
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: 'Asia/Tokyo' });
+      for (const c of out.alarms[0].cycles) {
+        assert.ok(c.checkInNotificationId, 'a check-in is stored');
+        assert.ok(os.entries.has(c.checkInNotificationId!), 'and it is really pending');
+      }
+      assert.equal(out.statuses['alarm-1'], 'repaired');
+    });
+  });
+
+  test('reports the check-in as missing when it cannot be confirmed, instead of repaired', async () => {
+    const alarms = [
+      definition([16, 17].map((d) => cycle(jstDue(d), 'armed', { armedAtMs: tokyoNow })), {
+        repeat: makeAlarmRepeat('daily', tokyoNow),
+      }),
+    ];
+    await withTimeZone('America/Los_Angeles', async () => {
+      const os = osFor(alarms);
+      os.dropAllCheckIns = true;
+      const h = harness(os);
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: 'Asia/Tokyo' });
+      assert.equal(out.statuses['alarm-1'], 'check_in_missing');
+    });
+  });
+
+  test('a suppressed occurrence stays blocked by its logical date, not its old absolute time', async () => {
+    const alarms = [
+      definition(
+        [
+          cycle(jstDue(16), 'suppressed', { armedAtMs: tokyoNow }),
+          cycle(jstDue(17), 'armed', { armedAtMs: tokyoNow }),
+          cycle(jstDue(18), 'armed', { armedAtMs: tokyoNow }),
+        ],
+        { repeat: makeAlarmRepeat('daily', tokyoNow) },
+      ),
+    ];
+    await withTimeZone('America/Los_Angeles', async () => {
+      const h = harness(osFor(alarms));
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: 'Asia/Tokyo' });
+      const armedDates = out.alarms[0].cycles
+        .filter((c) => c.phase === 'armed')
+        .map((c) => new Date(c.dueAtMs).getDate());
+      assert.ok(!armedDates.includes(16), 'Oct 16 (the skipped day) is not re-armed');
+      assert.equal(armedDates.length, 2);
+      for (const c of out.alarms[0].cycles.filter((c) => c.phase === 'armed')) {
+        assert.equal(new Date(c.dueAtMs).getHours(), 7);
+      }
+    });
+  });
+
+  test('a dismissed occurrence stays blocked after the zone moves east as well', async () => {
+    const laNow = await withTimeZone('America/Los_Angeles', () => new Date(2026, 9, 15, 6, 0).getTime());
+    const laDue = (d: number) => new Date(Date.UTC(2026, 9, d, 14, 0)).getTime(); // 07:00 PDT
+    const alarms = [
+      definition(
+        [
+          cycle(laDue(16), 'dismissed', { armedAtMs: laNow }),
+          cycle(laDue(17), 'armed', { armedAtMs: laNow }),
+          cycle(laDue(18), 'armed', { armedAtMs: laNow }),
+        ],
+        { repeat: makeAlarmRepeat('daily', laNow) },
+      ),
+    ];
+    await withTimeZone('Asia/Tokyo', async () => {
+      const h = harness(osFor(alarms));
+      const out = await h.run(alarms, { nowMs: () => laNow, originZone: 'America/Los_Angeles' });
+      const armedDates = out.alarms[0].cycles
+        .filter((c) => c.phase === 'armed')
+        .map((c) => new Date(c.dueAtMs).getDate());
+      assert.ok(!armedDates.includes(16));
+    });
+  });
+
+  test('an unknown origin zone is not guessed: nothing is created and the alarm is reported', async () => {
+    const alarms = [
+      definition(
+        [
+          cycle(jstDue(16), 'suppressed', { armedAtMs: tokyoNow }),
+          cycle(jstDue(17), 'armed', { armedAtMs: tokyoNow }),
+        ],
+        { repeat: makeAlarmRepeat('daily', tokyoNow) },
+      ),
+    ];
+    await withTimeZone('America/Los_Angeles', async () => {
+      const h = harness(osFor(alarms));
+      const out = await h.run(alarms, { nowMs: () => tokyoNow, originZone: null });
+      assert.equal(mainCallsOf(h.calls).length, 0);
+      assert.equal(out.replanned, 0);
+      assert.equal(out.statuses['alarm-1'], 'unverified');
+    });
+  });
+});
+
+describe('logical occurrence identity (stamped at creation)', () => {
+  async function withTimeZone<T>(zone: string, run: () => Promise<T> | T) {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  }
+  const utc = (d: number, h: number, m = 0) => Date.UTC(2026, 9, d, h, m);
+  const dayOf = (c: StoredAlarm) =>
+    new Date(c.dueAtMs).toLocaleDateString('sv-SE'); // local YYYY-MM-DD
+
+  test('a replacement created by a replan carries its own date and zone', async () => {
+    const now = utc(14, 21); // Oct 15 06:00 JST
+    const alarms = [
+      definition(
+        [16, 17].map((d) => cycle(utc(d - 1, 22), 'armed', { armedAtMs: now })),
+        { repeat: makeAlarmRepeat('daily', now) },
+      ),
+    ];
+    await withTimeZone('America/Los_Angeles', async () => {
+      const h = harness(osFor(alarms));
+      const out = await h.run(alarms, { nowMs: () => now, originZone: 'Asia/Tokyo' });
+      const created = out.alarms[0].cycles.filter((c) => c.cycleId.startsWith('replan-'));
+      assert.equal(created.length, 2);
+      for (const c of created) {
+        assert.equal(c.planningZone, 'America/Los_Angeles');
+        assert.equal(c.logicalDateKey, dayOf(c));
+      }
+    });
+  });
+
+  test('a suppressed cycle stamped in zone B blocks its own date although the stored origin is still A', async () => {
+    // 20:00 daily, replanned in London after Tokyo -> Los Angeles -> London.
+    // The cycle stamped in Los Angeles (Oct 16 20:00 PDT = Oct 17 03:00 UTC) is
+    // not aligned here; a Tokyo-based inference would call it Oct 17.
+    const now = utc(14, 21);
+    const bSuppressed = utc(17, 3); // Oct 16 20:00 PDT
+    const stamped = cycle(bSuppressed, 'suppressed', {
+      armedAtMs: now,
+      logicalDateKey: '2026-10-16',
+      planningZone: 'America/Los_Angeles',
+    });
+    const makeAlarms = (suppressed: StoredAlarm) => [
+      definition(
+        [
+          suppressed,
+          ...[16, 17].map((d) => cycle(utc(d, 11), 'armed', { armedAtMs: now })),
+        ],
+        { hour: 20, minute: 0, repeat: makeAlarmRepeat('daily', now) },
+      ),
+    ];
+    await withTimeZone('Europe/London', async () => {
+      const alarms = makeAlarms(stamped);
+      const h = harness(osFor(alarms));
+      const out = await h.run(alarms, { nowMs: () => now, originZone: 'Asia/Tokyo' });
+      const armed = out.alarms[0].cycles.filter((c) => c.phase === 'armed');
+      assert.ok(armed.length > 0);
+      assert.ok(!armed.some((c) => dayOf(c) === '2026-10-16'), 'Oct 16 stays skipped');
+
+      // The legacy fallback (no metadata) would have blocked the wrong day.
+      const legacy = makeAlarms({
+        ...stamped,
+        logicalDateKey: undefined,
+        planningZone: undefined,
+      });
+      const hl = harness(osFor(legacy));
+      const outl = await hl.run(legacy, { nowMs: () => now, originZone: 'Asia/Tokyo' });
+      const armedl = outl.alarms[0].cycles.filter((c) => c.phase === 'armed');
+      assert.ok(armedl.some((c) => dayOf(c) === '2026-10-16'), 'documents why metadata is needed');
+    });
+  });
+
+  test('a terminal occurrence whose old instant already passed still blocks the same calendar date after a westward move', async () => {
+    // Skipped Oct 15 07:00 JST (= Oct 14 22:00 UTC). Now Oct 15 00:00 UTC in Los
+    // Angeles (Oct 14 17:00): that instant is past, but Oct 15 07:00 PDT is not.
+    const now = utc(15, 0);
+    const skippedJst = utc(14, 22);
+    const armedJst = [16, 17].map((d) => utc(d - 1, 22));
+    const build = (extra: Partial<StoredAlarm>) => [
+      definition(
+        [
+          cycle(skippedJst, 'suppressed', { armedAtMs: now - 86_400_000, ...extra }),
+          ...armedJst.map((due) => cycle(due, 'armed', { armedAtMs: now - 86_400_000 })),
+        ],
+        { repeat: makeAlarmRepeat('daily', now) },
+      ),
+    ];
+    const created = (out: Awaited<ReturnType<ReturnType<typeof harness>['run']>>) =>
+      out.alarms[0].cycles.filter((c) => c.cycleId.startsWith('replan-')).map(dayOf);
+    await withTimeZone('America/Los_Angeles', async () => {
+      // stamped, origin unknown/stale
+      const stamped = build({ logicalDateKey: '2026-10-15', planningZone: 'Asia/Tokyo' });
+      const a = await harness(osFor(stamped)).run(stamped, {
+        nowMs: () => now,
+        originZone: null,
+      });
+      assert.ok(!created(a).includes('2026-10-15'));
+      assert.ok(created(a).length > 0);
+      // legacy, origin known from the stored planning zone
+      const legacy = build({});
+      const b = await harness(osFor(legacy)).run(legacy, {
+        nowMs: () => now,
+        originZone: 'Asia/Tokyo',
+      });
+      assert.ok(!created(b).includes('2026-10-15'));
+      // legacy, origin unknown: fail safe, nothing created
+      const hu = harness(osFor(legacy));
+      const c = await hu.run(legacy, { nowMs: () => now, originZone: null });
+      assert.equal(mainCallsOf(hu.calls).length, 0);
+      assert.equal(c.statuses['alarm-1'], 'unverified');
+    });
+  });
+
+  test('an old terminal occurrence beyond any zone offset does not make a stamped-less alarm unverified', async () => {
+    const now = utc(15, 0);
+    const alarms = [
+      definition(
+        [
+          cycle(utc(1, 22), 'dismissed'),
+          ...[16, 17].map((d) => cycle(utc(d - 1, 22), 'armed')),
+        ],
+        { repeat: makeAlarmRepeat('daily', now) },
+      ),
+    ];
+    await withTimeZone('America/Los_Angeles', async () => {
+      const out = await harness(osFor(alarms)).run(alarms, { nowMs: () => now, originZone: null });
+      assert.notEqual(out.statuses['alarm-1'], 'unverified');
+    });
+  });
+
+  test('metadata that is malformed is dropped on read and never replaced by a guess', () => {
+    const base = cycle(utc(16, 1));
+    const defs = [
+      definition([
+        { ...base, cycleId: 'ok', logicalDateKey: '2026-10-15', planningZone: 'Asia/Tokyo' },
+        { ...base, cycleId: 'half', logicalDateKey: '2026-10-15' },
+        { ...base, cycleId: 'fake-date', logicalDateKey: '2026-02-31', planningZone: 'Asia/Tokyo' },
+        { ...base, cycleId: 'empty-zone', logicalDateKey: '2026-10-15', planningZone: '' },
+        { ...base, cycleId: 'wrong-type', logicalDateKey: 20261015 as never, planningZone: 'Asia/Tokyo' },
+        { ...base, cycleId: 'legacy' },
+      ]),
+    ];
+    const [out] = dropUntrustedOccurrenceMetadata(defs);
+    const byId = Object.fromEntries(out.cycles.map((c) => [c.cycleId, c]));
+    assert.equal(byId.ok.planningZone, 'Asia/Tokyo');
+    for (const id of ['half', 'fake-date', 'empty-zone', 'wrong-type', 'legacy']) {
+      assert.equal('logicalDateKey' in byId[id], false, id);
+      assert.equal('planningZone' in byId[id], false, id);
+    }
   });
 });
 

@@ -12,12 +12,19 @@ import { getCheckInAtMs } from './alarmPolicy';
 import {
   getUpcomingAlarmTimes,
   isDueTimeWallClockAligned,
+  localDateKey,
   SCHEDULED_OCCURRENCES_PER_ALARM,
 } from './alarmSchedule';
 import {
   ScheduledNotificationRollbackError,
   type ScheduledNotificationRollbackFailure,
 } from './alarmScheduleRollback';
+import { currentPlanningZone } from './planningZone';
+import {
+  dateKeyInZone,
+  readOccurrenceIdentity,
+  stampOccurrence,
+} from './occurrenceIdentity';
 import type { AlarmScheduleIssue } from './alarmScheduling';
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
 import {
@@ -107,6 +114,14 @@ export interface ReconcileInput {
   gateway: ReconcileGateway;
   checkpoint: (alarms: StoredAlarmDefinition[]) => Promise<void>;
   orphans?: OrphanStore;
+  /**
+   * The zone the stored occurrences were planned in (null when not known).
+   * A suppressed / dismissed occurrence planned there is matched to its
+   * logical local date; without it the origin is never guessed.
+   */
+  originZone?: string | null;
+  /** The zone new cycles are planned in; defaults to the device zone. */
+  currentZone?: string;
   makeCycleId?: () => string;
 }
 
@@ -997,9 +1012,42 @@ class Run {
     const kept = definition.cycles.filter(
       (cycle) => !misalignedIds.has(cycle.cycleId),
     );
-    const terminalFuture = kept.filter(
-      (cycle) => cycle.dueAtMs > nowMs && !isMonitoring(cycle),
-    ).length;
+    // A terminal occurrence is matched by its logical calendar date, not by
+    // the absolute time it had: after a westward move, one whose instant has
+    // already passed can still correspond to a future date here.
+    const terminalFutureCycles = kept.filter(
+      (cycle) =>
+        !isMonitoring(cycle) &&
+        cycle.dueAtMs > nowMs - LOGICAL_DATE_REACH_MS,
+    );
+    const terminalFuture = terminalFutureCycles.length;
+    const blockedDates = new Set<string>();
+    for (const terminal of terminalFutureCycles) {
+      const identity = readOccurrenceIdentity(terminal);
+      if (identity) {
+        // Stamped at creation: authoritative, no global zone involved.
+        blockedDates.add(identity.logicalDateKey);
+        continue;
+      }
+      if (
+        isDueTimeWallClockAligned(
+          terminal.dueAtMs,
+          definition.hour,
+          definition.minute,
+          definition.repeat,
+        )
+      ) {
+        continue;
+      }
+      // Legacy cycle (no metadata): the stored planning zone is only evidence.
+      const dateKey = dateKeyInZone(terminal.dueAtMs, this.input.originZone);
+      if (dateKey === null) {
+        // Unknown origin: not guessed. Nothing new is created for this alarm.
+        this.mark(alarmId, 'unverified');
+        return;
+      }
+      blockedDates.add(dateKey);
+    }
     let expected: number[] = [];
     try {
       expected = getUpcomingAlarmTimes(
@@ -1021,7 +1069,10 @@ class Run {
       kept.filter((cycle) => !isMonitoring(cycle)).map((cycle) => cycle.dueAtMs),
     );
     const slots = expected
-      .filter((dueAtMs) => !blocked.has(dueAtMs))
+      .filter(
+        (dueAtMs) =>
+          !blocked.has(dueAtMs) && !blockedDates.has(localDateKey(dueAtMs)),
+      )
       .slice(0, misaligned.length);
     const oldest = [...misaligned].sort(
       (left, right) => left.dueAtMs - right.dueAtMs,
@@ -1081,6 +1132,7 @@ class Run {
     const cycleId = (this.input.makeCycleId ?? defaultCycleId)();
     const armedAtMs = this.input.nowMs();
     // Captured before the registration await, with the slot's own plan.
+    const planningZone = this.input.currentZone ?? currentPlanningZone();
     let created: StoredAlarm;
     try {
       const scheduled = await scheduleAlarmNotificationsFailSafe(
@@ -1103,6 +1155,7 @@ class Run {
         phase: 'armed',
         stepCount: 0,
         stepCandidateRecorded: false,
+        ...stampOccurrence(dueAtMs, planningZone),
       };
       if (scheduled.checkInWarning) {
         this.issues.push({
@@ -1269,6 +1322,12 @@ class Run {
     this.mark(alarmId, anyReplacement ? 'duplicated' : 'missing');
   }
 }
+
+/**
+ * Zones differ by at most 26 hours, so an occurrence whose instant is older
+ * than this cannot share a calendar date with any slot still ahead.
+ */
+const LOGICAL_DATE_REACH_MS = 48 * 60 * 60 * 1000;
 
 function defaultCycleId(): string {
   return `cycle-${Date.now().toString(36)}-${Math.random()
