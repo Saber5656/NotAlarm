@@ -195,6 +195,11 @@ import {
   getLocalDataDeletionAvailability,
 } from './src/localDataDeletion';
 import {
+  createSuppressionSaver,
+  finishSuppression,
+  type SuppressionCleanup,
+} from './src/suppressionFollowUp';
+import {
   USER_SKIP_LABEL,
   describeUserSkipConfirmation,
   getUserSkipOffer,
@@ -1091,6 +1096,15 @@ function AlarmApp() {
     [recordRefill, setCurrentAlarms],
   );
 
+  const suppressionCleanup = useMemo<SuppressionCleanup>(
+    () => ({
+      cancelCheckIn: cancelNotificationIfPresent,
+      dismissDelivered: dismissDeliveredNotification,
+      refill: refreshAfterCycleCompletion,
+    }),
+    [refreshAfterCycleCompletion],
+  );
+
   useEffect(() => {
     let mounted = true;
 
@@ -1421,9 +1435,7 @@ function AlarmApp() {
               typeof cycleId === 'string'
                 ? loadStoredAlarmByCycleId(cycleId)
                 : Promise.resolve(null),
-            saveAlarm: async (cycle) => {
-              await saveStoredAlarm(cycle);
-            },
+            saveAlarm: createSuppressionSaver(saveStoredAlarm, setCurrentAlarms),
             cancelScheduled: cancelScheduledNotification,
             journal: suppressionJournal,
           },
@@ -1455,8 +1467,7 @@ function AlarmApp() {
         }
 
         suppressedConfirmed = true;
-        await cancelNotificationIfPresent(result.alarm.checkInNotificationId);
-        await refreshAfterCycleCompletion(result.alarm);
+        await finishSuppression(result.alarm, suppressionCleanup);
         setNotice({
           tone: 'success',
           text: '起床を確認しました。この時刻のアラームだけ停止しました。',
@@ -1482,7 +1493,7 @@ function AlarmApp() {
         responseInFlightRef.current = null;
       }
     },
-    [refreshAfterCycleCompletion],
+    [setCurrentAlarms, suppressionCleanup],
   );
 
   // Explicit in-app skip of exactly one occurrence. The target is the
@@ -1499,9 +1510,7 @@ function AlarmApp() {
         const result = await processUserSkipFailSafe(
           {
             loadAlarm: () => loadStoredAlarmByCycleId(target.cycleId),
-            saveAlarm: async (cycle) => {
-              await saveStoredAlarm(cycle);
-            },
+            saveAlarm: createSuppressionSaver(saveStoredAlarm, setCurrentAlarms),
             cancelScheduled: cancelScheduledNotification,
             journal: suppressionJournal,
           },
@@ -1522,8 +1531,7 @@ function AlarmApp() {
           return;
         }
         suppressedConfirmed = true;
-        await cancelNotificationIfPresent(result.alarm.checkInNotificationId);
-        await refreshAfterCycleCompletion(result.alarm);
+        await finishSuppression(result.alarm, suppressionCleanup);
         setNotice({
           tone: 'success',
           text: 'この回だけ止めました。繰り返しの設定は変わらず、次の日以降は鳴ります。',
@@ -1548,7 +1556,7 @@ function AlarmApp() {
         skipInFlightRef.current = false;
       }
     },
-    [refreshAfterCycleCompletion],
+    [setCurrentAlarms, suppressionCleanup],
   );
 
   const confirmUserSkip = useCallback(() => {
@@ -1727,9 +1735,7 @@ function AlarmApp() {
         void processStepThresholdFailSafe(
           {
             loadAlarm: () => loadStoredAlarmByCycleId(current.cycleId),
-            saveAlarm: async (cycle) => {
-              await saveStoredAlarm(cycle);
-            },
+            saveAlarm: createSuppressionSaver(saveStoredAlarm, setCurrentAlarms),
             cancelScheduled: cancelScheduledNotification,
             journal: suppressionJournal,
           },
@@ -1752,10 +1758,7 @@ function AlarmApp() {
             }
             if (result.status === 'suppressed') {
               suppressedConfirmed = true;
-              await cancelNotificationIfPresent(
-                result.alarm.checkInNotificationId,
-              );
-              await refreshAfterCycleCompletion(result.alarm);
+              await finishSuppression(result.alarm, suppressionCleanup);
               setPedometerState('counting');
               setNotice({
                 tone: 'success',
@@ -1861,7 +1864,7 @@ function AlarmApp() {
     isWatchingSteps,
     monitoringCycle?.cycleId,
     stepWindow?.startMs,
-    refreshAfterCycleCompletion,
+    suppressionCleanup,
     setCurrentAlarms,
   ]);
 
