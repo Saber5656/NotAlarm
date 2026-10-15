@@ -19,8 +19,18 @@ export function createTextContext(settings: LocaleSettings): TextContext {
     messages: settings.locale === 'en' ? en : ja,
     formatter: createFormatter(settings),
     intlTag: settings.intlTag,
-    // Without a device preference, Japanese follows the 24-hour convention.
+    // Without a device preference, the Intl locale convention decides, the
+    // same one the formatter falls back to.
     uses24HourClock:
-      settings.hour12 === null ? settings.locale === 'ja' : !settings.hour12,
+      settings.hour12 === null
+        ? localeUses24HourClock(settings.intlTag)
+        : !settings.hour12,
   };
+}
+
+function localeUses24HourClock(intlTag: string): boolean {
+  const { hourCycle } = new Intl.DateTimeFormat(intlTag, {
+    hour: 'numeric',
+  }).resolvedOptions();
+  return hourCycle === 'h23' || hourCycle === 'h24';
 }
