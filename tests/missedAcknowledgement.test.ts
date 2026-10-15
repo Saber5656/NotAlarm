@@ -5,9 +5,11 @@ import test from 'node:test';
 
 import {
   acknowledgeMissedAlarms,
+  getMissedAcknowledgementNotice,
   type MissedAcknowledgementGateway,
 } from '../src/missedAcknowledgement';
 import type { StoredAlarm } from '../src/alarmStorage';
+import type { AlarmScheduleIssue } from '../src/alarmScheduling';
 
 function cycle(cycleId: string, alarmId = 'alarm-1'): StoredAlarm {
   return {
@@ -192,9 +194,38 @@ test('a late missed snooze is acknowledged and both of its delivered ids are dis
   ]);
 });
 
+test('main, check-in and snooze ids are all dismissed, in that order, after persisting', async () => {
+  const gateway = makeGateway({
+    persist: async (ids) => {
+      gateway.calls.push(`persist:${ids.join(',')}`);
+      return ids.map((id) => ({
+        ...cycle(id),
+        checkInNotificationId: `checkin-${id}`,
+        snooze: { count: 1, notificationId: `snooze-${id}` },
+      }));
+    },
+  });
+  await acknowledgeMissedAlarms([cycle('a')], gateway);
+  assert.deepEqual(gateway.calls, [
+    'persist:a',
+    'dismiss:main-a',
+    'dismiss:checkin-a',
+    'dismiss:snooze-a',
+    'refill:alarm-1',
+  ]);
+});
+
 test('delivered ids are de-duplicated and a failed dismissal does not stop the others', async () => {
-  const a: StoredAlarm = { ...cycle('a'), snooze: { count: 1, notificationId: 'main-a' } };
-  const b: StoredAlarm = { ...cycle('b'), snooze: { count: 1, notificationId: 'snooze-b' } };
+  const a: StoredAlarm = {
+    ...cycle('a'),
+    checkInNotificationId: 'main-a',
+    snooze: { count: 1, notificationId: 'main-a' },
+  };
+  const b: StoredAlarm = {
+    ...cycle('b'),
+    checkInNotificationId: 'checkin-b',
+    snooze: { count: 1, notificationId: 'snooze-b' },
+  };
   const gateway = makeGateway({
     persist: async (ids) => {
       gateway.calls.push(`persist:${ids.join(',')}`);
@@ -202,7 +233,7 @@ test('delivered ids are de-duplicated and a failed dismissal does not stop the o
     },
     dismissDelivered: async (id) => {
       gateway.calls.push(`dismiss:${id}`);
-      if (id === 'main-a') {
+      if (id === 'main-a' || id === 'main-b') {
         throw new Error('dismiss');
       }
     },
@@ -213,6 +244,7 @@ test('delivered ids are de-duplicated and a failed dismissal does not stop the o
     'persist:a,b',
     'dismiss:main-a',
     'dismiss:main-b',
+    'dismiss:checkin-b',
     'dismiss:snooze-b',
     'refill:alarm-1',
   ]);
@@ -228,4 +260,41 @@ test('only persisted cycles are dismissed: a cycle that was not changed keeps it
   });
   await acknowledgeMissedAlarms([cycle('a'), kept], gateway);
   assert.deepEqual(gateway.calls, ['persist:a,kept', 'dismiss:main-a', 'refill:alarm-1']);
+});
+
+function codeOf(notice: object | null): unknown {
+  return notice && 'code' in notice ? notice.code : undefined;
+}
+
+function issue(kind: AlarmScheduleIssue['kind']): AlarmScheduleIssue {
+  return kind === 'main_schedule_failed'
+    ? { kind, alarmId: 'x', cycleId: 'c', dueAtMs: 1, code: 'MAIN_REGISTER_FAILED' }
+    : { kind, alarmId: 'y', cycleId: 'd', dueAtMs: 1, mainAlarmId: 'm', code: 'CHECKIN_REGISTER_FAILED' };
+}
+
+test('the final notice reflects the aggregate: an earlier danger survives a later warning', () => {
+  const notice = getMissedAcknowledgementNotice(
+    { status: 'acknowledged', refillSeverity: 'danger' },
+    [issue('main_schedule_failed'), issue('check_in_schedule_failed')],
+  );
+  assert.equal(notice?.tone, 'danger');
+  assert.equal(codeOf(notice), 'MAIN_REGISTER_FAILED');
+});
+
+test('a later main failure also wins over an earlier check-in warning', () => {
+  const notice = getMissedAcknowledgementNotice(
+    { status: 'acknowledged', refillSeverity: 'danger' },
+    [issue('check_in_schedule_failed'), issue('main_schedule_failed')],
+  );
+  assert.equal(codeOf(notice), 'MAIN_REGISTER_FAILED');
+});
+
+test('clean acknowledgement is neutral; failures map to catalog codes', () => {
+  assert.equal(
+    getMissedAcknowledgementNotice({ status: 'acknowledged', refillSeverity: 'none' }, [])?.tone,
+    'neutral',
+  );
+  assert.equal(codeOf(getMissedAcknowledgementNotice({ status: 'persist_failed' }, [])), 'MISSED_ACK_FAILED');
+  assert.equal(codeOf(getMissedAcknowledgementNotice({ status: 'refill_failed' }, [])), 'REFILL_FAILED');
+  assert.equal(getMissedAcknowledgementNotice({ status: 'nothing' }, []), null);
 });

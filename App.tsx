@@ -76,7 +76,10 @@ import {
   recordRefillAttempt,
   type RefillAttempt,
 } from './src/alarmScheduling';
-import { acknowledgeMissedAlarms } from './src/missedAcknowledgement';
+import {
+  acknowledgeMissedAlarms,
+  getMissedAcknowledgementNotice,
+} from './src/missedAcknowledgement';
 import {
   acknowledgeMissedCycles,
   getMissedCycles,
@@ -1164,7 +1167,10 @@ function AlarmApp() {
   }, []);
 
   const refreshAfterCycleCompletion = useCallback(
-    async (completedCycle: StoredAlarm): Promise<'none' | 'warning' | 'danger'> => {
+    async (
+      completedCycle: StoredAlarm,
+      collectedIssues?: AlarmScheduleIssue[],
+    ): Promise<'none' | 'warning' | 'danger'> => {
       const now = Date.now();
       const issues: AlarmScheduleIssue[] = [];
       const attemptedAlarmIds = [completedCycle.alarmId];
@@ -1219,9 +1225,14 @@ function AlarmApp() {
       recordRefill({ attemptedAlarmIds, issues });
       setCurrentAlarms(next);
       const severity = getAlarmScheduleIssueSeverity(issues);
-      const issueNotice = describeScheduleIssues(issues, '次回分: ');
-      if (issueNotice) {
-        setNotice(issueNotice);
+      if (collectedIssues) {
+        // The caller shows one notice for all refills together.
+        collectedIssues.push(...issues);
+      } else {
+        const issueNotice = describeScheduleIssues(issues, '次回分: ');
+        if (issueNotice) {
+          setNotice(issueNotice);
+        }
       }
       return severity === 'none' ? 'none' : severity === 'danger' ? 'danger' : 'warning';
     },
@@ -2635,6 +2646,7 @@ function AlarmApp() {
     }
 
     setIsBusy(true);
+    const refillIssues: AlarmScheduleIssue[] = [];
     try {
       const result = await acknowledgeMissedAlarms(missedCycles, {
         persist: async (cycleIds) => {
@@ -2649,23 +2661,13 @@ function AlarmApp() {
           setCurrentAlarms(next);
           return changed;
         },
-        // Only each persisted cycle's own main and accepted snooze ids are dismissed.
+        // Only each persisted cycle's own main, check-in and accepted snooze ids are dismissed.
         dismissDelivered: dismissDeliveredNotification,
-        refill: refreshAfterCycleCompletion,
+        refill: (completed) => refreshAfterCycleCompletion(completed, refillIssues),
       });
-      if (result.status === 'persist_failed') {
-        setNotice(noticeFromCode('MISSED_ACK_FAILED'));
-      } else if (result.status === 'refill_failed') {
-        setNotice({
-          tone: 'danger',
-          code: 'REFILL_FAILED',
-          text: '確認済みにしましたが、次回分のアラームを予約できませんでした。アラーム状態を確認してください。',
-        });
-      } else if (
-        result.status === 'acknowledged' &&
-        result.refillSeverity === 'none'
-      ) {
-        setNotice({ tone: 'neutral', text: '見逃したアラームを確認済みにしました。' });
+      const ackNotice = getMissedAcknowledgementNotice(result, refillIssues);
+      if (ackNotice) {
+        setNotice(ackNotice);
       }
     } catch {
       setNotice(noticeFromCode('MISSED_ACK_FAILED'));

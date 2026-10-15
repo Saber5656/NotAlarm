@@ -1,4 +1,6 @@
 import type { StoredAlarm } from './alarmStorage';
+import { describeScheduleIssues, type AlarmScheduleIssue } from './alarmScheduling';
+import { noticeFromCode, type ErrorNotice } from './errorCatalog';
 
 export type RefillSeverity = 'none' | 'warning' | 'danger';
 
@@ -45,16 +47,20 @@ export async function acknowledgeMissedAlarms(
   const deliveredIds = new Set<string>();
   for (const cycle of acknowledged) {
     deliveredIds.add(cycle.mainAlarmId);
+    if (cycle.checkInNotificationId) {
+      deliveredIds.add(cycle.checkInNotificationId);
+    }
     if (cycle.snooze?.notificationId) {
       deliveredIds.add(cycle.snooze.notificationId);
     }
   }
+  // Each request can sit in Notification Center; every dismissal is best
+  // effort and independent, so one failing never skips another.
   for (const id of deliveredIds) {
     try {
       await gateway.dismissDelivered(id);
     } catch {
-      // The cycle is already acknowledged; a stale delivered row is harmless
-      // and must not stop the other dismissals.
+      // The cycle is already acknowledged; a stale delivered row is harmless.
     }
   }
 
@@ -77,4 +83,34 @@ export async function acknowledgeMissedAlarms(
   return refillFailed
     ? { status: 'refill_failed' }
     : { status: 'acknowledged', refillSeverity };
+}
+
+/**
+ * The one notice shown after an acknowledgement. Success text is chosen from
+ * the issues of every refill together, so an earlier main-alarm failure is
+ * never replaced by a later check-in warning.
+ */
+export function getMissedAcknowledgementNotice(
+  result: MissedAcknowledgementResult,
+  refillIssues: readonly AlarmScheduleIssue[],
+): ErrorNotice | { tone: 'neutral'; text: string } | null {
+  switch (result.status) {
+    case 'nothing':
+      return null;
+    case 'persist_failed':
+      return noticeFromCode('MISSED_ACK_FAILED');
+    case 'refill_failed':
+      return {
+        tone: 'danger',
+        code: 'REFILL_FAILED',
+        text: '確認済みにしましたが、次回分のアラームを予約できませんでした。アラーム状態を確認してください。',
+      };
+    case 'acknowledged':
+      return (
+        describeScheduleIssues(refillIssues, '次回分: ') ?? {
+          tone: 'neutral',
+          text: '見逃したアラームを確認済みにしました。',
+        }
+      );
+  }
 }
