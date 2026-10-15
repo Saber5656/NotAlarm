@@ -1,4 +1,6 @@
 import type { StoredAlarm, StoredAlarmDefinition } from './alarmStorage';
+import { getNextAlarmTime } from './alarmSchedule';
+import { MIN_ARM_LEAD_MS } from './alarmPolicy';
 import { applySuppressionStepFloor, mergeWindowStepCount } from './stepWindow';
 
 export type MonitoringStepUpdateStatus =
@@ -93,4 +95,37 @@ export function replaceStoredCycle(
   return cycle.phase === 'suppressed'
     ? applySuppressionStepFloor(next, cycle)
     : next;
+}
+
+export type AlarmEnablePreparation =
+  | { ok: true; definition: StoredAlarmDefinition }
+  | { ok: false; message: string };
+
+/**
+ * Turning an alarm on never changes what it is: a today-only alarm keeps its
+ * saved date, so an expired one is refused instead of adopting a new date.
+ */
+export function prepareAlarmEnable(
+  definition: StoredAlarmDefinition,
+  nowMs: number,
+): AlarmEnablePreparation {
+  const nextAtMs = getNextAlarmTime(
+    nowMs,
+    definition.hour,
+    definition.minute,
+    definition.repeat,
+  );
+  if (!nextAtMs || nextAtMs - nowMs < MIN_ARM_LEAD_MS) {
+    return {
+      ok: false,
+      message:
+        definition.repeat.kind === 'today'
+          ? 'この「今日だけ」アラームは終了しています。削除して新しいアラームを追加してください。'
+          : 'アラーム時刻まで10秒未満のため、オンにできません。時刻を過ぎてからもう一度お試しください。',
+    };
+  }
+  return {
+    ok: true,
+    definition: { ...definition, enabled: true, cycles: [] },
+  };
 }

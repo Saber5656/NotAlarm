@@ -20,6 +20,7 @@ import {
   classifySuppressionFailure,
   describeAlarmRemains,
   describeSuppressedOccurrence,
+  describeTodayOnlyExpiry,
   findAlarmListLock,
   getRingingStopA11yLabel,
   runUnlessAlarmListLocked,
@@ -408,5 +409,72 @@ describe('describeAlarmRemains', () => {
     assert.match(describeAlarmRemains('ALARM_DUE_OR_PAST').text, /鳴ります/);
     assert.match(describeAlarmRemains('JOURNAL_NOT_WRITTEN').text, /取り消していません/);
     assert.match(describeAlarmRemains('INVALID_RESPONSE').text, /維持します/);
+  });
+});
+
+describe('describeTodayOnlyExpiry', () => {
+  const created = new Date(2026, 9, 15, 6, 0).getTime();
+  const fmt = () => '10/15(木)';
+  const def = (kind: 'today' | 'daily'): StoredAlarmDefinition => ({
+    id: 'a',
+    hour: 7,
+    minute: 0,
+    repeat: makeAlarmRepeat(kind, created),
+    enabled: false,
+    createdAtMs: created,
+    cycles: [],
+  });
+
+  test('shows original date and Ended for an expired today-only alarm', () => {
+    const next = new Date(2026, 9, 16, 5, 0).getTime();
+    const info = describeTodayOnlyExpiry(def('today'), next, fmt);
+    assert.ok(info);
+    assert.match(info.rowLabel, /今日だけ.*10\/15.*終了/);
+    assert.match(info.a11yLabel, /10\/15.*終了/);
+    assert.match(info.explanation, /新しいアラーム/);
+  });
+
+  describe('never Ended while the cycle is still active', () => {
+    const due = new Date(2026, 9, 15, 7, 0).getTime();
+    const withCycles = (
+      enabled: boolean,
+      cycles: StoredAlarm[],
+    ): StoredAlarmDefinition => ({ ...def('today'), enabled, cycles });
+
+    test('due - 1ms, exactly due and overdue armed before tick', () => {
+      const armed = [cycle(due, 'armed')];
+      for (const now of [due - 1, due, due + 5000]) {
+        assert.equal(describeTodayOnlyExpiry(withCycles(true, armed), now, fmt), null);
+        assert.equal(describeTodayOnlyExpiry(withCycles(false, armed), now, fmt), null);
+      }
+    });
+
+    test('ringing past due and pending cancellation stay active', () => {
+      const ringing = [cycle(due, 'ringing')];
+      assert.equal(describeTodayOnlyExpiry(withCycles(true, ringing), due + 60000, fmt), null);
+      assert.equal(describeTodayOnlyExpiry(withCycles(false, ringing), due + 60000, fmt), null);
+      const candidate = [cycle(due, 'step_candidate')];
+      assert.equal(describeTodayOnlyExpiry(withCycles(false, candidate), due + 60000, fmt), null);
+    });
+
+    test('unknown future phases are conservatively active', () => {
+      const future = [cycle(due, 'snoozed' as AlarmPhase)];
+      assert.equal(describeTodayOnlyExpiry(withCycles(false, future), due + 60000, fmt), null);
+    });
+
+    test('enabled without cycles is not Ended', () => {
+      assert.equal(describeTodayOnlyExpiry(withCycles(true, []), due + 60000, fmt), null);
+    });
+
+    test('truly ended disabled record, even with terminal cycles, is Ended', () => {
+      assert.ok(describeTodayOnlyExpiry(withCycles(false, []), due + 60000, fmt));
+      const done = [cycle(due, 'suppressed'), cycle(due, 'dismissed')];
+      assert.ok(describeTodayOnlyExpiry(withCycles(false, done), due + 60000, fmt));
+    });
+  });
+
+  test('null before expiry and for repeating alarms', () => {
+    assert.equal(describeTodayOnlyExpiry(def('today'), created, fmt), null);
+    assert.equal(describeTodayOnlyExpiry(def('daily'), created + 9e8, fmt), null);
   });
 });

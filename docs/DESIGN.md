@@ -86,7 +86,7 @@ interface StoredAlarm {
 
 | repeat | 次回計算 |
 |---|---|
-| 今日だけ | 保存した当日かつ現在より後だけ |
+| 今日だけ | 保存した当日かつ現在より後だけ。日付は作成時に固定し、オン操作で付け替えない |
 | 毎日 | 次に到来する全曜日 |
 | 平日 | 月〜金だけ |
 | 曜日指定 | 選択した1曜日以上だけ |
@@ -211,7 +211,7 @@ definition が持つ check-in と main を個別に cancel し、OS pending 一�
 
 ### オン
 
-repeat rule から先3周期を再計算し、新しい cycle ID と notification ID を発行する。過去になった「今日だけ」は再利用せず、新規作成を求める。
+repeat rule から先3周期を再計算し、新しい cycle ID と notification ID を発行する。過去になった「今日だけ」は再利用せず、新規作成を求める。一覧の行には元の日付と「終了」を表示（accessibility label も同じ）し、終了済みでオフの定義は Switch を無効にして、編集・オンで別の日付へ移せないようにする（`prepareAlarmEnable` / `describeTodayOnlyExpiry`）。自動で翌日へ繰り越さず、「Once」へ改名もしない。
 
 ### 削除
 
@@ -399,6 +399,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | REP-01 | 毎日 | 次の3日を計算 |
 | REP-02 | 金曜の平日設定 | 月・火・水を計算 |
 | REP-03 | 過去の今日だけ | 翌日へ繰り越さず拒否 |
+| REP-04 | 終了した今日だけをオンにする | 元の日付を保持して拒否。行と accessibility label に元の日付と「終了」を表示。繰り返しは変更なし（実機 VoiceOver 確認は未実施） |
 | MUL-01 | 2設定の片方を suppress | 他方の IDs は不変 |
 | MUL-02 | toggle off | 対象 definition の通知だけ解除 |
 | MUL-03 | delete | 対象 definition だけ削除 |

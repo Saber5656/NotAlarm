@@ -1,9 +1,11 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 
+import { makeAlarmRepeat } from '../src/alarmSchedule';
 import {
+  prepareAlarmEnable,
   replaceStoredCycle,
   updateMonitoringCycleStepCount,
 } from '../src/alarmDefinitionMutations';
@@ -225,4 +227,51 @@ test('saving an unknown cycle throws', () => {
       cycleId: 'missing',
     }),
   );
+});
+
+describe('prepareAlarmEnable', () => {
+  const created = new Date(2026, 9, 15, 6, 0).getTime();
+  const base = (repeat: StoredAlarmDefinition['repeat']): StoredAlarmDefinition => ({
+    id: 'a',
+    hour: 7,
+    minute: 0,
+    repeat,
+    enabled: false,
+    createdAtMs: created,
+    cycles: [],
+  });
+
+  test('expired today-only keeps its date and cannot be enabled', () => {
+    const def = base(makeAlarmRepeat('today', created));
+    const result = prepareAlarmEnable(def, new Date(2026, 9, 16, 5, 0).getTime());
+    assert.equal(result.ok, false);
+    assert.equal(def.repeat.dateKey, '2026-10-15');
+  });
+
+  test('same-day past time is rejected without rebinding', () => {
+    const def = base(makeAlarmRepeat('today', created));
+    const result = prepareAlarmEnable(def, new Date(2026, 9, 15, 8, 0).getTime());
+    assert.equal(result.ok, false);
+  });
+
+  test('future today-only keeps its original repeat object values', () => {
+    const def = base(makeAlarmRepeat('today', created));
+    const result = prepareAlarmEnable(def, created);
+    assert.ok(result.ok);
+    assert.equal(result.ok && result.definition.repeat.dateKey, '2026-10-15');
+  });
+
+  test('repeating alarms are unchanged', () => {
+    const def = base(makeAlarmRepeat('daily', created));
+    const result = prepareAlarmEnable(def, new Date(2026, 9, 20, 8, 0).getTime());
+    assert.ok(result.ok);
+    assert.deepEqual(result.ok && result.definition.repeat, def.repeat);
+  });
+
+  test('repeating alarms retain the minimum lead-time guard when enabled', () => {
+    const def = base(makeAlarmRepeat('daily', created));
+    const due = new Date(2026, 9, 15, 7, 0).getTime();
+    assert.equal(prepareAlarmEnable(def, due - 9_999).ok, false);
+    assert.equal(prepareAlarmEnable(def, due - 10_000).ok, true);
+  });
 });
