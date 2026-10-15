@@ -1,7 +1,6 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import type { StoredAlarmDefinition } from '../src/alarmStorage';
@@ -14,15 +13,15 @@ import {
   stampStorageResult,
   advanceStorageEpoch,
 } from '../src/storageResetGate';
+import { blockIn } from './support/source';
 
-const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+// Stop and snooze are owned by useRingingActions; the reset service and the
+// snooze service are built once in the platform gateways.
+const ACTIONS = 'src/app/useRingingActions.ts';
+const GATEWAYS = 'src/app/platform/gateways.ts';
 
-function block(start: string, end: string): string {
-  const from = app.indexOf(start);
-  assert.notEqual(from, -1, `missing ${start}`);
-  const to = app.indexOf(end, from + start.length);
-  assert.notEqual(to, -1, `missing ${end}`);
-  return app.slice(from, to);
+function block(file: string, start: string, end: string): string {
+  return blockIn(file, start, end);
 }
 
 function snapshot(): StoredAlarmDefinition[] {
@@ -130,28 +129,28 @@ test('without a snapshot the readback is best-effort: applied when it works, sil
 });
 
 test('App hands stop and snooze to the shared presenters, never reloading before the sound stops', () => {
-  const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
+  const snooze = block(ACTIONS, 'const snoozeRinging = useCallback', 'return { acknowledgeMissed');
   assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\), textRef\.current\)/);
   assert.doesNotMatch(snooze, /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/);
 
-  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  const stop = block(ACTIONS, 'const stopOccurrence = useCallback', 'const stopRinging');
   assert.match(stop, /presentStopped\(\s*result,/);
   assert.doesNotMatch(stop, /setCurrentAlarms\(await loadAlarmDefinitions\(\)\)/);
   // The presenters own the order: sound, snapshot, refill (tests/outcomeCodes.test.ts).
-  const effects = block('const outcomeEffects = useCallback', 'const stopOccurrence');
+  const effects = block(ACTIONS, 'const outcomeEffects = useCallback', 'const stopOccurrence');
   assert.match(effects, /stopSound: stopForegroundAlarmSound/);
   assert.match(effects, /apply: setCurrentAlarms/);
 });
 
 test('a failing refill after a persisted stop is not reported as a failed stop', () => {
-  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  const stop = block(ACTIONS, 'const stopOccurrence = useCallback', 'const stopRinging');
   // Only the service-level failure uses the stop-failure code.
   assert.match(stop, /getSnoozeCopy\.stopFailureCode\(result\.reason\)/);
   assert.doesNotMatch(stop, /停止処理に失敗しました/);
 });
 
 test('reset and recovery wiring covers the snooze service memory', () => {
-  const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
+  const reset = block(GATEWAYS, 'export const storageReset = createStorageResetService', 'installStorageResetGate');
   assert.match(reset, /snoozeService\.unsettledIds\(\)/);
   assert.match(reset, /snoozeService\.forgetUnsettled\(\)/);
 });

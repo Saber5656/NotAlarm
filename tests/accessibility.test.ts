@@ -4,12 +4,16 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test, { describe } from 'node:test';
 
+import { OWNER, sourcesUnder } from './support/source';
+
 // These are structural checks on the JSX source (the screens cannot be
 // rendered under tsx). They catch a control losing its role, label or large
 // text behavior; they are NOT a VoiceOver / TalkBack verification, which
 // stays pending on a device (docs/DEVICE_TEST.md).
 const FILES = [
-  'App.tsx',
+  // Every state screen of the home view (the former single App.tsx JSX).
+  ...sourcesUnder('src/ui/screens').filter((file) => file.endsWith('.tsx')),
+  OWNER.app,
   'src/ui/AlarmComposerModal.tsx',
   'src/ui/SettingsModal.tsx',
   'src/ui/NoticeBanner.tsx',
@@ -77,19 +81,22 @@ describe('controls', () => {
         }
       }
     }
-    const app = read('App.tsx');
-    assert.match(app, /accessibilityLabel=\{messages\.alarmList\.add\}/);
-    assert.match(app, /accessibilityLabel=\{messages\.settings\.openLabel\}/);
+    const header = read(OWNER.header);
+    assert.match(header, /accessibilityLabel=\{messages\.alarmList\.add\}/);
+    assert.match(header, /accessibilityLabel=\{messages\.settings\.openLabel\}/);
     assert.match(read('src/ui/NoticeBanner.tsx'), /accessibilityLabel=\{messages\.notice\.dismiss\}/);
     assert.match(read('src/ui/AlarmComposerModal.tsx'), /accessibilityLabel=\{messages\.composer\.close\}/);
   });
 
   test('the primary stop, add and confirm controls report their disabled and busy state', () => {
-    const app = read('App.tsx');
-    for (const label of ['messages.ringing.stopHint', 'messages.missed.acknowledgeAllHint']) {
-      const at = app.indexOf(label);
+    for (const [file, label] of [
+      [OWNER.ringingCard, 'messages.ringing.stopHint'],
+      [OWNER.missedCard, 'messages.missed.acknowledgeAllHint'],
+    ] as const) {
+      const card = read(file);
+      const at = card.indexOf(label);
       assert.notEqual(at, -1, label);
-      const tag = app.slice(at - 200, at + 600);
+      const tag = card.slice(at - 200, at + 600);
       assert.match(tag, /accessibilityState=\{\{ disabled: isBusy \}\}/, label);
     }
     const composer = read('src/ui/AlarmComposerModal.tsx');
@@ -103,17 +110,16 @@ describe('controls', () => {
   });
 
   test('the ringing stop control receives screen reader focus with a self-contained label', () => {
-    const app = read('App.tsx');
-    assert.match(app, /AccessibilityInfo\.setAccessibilityFocus\(handle\)/);
-    assert.match(app, /getRingingStopA11yLabel\(/);
+    assert.match(read(OWNER.accessibilityEdge), /AccessibilityInfo\.setAccessibilityFocus\(handle\)/);
+    assert.match(read(OWNER.ringingCard), /getRingingStopA11yLabel\(/);
   });
 });
 
 describe('status is not conveyed by color alone', () => {
   test('a warning schedule line gets a text marker and a spoken prefix', () => {
-    const app = read('App.tsx');
-    assert.match(app, /\{scheduleLineWarns \? '⚠ ' : ''\}/);
-    assert.match(app, /messages\.alarmList\.warningLabel/);
+    const list = read(OWNER.list);
+    assert.match(list, /\{scheduleLineWarns \? '⚠ ' : ''\}/);
+    assert.match(list, /messages\.alarmList\.warningLabel/);
   });
 
   test('notices announce their tone as a live region and carry a symbol', () => {
@@ -123,9 +129,9 @@ describe('status is not conveyed by color alone', () => {
   });
 
   test('on/off and ended states are written out in the row, not only styled', () => {
-    const app = read('App.tsx');
-    assert.match(app, /messages\.alarmList\.off/);
-    assert.match(app, /todayExpiry\.rowLabel/);
+    const list = read(OWNER.list);
+    assert.match(list, /messages\.alarmList\.off/);
+    assert.match(list, /todayExpiry\.rowLabel/);
   });
 });
 
@@ -171,25 +177,30 @@ describe('large text and small screens', () => {
   });
 
   test('the home screen scrolls at accessibility font sizes', () => {
-    const app = read('App.tsx');
     // The font-scale rule (above 1.3) lives in getScreenScrollPolicy.
-    assert.match(app, /const screenScroll = getScreenScrollPolicy\(\{[^}]*fontScale/);
-    assert.match(app, /useAccessibilityScroll=\{screenScroll\.scroll\}/);
+    assert.match(read(OWNER.app), /const screenScroll = getScreenScrollPolicy\(\{[^}]*fontScale/);
+    assert.match(read(OWNER.home), /useAccessibilityScroll=\{screenScroll\.scroll\}/);
     assert.match(read('src/screenScroll.ts'), /LARGE_TEXT_SCALE = 1\.3/);
   });
 
   test('rows that hold a title and an action wrap instead of overflowing', () => {
-    const app = read('App.tsx');
-    const header = app.slice(app.indexOf('deliveryWarningHeader: {'));
+    const delivery = read(OWNER.deliveryCard);
+    const header = delivery.slice(delivery.indexOf('deliveryWarningHeader: {'));
     assert.match(header.slice(0, 200), /flexWrap: 'wrap'/);
-    const progress = app.slice(app.indexOf('progressCopy: {'));
+    const next = read(OWNER.nextCard);
+    const progress = next.slice(next.indexOf('progressCopy: {'));
     assert.match(progress.slice(0, 200), /flexWrap: 'wrap'/);
   });
 
   test('touch targets are at least 44pt for the small text buttons', () => {
-    const app = read('App.tsx');
-    for (const name of ['settingsButton', 'deleteButton', 'resetButton']) {
-      const block = app.slice(app.indexOf(`  ${name}: {`));
+    for (const [file, name] of [
+      [OWNER.deliveryCard, 'settingsButton'],
+      [OWNER.list, 'deleteButton'],
+      [OWNER.loadFailedCard, 'resetButton'],
+    ] as const) {
+      const source = read(file);
+      assert.notEqual(source.indexOf(`  ${name}: {`), -1, `${file}: ${name}`);
+      const block = source.slice(source.indexOf(`  ${name}: {`));
       assert.match(block.slice(0, 120), /minHeight: 44/, name);
     }
   });
@@ -197,18 +208,20 @@ describe('large text and small screens', () => {
 
 describe('language and clock follow the device', () => {
   test('the app refreshes language and clock when it returns to the foreground', () => {
-    const app = read('App.tsx');
-    const at = app.indexOf('const refreshLocale = () => {');
+    const text = read(OWNER.deviceText);
+    const at = text.indexOf('const refreshLocale = () => {');
     assert.notEqual(at, -1);
-    const body = app.slice(at, at + 1200);
+    const body = text.slice(at, at + 1200);
     assert.match(body, /readDeviceLocaleSettings\(\)/);
     assert.match(body, /setNotificationMessages\(/);
-    assert.match(body, /AppState\.addEventListener\('change'/);
+    assert.match(body, /subscribeAppState\(/);
     assert.match(body, /state === 'active'/);
+    // The edge subscribes to the real app state change event.
+    assert.match(read('src/app/platform/appStateEdge.ts'), /AppState\.addEventListener\('change'/);
   });
 
   test('the whole screen reads text from one provider', () => {
-    assert.match(read('App.tsx'), /<I18nProvider value=\{text\}>/);
+    assert.match(read(OWNER.app), /<I18nProvider value=\{text\}>/);
   });
 
   test('time pickers follow the device clock preference', () => {
@@ -222,8 +235,8 @@ describe('language and clock follow the device', () => {
 
 describe('current editing, skip and sunrise controls carry their semantics', () => {
   test('the edit button is a named, hinted button that reports disabled', () => {
-    const app = read('App.tsx');
-    const button = app.slice(app.indexOf('accessibilityHint={messages.edit.editHint}'));
+    const list = read(OWNER.list);
+    const button = list.slice(list.indexOf('accessibilityHint={messages.edit.editHint}'));
     const props = button.slice(0, button.indexOf('style={styles.editButton}'));
     assert.match(props, /accessibilityLabel=\{messages\.edit\.editSpoken\(/);
     assert.match(props, /accessibilityRole="button"/);
@@ -231,9 +244,9 @@ describe('current editing, skip and sunrise controls carry their semantics', () 
   });
 
   test('the skip button is a labelled, hinted button outside the warning card', () => {
-    const app = read('App.tsx');
-    const at = app.indexOf('const skipAction = skipOffer');
-    const props = app.slice(at, app.indexOf('testID="skip-this-occurrence"', at));
+    const skip = read(OWNER.skipButton);
+    const at = skip.indexOf('<Pressable');
+    const props = skip.slice(at, skip.indexOf('testID="skip-this-occurrence"', at));
     assert.match(props, /accessibilityHint=\{messages\.skip\.hint\}/);
     assert.match(props, /accessibilityLabel=\{messages\.skip\.spoken\(/);
     assert.match(props, /accessibilityRole="button"/);
@@ -263,9 +276,9 @@ describe('current editing, skip and sunrise controls carry their semantics', () 
   });
 
   test('the load-failure card shows the message in the current language', () => {
-    const app = read('App.tsx');
-    const at = app.indexOf('{loadFailureCode ? (');
-    const card = app.slice(at, app.indexOf('common.errorCode', at));
+    const source = read(OWNER.loadFailedCard);
+    const at = source.indexOf('{loadFailureCode ? (');
+    const card = source.slice(at, source.indexOf('common.errorCode', at));
     assert.match(card, /messages\.errors\[loadFailureCode\]\.message/);
     assert.doesNotMatch(card, /describeErrorCode\(/);
   });

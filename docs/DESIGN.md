@@ -390,7 +390,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | 上記のうち期限を過ぎた監視周期（1秒 tick で `ringing` へ移る直前） | する（移行前に画面が消えてアプリが止まるのを防ぐ） |
 | オンの監視周期が24時間より先だけ、オフの定義だけ、停止済み（`suppressed` / `dismissed`）周期だけ、アラームなし | しない（端末の自動ロック設定に従う） |
 
-ライフサイクル（`App.tsx`）:
+ライフサイクル（`src/app/useBedsideAwake.ts`、native 呼び出しは `src/app/platform/keepAwakeEdge.ts`）:
 
 - 条件が true かつアプリが前面にある間だけ `activateKeepAwakeAsync('already-up/bedside')` を呼び、条件が false になった時・前面でなくなった時・unmount 時に同じ tag で `deactivateKeepAwake` を呼ぶ。他の keep-awake 利用（Expo の開発用 tag など）とは tag で分離する。
 - 開発モード（`expo start` の dev bundle）では、Expo の `registerRootComponent` が `withDevTools` 経由で `useKeepAwake(ExpoKeepAwakeTag)` をセッション全体で有効にする。tag が別なので bedside の解除はこれを解除せず、上の条件に関係なく画面は消えない。条件どおりの動作は production の JS bundle（`npx expo start --no-dev --minify` を Expo Go で読み込む）でだけ確認できる（BED-05）。
@@ -430,7 +430,7 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 
 ### 11.4 設定・データとプライバシー（Issue #21、2026-10-15）
 
-**設計ターゲット（実装前に確定）。** 新しい外観や素材は作らない。視覚の基準は既存の `App.tsx` のヘッダー行、`AlarmComposerModal` の sheet（`modalRoot` の薄い暗幕、白い角丸 sheet、見出し＋閉じる行、`GlassSurface` の丸い閉じるボタン）、`GlassSurface` とする。Product Design の get-context は親が事前実行済みで、本変更はその結果（既存デザインを守る）に従う。このセッションで公式 skill を別途実行してはおらず、新規の画像・ブランド・アイコン素材も生成していない。
+**設計ターゲット（実装前に確定）。** 新しい外観や素材は作らない。視覚の基準は既存のホーム画面（旧 `App.tsx`、現 `src/ui/screens/HomeHeader.tsx`）のヘッダー行、`AlarmComposerModal` の sheet（`modalRoot` の薄い暗幕、白い角丸 sheet、見出し＋閉じる行、`GlassSurface` の丸い閉じるボタン）、`GlassSurface` とする。Product Design の get-context は親が事前実行済みで、本変更はその結果（既存デザインを守る）に従う。このセッションで公式 skill を別途実行してはおらず、新規の画像・ブランド・アイコン素材も生成していない。
 
 **選定した案。**
 
@@ -640,4 +640,4 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 - 次の場合は固定に戻し、短く理由を示す: 権限の取り消し、端末timezoneの変更、保存データの不正・未知の地域、timezoneを確定できない、白夜・極夜。
 - 結果は地点＋暦日ごとに最大4件だけ保持し、日付変更・前面復帰で再計算する。タイマーによる位置取得はしない。
 
-**統合済み。** `App.tsx` が `useSunBackground(nowMs, sunStorageCoordination)` を無条件に呼び、`getCircadianTheme(new Date(nowMs), sun.schedule)` へ渡す。`SunriseSettings` は共通 `SettingsModal` の本文に置く。保存はアラームと同じ排他制御と `assertNoPendingReset` の内側で行い、削除確定時に `beginDeletion()` で取得中の位置問い合わせ・読み込み・保存を同期的に無効化する。完了で `completeDeletion()`、失敗で `failDeletion()`（設定と許可操作は再実行まで無効）。計算の検証は USNO API の取得値（`tests/sunSchedule.test.ts` 内のURLと座標・日付・UTCオフセット）を基準にする。物理端末での位置情報許可・取得は未確認。
+**統合済み。** `src/app/useAlarmController.ts` が `useSunBackground(nowMs, sunStorageCoordination)` を無条件に呼び、`getCircadianTheme(new Date(nowMs), sun.schedule)` へ渡す。`SunriseSettings` は共通 `SettingsModal` の本文に置く。保存はアラームと同じ排他制御と `assertNoPendingReset` の内側で行い、削除確定時に `beginDeletion()` で取得中の位置問い合わせ・読み込み・保存を同期的に無効化する。完了で `completeDeletion()`、失敗で `failDeletion()`（設定と許可操作は再実行まで無効）。計算の検証は USNO API の取得値（`tests/sunSchedule.test.ts` 内のURLと座標・日付・UTCオフセット）を基準にする。物理端末での位置情報許可・取得は未確認。
