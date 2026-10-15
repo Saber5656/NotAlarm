@@ -37,6 +37,24 @@ export function getUserSkipOffer(
   return buildUserSkipTarget(cycle);
 }
 
+/**
+ * The exact target the dialog confirms: looked up by the offered cycle id and
+ * re-checked against the window at tap time, never retargeted.
+ */
+export function captureUserSkipTarget(
+  cycles: readonly StoredAlarm[],
+  offeredCycleId: string | undefined,
+  nowMs: number,
+): UserSkipTarget | null {
+  if (offeredCycleId === undefined) {
+    return null;
+  }
+  return getUserSkipOffer(
+    cycles.find((cycle) => cycle.cycleId === offeredCycleId) ?? null,
+    nowMs,
+  );
+}
+
 export const USER_SKIP_LABEL = '今回分だけ止める';
 
 export function describeUserSkipConfirmation(
@@ -53,3 +71,9 @@ export function describeUserSkipConfirmation(
     cancelLabel: 'キャンセル',
   };
 }
+
+// Neutral about later days: a today-only alarm has none.
+export const USER_SKIP_DONE_NOTICE =
+  'この回だけ止めました。繰り返しの設定は変わりません。';
+export const USER_SKIP_HINT =
+  'この回だけ止めます。繰り返しの設定は変わりません。アラーム全体を止めるには一覧のスイッチを使います';
