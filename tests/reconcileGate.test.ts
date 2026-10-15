@@ -46,6 +46,13 @@ const result = (overrides: Partial<ScheduleReconcileResult> = {}): ScheduleRecon
 });
 
 describe('assessReconciledState: refill only from a fresh, verified state', () => {
+  test('an orphan whose cancellation is unconfirmed blocks the refill', () => {
+    const gate = assessReconciledState(result({ pendingOrphanIds: ['orphan-1'] }), known);
+    assert.equal(gate.safeToRefill, false);
+    assert.equal(gate.reason, 'orphans_pending');
+    assert.equal(gate.freshness, 'fresh');
+  });
+
   test('an unreadable orphan journal blocks the refill', () => {
     const gate = assessReconciledState(result({ orphansUnreadable: true }), known);
     assert.equal(gate.safeToRefill, false);

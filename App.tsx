@@ -602,6 +602,7 @@ async function reconcileScheduleWithQueueOnce(
         aborted: false,
         queueVerified: done?.queueKnown ?? false,
         orphansUnreadable: done?.orphansUnreadable ?? false,
+        pendingOrphanIds: done?.pendingOrphanIds ?? [],
       };
     });
   } catch (error) {

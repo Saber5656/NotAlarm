@@ -17,6 +17,8 @@ export interface ScheduleReconcileResult {
   queueVerified: boolean;
   /** The orphan journal could not be read, so leftover ids are unknown. */
   orphansUnreadable: boolean;
+  /** Scheduled ids still pending in the OS: cancellation is unconfirmed. */
+  pendingOrphanIds?: string[];
 }
 
 export type RefillBlockReason =
@@ -26,6 +28,7 @@ export type RefillBlockReason =
   | 'unrecovered_notifications'
   | 'queue_unverified'
   | 'orphans_unreadable'
+  | 'orphans_pending'
   | 'cancellation_pending'
   | 'storage_reset';
 
@@ -104,6 +107,9 @@ export function assessReconciledState(
   }
   if (result.orphansUnreadable) {
     return block('orphans_unreadable');
+  }
+  if ((result.pendingOrphanIds ?? []).length > 0) {
+    return block('orphans_pending');
   }
   if (!result.queueVerified) {
     return block('queue_unverified');
