@@ -19,7 +19,7 @@ type Env = Record<string, string | undefined>;
 
 const IOS_BUNDLE_ID = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
 const ANDROID_PACKAGE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
-const PLACEHOLDER_HOST = /(^|\.)(example\.(com|org|net)|localhost|invalid|test)$/i;
+const PLACEHOLDER_HOST = /(^|\.)(example(\.(com|org|net))?|localhost|invalid|test)$/;
 
 function required(env: Env, key: string): string {
   const value = env[key]?.trim();
@@ -48,7 +48,12 @@ function publicUrl(env: Env, key: string): string {
   } catch {
     throw new Error(`${key} must be an https URL.`);
   }
-  if (url.protocol !== 'https:' || PLACEHOLDER_HOST.test(url.hostname)) {
+  // Normalize case and the trailing root dot ("example.com.") before matching.
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+  if (url.username || url.password) {
+    throw new Error(`${key} must not contain credentials (the value is published in the public app config).`);
+  }
+  if (url.protocol !== 'https:' || PLACEHOLDER_HOST.test(host)) {
     throw new Error(`${key} must be a well-formed https URL with a non-placeholder host (format check only; reachability is not verified).`);
   }
   return value;
