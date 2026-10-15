@@ -58,6 +58,21 @@ export function getMissedCycles(
     .sort((left, right) => left.dueAtMs - right.dueAtMs);
 }
 
+export const MISSED_PREVIEW_LIMIT = 3;
+
+/** Compact preview of the (oldest-first) missed list; total is never reduced. */
+export function getMissedPreview<T>(
+  missed: readonly T[],
+  limit: number = MISSED_PREVIEW_LIMIT,
+): { visible: T[]; hiddenCount: number; total: number } {
+  const visible = missed.slice(0, Math.max(0, limit));
+  return {
+    visible,
+    hiddenCount: missed.length - visible.length,
+    total: missed.length,
+  };
+}
+
 /** Marks only the listed missed cycles handled; nothing else changes. */
 export function acknowledgeMissedCycles(
   alarms: readonly StoredAlarmDefinition[],
