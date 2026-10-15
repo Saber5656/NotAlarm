@@ -11,6 +11,7 @@ import {
   localDateKey,
   type AlarmRepeat,
 } from './alarmSchedule';
+import { type ClassificationSource, classifyOverdueCycles } from './missedAlarms';
 
 export const ACTIVE_ALARM_STORAGE_KEY = 'already-up/active-alarm/v1';
 export const ALARM_DEFINITIONS_STORAGE_KEY = 'already-up/alarm-definitions/v2';
@@ -31,6 +32,8 @@ export type AlarmPhase =
   | 'step_candidate'
   | 'suppressed'
   | 'ringing'
+  /** Overdue past the recovery window; silent until acknowledged. */
+  | 'missed'
   | 'dismissed';
 
 export interface StoredAlarm {
@@ -256,17 +259,10 @@ export async function saveMonitoringCycleStepCount(
 
 export function markDueCyclesRinging(
   nowMs: number,
+  source: ClassificationSource = 'resume',
 ): Promise<StoredAlarmDefinition[]> {
   return mutateAlarmDefinitions((alarms) =>
-    alarms.map((alarm) => ({
-      ...alarm,
-      cycles: alarm.cycles.map((cycle) =>
-        (cycle.phase === 'armed' || cycle.phase === 'step_candidate') &&
-        cycle.dueAtMs <= nowMs
-          ? { ...cycle, phase: 'ringing' as const }
-          : cycle,
-      ),
-    })),
+    classifyOverdueCycles(alarms, nowMs, source),
   );
 }
 
@@ -410,7 +406,7 @@ function isStoredAlarm(value: unknown, expectedAlarmId: string): value is Stored
     typeof alarm.dueAtMs === 'number' &&
     Number.isFinite(alarm.dueAtMs) &&
     typeof alarm.phase === 'string' &&
-    ['armed', 'step_candidate', 'suppressed', 'ringing', 'dismissed'].includes(
+    ['armed', 'step_candidate', 'suppressed', 'ringing', 'missed', 'dismissed'].includes(
       alarm.phase,
     ) &&
     typeof alarm.stepCount === 'number' &&
@@ -475,7 +471,7 @@ function isLegacyStoredAlarm(
     typeof alarm.dueAtMs === 'number' &&
     Number.isFinite(alarm.dueAtMs) &&
     typeof alarm.phase === 'string' &&
-    ['armed', 'step_candidate', 'suppressed', 'ringing', 'dismissed'].includes(
+    ['armed', 'step_candidate', 'suppressed', 'ringing', 'missed', 'dismissed'].includes(
       alarm.phase,
     ) &&
     typeof alarm.stepCount === 'number' &&
