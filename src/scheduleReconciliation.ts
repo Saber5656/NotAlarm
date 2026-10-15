@@ -2,7 +2,11 @@ import {
   scheduleAlarmNotificationsFailSafe,
   type AlarmSchedulingGateway,
 } from './alarmOrchestrator';
-import { CHECK_IN_KIND, MAIN_ALARM_KIND } from './alarmContracts';
+import {
+  CHECK_IN_KIND,
+  MAIN_ALARM_KIND,
+  type AlarmNotificationData,
+} from './alarmContracts';
 import { getSnoozeIds } from './snooze';
 import { getCheckInAtMs } from './alarmPolicy';
 import {
@@ -48,6 +52,10 @@ import {
  * any id that cannot be cancelled is handed to the orphan store.
  * suppressed / dismissed / ringing / snoozed occurrences are never rescheduled, and no
  * old occurrence is cancelled once its due time has been reached.
+ * Every id that was scheduled but could not be verified or kept is cancelled
+ * by its exact id; when that is not confirmed it stays in the orphan journal
+ * (with the exact payload for ids that predate the owner marker) and is
+ * reported as pending, which blocks any refill until it is gone.
  */
 
 export type { QueueInspection } from './queueInspection';
@@ -67,11 +75,26 @@ export interface ReconcileGateway extends AlarmSchedulingGateway {
   cancelScheduled(notificationId: string): Promise<void>;
 }
 
+/**
+ * The identity a journaled id was scheduled with. It lets a notification from
+ * before the owner marker (which cannot be told from a look-alike by shape
+ * alone) still be cancelled by its exact id while its content matches.
+ */
+export type OrphanExpectation = Pick<
+  AlarmNotificationData,
+  'kind' | 'alarmId' | 'cycleId' | 'mainAlarmId'
+> & { alarmId: string };
+
 /** Durable record of scheduled ids that could not be cancelled or saved. */
 export interface OrphanStore {
   load(): Promise<string[]>;
-  add(ids: string[]): Promise<void>;
+  add(
+    ids: string[],
+    exact?: Record<string, OrphanExpectation>,
+  ): Promise<void>;
   remove(ids: string[]): Promise<void>;
+  /** Exact payloads recorded with journaled ids (absent for older journals). */
+  loadExact?(): Promise<Record<string, OrphanExpectation>>;
 }
 
 export interface ReconcileInput {
@@ -97,6 +120,8 @@ export interface ReconcileOutcome {
   queueKnown: boolean;
   /** The orphan journal could not be read: nothing was changed. */
   orphansUnreadable: boolean;
+  /** Scheduled ids still pending in the OS whose cancellation is unconfirmed. */
+  pendingOrphanIds: string[];
 }
 
 export async function reconcileAlarmSchedules(
@@ -164,6 +189,7 @@ class Run {
       replanned: this.replanned,
       queueKnown: this.queue !== null,
       orphansUnreadable: this.orphansUnreadable,
+      pendingOrphanIds: [...this.pendingOrphans],
     };
   }
 
@@ -174,6 +200,7 @@ class Run {
 
   /** False when the queue cannot be read: nothing can then be confirmed. */
   private orphansUnreadable = false;
+  private readonly pendingOrphans = new Set<string>();
 
   private async refreshQueue(): Promise<boolean> {
     try {
@@ -193,8 +220,10 @@ class Run {
       return;
     }
     let ids: string[];
+    let exact: Record<string, OrphanExpectation> = {};
     try {
       ids = await orphans.load();
+      exact = (await orphans.loadExact?.()) ?? {};
     } catch {
       // Unknown ids may still be scheduled: change nothing this pass.
       this.orphansUnreadable = true;
@@ -205,31 +234,45 @@ class Run {
     // never cancelled here, only dropped from tracking.
     const live = this.liveIds();
     const settled: string[] = [];
-    let cancelledAny = false;
+    const cancelled: string[] = [];
     for (const id of ids) {
       if (live.has(id)) {
         settled.push(id);
         continue;
       }
       const entry = this.queue.get(id);
-      if (!entry || !isMarkedOwned(entry.owned)) {
-        // Gone, or not provably ours (foreign or unmarked look-alike).
+      if (!entry) {
+        settled.push(id); // confirmed absent
+        continue;
+      }
+      const record = exact[id];
+      const ours =
+        isMarkedOwned(entry.owned) || (!!record && isOwnPayload(entry, record));
+      if (!ours) {
+        // Not provably ours (foreign, or an unmarked look-alike): released.
         settled.push(id);
         continue;
       }
       try {
         await gateway.cancelScheduled(id);
-        settled.push(id);
-        cancelledAny = true;
+        cancelled.push(id);
       } catch {
-        // Keep tracking it; the next pass retries.
+        this.pendingOrphans.add(id); // keep tracking it; the next pass retries
+      }
+    }
+    if (cancelled.length > 0) {
+      const known = await this.refreshQueue();
+      for (const id of cancelled) {
+        // Settled only once the OS confirms it is gone.
+        if (known && !this.queue!.get(id)) {
+          settled.push(id);
+        } else {
+          this.pendingOrphans.add(id);
+        }
       }
     }
     if (settled.length > 0) {
       await orphans.remove(settled).catch(() => undefined);
-    }
-    if (cancelledAny) {
-      await this.refreshQueue();
     }
   }
 
@@ -254,6 +297,52 @@ class Run {
   private async untrack(ids: readonly string[]): Promise<void> {
     if (ids.length > 0) {
       await this.input.orphans?.remove([...ids]).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Cancels ids that were scheduled but are not kept (unverified, duplicate).
+   * They are journaled first, so a crash or failed cancel leaves them tracked
+   * and reported as pending; only a cancel that went through untracks them.
+   * Throws only when ids are neither cancelled nor durably tracked.
+   */
+  private async discardScheduled(
+    ids: readonly string[],
+    exact?: Record<string, OrphanExpectation>,
+  ): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const { orphans } = this.input;
+    let tracked = true;
+    try {
+      await orphans?.add([...ids], exact);
+      tracked = orphans !== undefined;
+    } catch {
+      tracked = false;
+    }
+    const failures: ScheduledNotificationRollbackFailure[] = [];
+    const cancelled: string[] = [];
+    for (const notificationId of ids) {
+      try {
+        await this.cancelConfirmed(notificationId);
+        cancelled.push(notificationId);
+        this.pendingOrphans.delete(notificationId);
+      } catch (error) {
+        this.pendingOrphans.add(notificationId);
+        failures.push({
+          notificationId,
+          message: messageOf(error, '予約済み通知を解除できませんでした。'),
+        });
+      }
+    }
+    if (tracked) {
+      await this.untrack(cancelled);
+    } else if (failures.length > 0) {
+      throw new ScheduledNotificationRollbackError(
+        new Error('unconfirmed notification was not tracked'),
+        failures,
+      );
     }
   }
 
@@ -315,15 +404,33 @@ class Run {
     id: string,
     expected: QueueExpectation,
   ): Promise<'cancelled' | 'absent' | 'foreign'> {
-    const entry = this.queue?.get(id);
+    if (!this.queue) {
+      throw new Error('queue unreadable: cannot tell whether the id is held');
+    }
+    const entry = this.queue.get(id);
     if (!entry) {
       return 'absent';
     }
     if (!isOwnPayload(entry, expected)) {
       return 'foreign';
     }
-    await this.input.gateway.cancelScheduled(id);
+    await this.cancelConfirmed(id);
     return 'cancelled';
+  }
+
+  /**
+   * The native cancel resolves without saying whether the OS dropped the
+   * request, so a cancel only counts once a fresh queue read no longer holds
+   * the id. Throws when it is still queued or the queue cannot be read.
+   */
+  private async cancelConfirmed(id: string): Promise<void> {
+    await this.input.gateway.cancelScheduled(id);
+    if (!(await this.refreshQueue())) {
+      throw new Error('cancellation could not be confirmed: queue unreadable');
+    }
+    if (this.queue!.get(id)) {
+      throw new Error('cancellation was not applied: the id is still queued');
+    }
   }
 
   private async save(
@@ -336,8 +443,9 @@ class Run {
       const failures: ScheduledNotificationRollbackFailure[] = [];
       for (const notificationId of scheduledIds) {
         try {
-          await this.input.gateway.cancelScheduled(notificationId);
+          await this.cancelConfirmed(notificationId);
         } catch (cancelError) {
+          this.pendingOrphans.add(notificationId);
           failures.push({
             notificationId,
             message: messageOf(
@@ -528,7 +636,10 @@ class Run {
     if (adoptable.length > 0) {
       mainAlarmId = adoptable[0].id;
       adopted = true;
-      if (adoptable.length > 1) {
+      // Every other copy of this occurrence would ring again: remove it now.
+      const extras = adoptable.slice(1).map((entry) => entry.id);
+      await this.discardScheduled(extras);
+      if (extras.some((id) => this.pendingOrphans.has(id))) {
         this.mark(alarmId, 'duplicated');
       }
     } else {
@@ -566,11 +677,8 @@ class Run {
           this.mainExpectation(cycle, mainAlarmId),
         );
         if (confirmed !== 'present') {
-          if (confirmed === 'off_schedule') {
-            await this.cancelOwned(
-              mainAlarmId,
-              this.mainExpectation(cycle, mainAlarmId),
-            ).catch(() => undefined);
+          if (confirmed !== 'absent' && confirmed !== 'foreign') {
+            await this.discardScheduled([mainAlarmId]);
           }
           this.issues.push({
             kind: 'main_schedule_failed',
@@ -599,12 +707,20 @@ class Run {
 
     // The old check-in names the old main, so confirming through it would be
     // rejected. Cancel that exact id (only if it is still ours); a failure is
-    // harmless for the same reason.
+    // journaled and reported pending.
     if (cycle.checkInNotificationId) {
-      await this.cancelOwned(
-        cycle.checkInNotificationId,
-        this.checkInExpectation(cycle, cycle.checkInNotificationId),
-      ).catch(() => undefined);
+      try {
+        await this.cancelOwned(
+          cycle.checkInNotificationId,
+          this.checkInExpectation(cycle, cycle.checkInNotificationId),
+        );
+      } catch {
+        // The relink below drops it from the cycle: keep it tracked and pending.
+        this.pendingOrphans.add(cycle.checkInNotificationId);
+        await this.input.orphans
+          ?.add([cycle.checkInNotificationId], this.exactRecords(cycle))
+          .catch(() => undefined);
+      }
     }
     const relinked: StoredAlarm = {
       ...cycle,
@@ -646,8 +762,9 @@ class Run {
         return;
       }
       try {
-        await this.input.gateway.cancelScheduled(mainAlarmId);
+        await this.cancelConfirmed(mainAlarmId);
       } catch {
+        this.pendingOrphans.add(mainAlarmId);
         await orphans?.add([mainAlarmId]).catch(() => undefined);
       }
     };
@@ -658,7 +775,7 @@ class Run {
       return;
     }
     try {
-      await orphans?.add(oldIds);
+      await orphans?.add(oldIds, this.exactRecords(cycle));
     } catch {
       await dropNew();
       this.mark(alarmId, 'unverified');
@@ -684,27 +801,52 @@ class Run {
     this.repaired += 1;
     this.mark(alarmId, 'repaired');
     const settled: string[] = [];
-    if (this.input.nowMs() < cycle.dueAtMs) {
-      const olds: Array<[string, QueueExpectation]> = [];
-      if (cycle.checkInNotificationId) {
-        olds.push([
-          cycle.checkInNotificationId,
-          this.checkInExpectation(cycle, cycle.checkInNotificationId),
-        ]);
+    const olds: Array<[string, QueueExpectation]> = [];
+    if (cycle.checkInNotificationId) {
+      olds.push([
+        cycle.checkInNotificationId,
+        this.checkInExpectation(cycle, cycle.checkInNotificationId),
+      ]);
+    }
+    olds.push([cycle.mainAlarmId, this.mainExpectation(cycle)]);
+    for (const [id, expected] of olds) {
+      // Each awaited cancel/read can cross the deadline. Keep that exact id
+      // journaled once it is due; a previous clock read cannot authorize it.
+      if (this.input.nowMs() >= cycle.dueAtMs) {
+        this.pendingOrphans.add(id);
+        continue;
       }
-      olds.push([cycle.mainAlarmId, this.mainExpectation(cycle)]);
-      for (const [id, expected] of olds) {
-        try {
-          await this.cancelOwned(id, expected);
-          settled.push(id);
-        } catch {
-          // Stays tracked; the next pass retries.
-        }
+      try {
+        await this.cancelOwned(id, expected);
+        settled.push(id);
+      } catch {
+        // Stays tracked and pending; the next pass retries.
+        this.pendingOrphans.add(id);
       }
     }
     await this.untrack(settled);
     await this.refreshQueue();
     await this.repairCheckIn(alarmId, relinked, mainAlarmId, false);
+  }
+
+  /** Exact payloads of a cycle's stored ids, for ids from before the marker. */
+  private exactRecords(cycle: StoredAlarm): Record<string, OrphanExpectation> {
+    const records: Record<string, OrphanExpectation> = {
+      [cycle.mainAlarmId]: {
+        kind: MAIN_ALARM_KIND,
+        alarmId: cycle.alarmId,
+        cycleId: cycle.cycleId,
+      },
+    };
+    if (cycle.checkInNotificationId) {
+      records[cycle.checkInNotificationId] = {
+        kind: CHECK_IN_KIND,
+        alarmId: cycle.alarmId,
+        cycleId: cycle.cycleId,
+        mainAlarmId: cycle.mainAlarmId,
+      };
+    }
+    return records;
   }
 
   /** The stale check-in is ours and useless once its main is gone. */
@@ -713,13 +855,10 @@ class Run {
       return;
     }
     try {
-      const result = await this.cancelOwned(
+      await this.cancelOwned(
         cycle.checkInNotificationId,
         this.checkInExpectation(cycle, cycle.checkInNotificationId),
       );
-      if (result === 'cancelled') {
-        await this.refreshQueue();
-      }
     } catch {
       // Still occupying its slot: the room check below decides.
     }
@@ -756,6 +895,11 @@ class Run {
     if (adoptable.length > 0) {
       checkInNotificationId = adoptable[0].id;
       adopted = true;
+      const extras = adoptable.slice(1).map((entry) => entry.id);
+      await this.discardScheduled(extras);
+      if (extras.some((id) => this.pendingOrphans.has(id))) {
+        this.mark(alarmId, 'duplicated');
+      }
     } else {
       if (!this.queue.hasRoomFor(1)) {
         this.mark(alarmId, 'capacity_full');
@@ -786,6 +930,9 @@ class Run {
           this.checkInExpectation(cycle, checkInNotificationId, mainAlarmId),
         );
         if (confirmed !== 'present') {
+          if (confirmed !== 'absent' && confirmed !== 'foreign') {
+            await this.discardScheduled([checkInNotificationId]);
+          }
           this.mark(alarmId, replacingId ? 'unverified' : 'check_in_missing');
           return;
         }
@@ -795,7 +942,7 @@ class Run {
     }
     if (replacingId) {
       try {
-        await this.input.orphans?.add([replacingId]);
+        await this.input.orphans?.add([replacingId], this.exactRecords(cycle));
       } catch {
         this.mark(alarmId, 'unverified');
         return;
@@ -823,7 +970,8 @@ class Run {
         );
         await this.untrack([replacingId]);
       } catch {
-        // Stays tracked; the next pass retries.
+        // Stays tracked and pending; the next pass retries.
+        this.pendingOrphans.add(replacingId);
       }
       await this.refreshQueue();
     }
@@ -932,6 +1080,7 @@ class Run {
     }
     const cycleId = (this.input.makeCycleId ?? defaultCycleId)();
     const armedAtMs = this.input.nowMs();
+    // Captured before the registration await, with the slot's own plan.
     let created: StoredAlarm;
     try {
       const scheduled = await scheduleAlarmNotificationsFailSafe(
@@ -990,6 +1139,21 @@ class Run {
     if (!(await this.refreshQueue())) {
       this.mark(alarmId, 'unverified');
       return 'stop';
+    }
+    // The OS may have dropped the check-in while keeping the main: repair it
+    // in this pass, or leave the alarm honestly reported as missing it.
+    if (created.checkInNotificationId) {
+      const checkIn = this.queue!.match(
+        this.checkInExpectation(created, created.checkInNotificationId),
+      );
+      if (checkIn === 'absent') {
+        await this.repairCheckIn(alarmId, created, created.mainAlarmId, false);
+        if (!this.queue) {
+          return 'stop';
+        }
+      } else if (checkIn !== 'present') {
+        this.mark(alarmId, 'unverified');
+      }
     }
     return created.cycleId;
   }
@@ -1160,6 +1324,8 @@ export interface ReconcileSummaryInput {
   unrecoveredNotificationIds?: readonly string[];
   /** The orphan journal could not be read, so leftover ids are unknown. */
   orphansUnreadable?: boolean;
+  /** Scheduled ids still pending in the OS: cancellation is unconfirmed. */
+  pendingOrphanIds?: readonly string[];
   /** False when the OS queue was not read; omitted means not reported. */
   queueVerified?: boolean;
 }
@@ -1200,6 +1366,16 @@ export function summarizeReconciliation(
       notice: {
         tone: 'danger',
         text: '解除できていない通知の記録を読めないため、新しい予約の追加を止めています。アラームの状態を確認してください。',
+      },
+    };
+  }
+  if ((input.pendingOrphanIds ?? []).length > 0) {
+    problemKeys.push('queue_orphans_pending');
+    return {
+      problemKeys,
+      notice: {
+        tone: 'danger',
+        text: '解除できていない通知が端末に残っています。同じアラームが重複して鳴る可能性があるため、新しい予約の追加を止めています。次回の起動時に解除を再試行します。',
       },
     };
   }

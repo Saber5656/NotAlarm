@@ -398,6 +398,29 @@ test("keeps the orphan journal while an orphan cancellation is unconfirmed", asy
   assert.equal(store.removed.includes(ORPHANED_NOTIFICATIONS_KEY), false);
 });
 
+test("a journal carrying exact records is still cleared with its ids cancelled", async () => {
+  const store = makeStore({
+    ...corrupt,
+    [ORPHANED_NOTIFICATIONS_KEY]: JSON.stringify({
+      version: 1,
+      ids: ["legacy-old"],
+      exact: { "legacy-old": { kind: "main_alarm", alarmId: "a1", cycleId: "c" } },
+    }),
+  });
+  const legacy: ScheduledNotificationSnapshot = {
+    identifier: "legacy-old",
+    content: {
+      title: "x",
+      categoryIdentifier: null,
+      data: { kind: "main_alarm", alarmId: "a1", cycleId: "c" },
+    },
+  };
+  const { gateway, cancelled } = makeGateway([legacy, foreign("host-1")]);
+  await service(store, gateway).reset();
+  assert.deepEqual(cancelled, ["legacy-old"]);
+  assert.equal(store.data.has(ORPHANED_NOTIFICATIONS_KEY), false);
+});
+
 test("a valid orphan journal's exact id cancels this app's legacy unmarked main", async () => {
   const store = makeStore({
     ...corrupt,

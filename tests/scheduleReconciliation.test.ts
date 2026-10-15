@@ -21,6 +21,7 @@ import {
   reconcileAlarmSchedules,
   recoverAbortedReconciliation,
   summarizeReconciliation,
+  type OrphanExpectation,
   type OrphanStore,
   type ReconcileGateway,
 } from '../src/scheduleReconciliation';
@@ -85,10 +86,30 @@ class FakeOs {
   /** iOS shape: the absolute fire time is not exposed. */
   relativeTriggers = false;
   failCancel = new Set<string>();
+  failCancelWhen: ((id: string) => boolean) | null = null;
+  /** Native contract: cancel resolves, yet the entry may stay queued. */
+  silentCancel = new Set<string>();
+  /** After any cancel the queue can no longer be read. */
+  unreadableAfterCancel = false;
+  /** The OS silently omits new check-ins (all, or the next N). */
+  dropAllCheckIns = false;
+  dropNextCheckIns = 0;
+  /** New entries whose id starts with prefix are pending `ms` off schedule. */
+  shift: { prefix: string; ms: number } | null = null;
   cancelled: string[] = [];
   private foreignCount = 0;
 
   add(entry: OsEntry): void {
+    if (entry.id.startsWith('new-checkin')) {
+      if (this.dropAllCheckIns) return;
+      if (this.dropNextCheckIns > 0) {
+        this.dropNextCheckIns -= 1;
+        return;
+      }
+    }
+    if (this.shift && entry.id.startsWith(this.shift.prefix)) {
+      entry = { ...entry, atMs: entry.atMs + this.shift.ms };
+    }
     if (this.dropNextSchedules > 0 && entry.id.startsWith('new-')) {
       this.dropNextSchedules -= 1;
       return;
@@ -162,12 +183,17 @@ function harness(
     failCheckpointCall?: number;
     now?: { value: number };
     onSchedule?: () => void;
+    onCancel?: (id: string) => void;
     orphansFail?: boolean;
+    orphansExact?: Record<string, OrphanExpectation>;
   } = {},
 ) {
   const calls: string[] = [];
   const saved: StoredAlarmDefinition[][] = [];
   const orphanIds = new Set<string>();
+  const orphanExact: Record<string, OrphanExpectation> = {
+    ...(options.orphansExact ?? {}),
+  };
   let mainCalls = 0;
   let checkpoints = 0;
   const gateway: ReconcileGateway = {
@@ -203,9 +229,12 @@ function harness(
     },
     async cancelScheduled(id) {
       calls.push(`cancel:${id}`);
-      if (os.failCancel.has(id)) throw new Error(`cannot cancel ${id}`);
+      if (os.failCancel.has(id) || os.failCancelWhen?.(id)) throw new Error(`cannot cancel ${id}`);
+      if (os.unreadableAfterCancel) os.unreadable = true;
+      if (os.silentCancel.has(id)) return;
       os.entries.delete(id);
       os.cancelled.push(id);
+      options.onCancel?.(id);
     },
   };
   const orphans: OrphanStore = {
@@ -213,23 +242,35 @@ function harness(
       if (options.orphansFail) throw new Error('journal unreadable');
       return [...orphanIds];
     },
-    async add(ids) {
+    async add(ids, exact) {
       ids.forEach((id) => orphanIds.add(id));
+      Object.assign(orphanExact, exact ?? {});
     },
     async remove(ids) {
-      ids.forEach((id) => orphanIds.delete(id));
+      ids.forEach((id) => {
+        orphanIds.delete(id);
+        delete orphanExact[id];
+      });
+    },
+    async loadExact() {
+      return { ...orphanExact };
     },
   };
   return {
     calls,
     saved,
     orphanIds,
+    orphanExact,
     /** The last state that was really written. */
     durable: (fallback: StoredAlarmDefinition[]) =>
       saved.length > 0 ? saved[saved.length - 1] : fallback,
     run: (
       alarms: StoredAlarmDefinition[],
-      extra: { excluded?: string[]; canSchedule?: boolean; nowMs?: () => number } = {},
+      extra: {
+        excluded?: string[];
+        canSchedule?: boolean;
+        nowMs?: () => number;
+      } = {},
     ) =>
       reconcileAlarmSchedules({
         alarms,
@@ -1011,6 +1052,16 @@ describe('summarizeReconciliation', () => {
     assert.deepEqual(summary.problemKeys, ['queue_orphans_unreadable']);
   });
 
+  test('warns persistently while an orphan notification is still pending', () => {
+    const summary = summarizeReconciliation({
+      ...base,
+      statuses: { a: 'verified' },
+      pendingOrphanIds: ['orphan-1'],
+    });
+    assert.equal(summary.notice?.tone, 'danger');
+    assert.deepEqual(summary.problemKeys, ['queue_orphans_pending']);
+  });
+
   test('does not report a clean pass when the queue could not be verified', () => {
     const summary = summarizeReconciliation({
       ...base,
@@ -1389,4 +1440,391 @@ describe('an unreadable orphan journal fails closed', () => {
     const out = await harness(osFor(alarms)).run(alarms);
     assert.equal(out.orphansUnreadable, false);
   });
+});
+
+describe('post-merge findings: every scheduled id is tracked until its absence is confirmed', () => {
+  const unmarked = (kind: typeof MAIN_ALARM_KIND | typeof CHECK_IN_KIND, cycleId: string, mainAlarmId?: string) => ({
+    kind,
+    alarmId: 'alarm-1',
+    cycleId,
+    ...(mainAlarmId ? { mainAlarmId } : {}),
+  });
+
+  test('a re-scheduled main the OS reports off schedule is cancelled, or tracked when that fails', async () => {
+    const alarms = [definition([cycle(at(16))])];
+    const os = osFor(alarms);
+    os.entries.delete(`main-${at(16)}`);
+    os.shift = { prefix: 'new-main', ms: 3_600_000 };
+    os.failCancelWhen = (id) => id.startsWith('new-main');
+    const h = harness(os);
+    const out = await h.run(alarms);
+    const strays = [...os.entries.keys()].filter((id) => id.startsWith('new-main'));
+    assert.equal(strays.length, 1);
+    assert.deepEqual([...h.orphanIds], strays, 'the pending id is durably tracked');
+    assert.deepEqual(out.pendingOrphanIds, strays);
+    assert.notEqual(out.statuses['alarm-1'], 'verified');
+
+    // A later pass that can cancel removes it and tracks nothing.
+    os.failCancelWhen = null;
+    os.shift = null;
+    const next = await h.run(h.durable(alarms));
+    assert.ok(!os.entries.has(strays[0]));
+    assert.deepEqual([...h.orphanIds], []);
+    assert.deepEqual(next.pendingOrphanIds, []);
+    assert.equal(
+      [...os.entries.values()].filter((e) => e.id.startsWith('new-main')).length,
+      1,
+      'exactly one live main remains',
+    );
+  });
+
+  test('a re-scheduled check-in the OS reports off schedule is tracked when it cannot be cancelled', async () => {
+    const alarms = [definition([cycle(at(16))])];
+    const os = osFor(alarms);
+    os.entries.delete(`checkin-${at(16)}`);
+    os.shift = { prefix: 'new-checkin', ms: 3_600_000 };
+    os.failCancelWhen = (id) => id.startsWith('new-checkin');
+    const h = harness(os);
+    const out = await h.run(alarms);
+    const strays = [...os.entries.keys()].filter((id) => id.startsWith('new-checkin'));
+    assert.equal(strays.length, 1);
+    assert.deepEqual([...h.orphanIds], strays);
+    assert.deepEqual(out.pendingOrphanIds, strays);
+    assert.equal(out.statuses['alarm-1'], 'check_in_missing');
+  });
+
+  test('a journaled unmarked legacy payload with its exact record is cancelled again, not forgotten', async () => {
+    const alarms = [definition([cycle(at(17))])];
+    const os = osFor(alarms);
+    os.add({ id: 'legacy-old', owned: unmarked(MAIN_ALARM_KIND, 'cycle-old'), atMs: at(20) });
+    os.failCancelWhen = (id) => id === 'legacy-old';
+    const h = harness(os, { orphansExact: { 'legacy-old': unmarked(MAIN_ALARM_KIND, 'cycle-old') } });
+    h.orphanIds.add('legacy-old');
+    const first = await h.run(alarms);
+    assert.ok(h.calls.includes('cancel:legacy-old'), 'cancellation is attempted by exact id');
+    assert.deepEqual([...h.orphanIds], ['legacy-old']);
+    assert.deepEqual(first.pendingOrphanIds, ['legacy-old']);
+
+    os.failCancelWhen = null;
+    const second = await h.run(alarms);
+    assert.ok(!os.entries.has('legacy-old'));
+    assert.deepEqual([...h.orphanIds], []);
+    assert.deepEqual(second.pendingOrphanIds, []);
+  });
+
+  test('an exact record that no longer matches the content releases the id without cancelling', async () => {
+    const alarms = [definition([cycle(at(17))])];
+    const os = osFor(alarms);
+    os.add({ id: 'reused', owned: unmarked(MAIN_ALARM_KIND, 'someone-else'), atMs: at(20) });
+    const h = harness(os, { orphansExact: { reused: unmarked(MAIN_ALARM_KIND, 'cycle-old') } });
+    h.orphanIds.add('reused');
+    await h.run(alarms);
+    assert.ok(!h.calls.includes('cancel:reused'));
+    assert.deepEqual([...h.orphanIds], []);
+  });
+
+  test('a legacy migration records the exact old payloads so a failed cancel is retried', async () => {
+    const list = [definition([cycle(at(16))])];
+    const os = osFor(list);
+    for (const entry of os.entries.values()) {
+      entry.relative = true;
+      entry.owned = { ...entry.owned!, owner: undefined };
+    }
+    os.failCancel.add(`main-${at(16)}`);
+    const h = harness(os);
+    await h.run(list);
+    assert.ok(h.orphanIds.has(`main-${at(16)}`));
+    assert.ok(h.orphanExact[`main-${at(16)}`], 'exact record persisted with the id');
+
+    os.failCancel.clear();
+    const retry = await h.run(h.durable(list));
+    assert.ok(!os.entries.has(`main-${at(16)}`), 'the unmarked old main is finally cancelled');
+    assert.deepEqual([...h.orphanIds], []);
+    assert.deepEqual(retry.pendingOrphanIds, []);
+  });
+
+  test('a marked orphan that cannot be cancelled is reported, then clears once cancelled', async () => {
+    const alarms = [definition([cycle(at(16))])];
+    const os = osFor(alarms);
+    os.add({
+      id: 'orphan-m',
+      owned: { owner: ALREADY_UP_OWNER, kind: MAIN_ALARM_KIND, alarmId: 'alarm-1', cycleId: 'gone' },
+      atMs: at(30),
+    });
+    os.failCancel.add('orphan-m');
+    const h = harness(os);
+    h.orphanIds.add('orphan-m');
+    const out = await h.run(alarms);
+    assert.deepEqual(out.pendingOrphanIds, ['orphan-m']);
+    assert.equal(out.queueKnown, true);
+    assert.deepEqual([...h.orphanIds], ['orphan-m']);
+    const again = await h.run(alarms);
+    assert.deepEqual([...h.orphanIds], ['orphan-m'], 'no accumulation across passes');
+    assert.deepEqual(again.pendingOrphanIds, ['orphan-m']);
+    os.failCancel.clear();
+    const done = await h.run(alarms);
+    assert.deepEqual(done.pendingOrphanIds, []);
+    assert.deepEqual([...h.orphanIds], []);
+  });
+
+  test('duplicate marked mains found during adoption are cancelled; the adopted one stays', async () => {
+    const alarms = [definition([cycle(at(16))])];
+    const os = osFor(alarms);
+    os.entries.delete(`main-${at(16)}`);
+    for (const id of ['dup-a', 'dup-b', 'dup-c']) {
+      os.add({
+        id,
+        owned: { owner: ALREADY_UP_OWNER, kind: MAIN_ALARM_KIND, alarmId: 'alarm-1', cycleId: `cycle-${at(16)}` },
+        atMs: at(16),
+      });
+    }
+    const h = harness(os);
+    const out = await h.run(alarms);
+    const kept = out.alarms[0].cycles[0].mainAlarmId;
+    const mains = [...os.entries.values()].filter(
+      (e) => e.owned?.kind === MAIN_ALARM_KIND && e.owned.cycleId === `cycle-${at(16)}`,
+    );
+    assert.deepEqual(mains.map((e) => e.id), [kept]);
+    assert.deepEqual([...h.orphanIds], []);
+    assert.deepEqual(out.pendingOrphanIds, []);
+  });
+
+  test('duplicates that cannot be cancelled stay tracked and the warning does not vanish', async () => {
+    const alarms = [definition([cycle(at(16))])];
+    const os = osFor(alarms);
+    os.entries.delete(`main-${at(16)}`);
+    for (const id of ['dup-a', 'dup-b']) {
+      os.add({
+        id,
+        owned: { owner: ALREADY_UP_OWNER, kind: MAIN_ALARM_KIND, alarmId: 'alarm-1', cycleId: `cycle-${at(16)}` },
+        atMs: at(16),
+      });
+    }
+    os.failCancelWhen = (id) => id.startsWith('dup-');
+    const h = harness(os);
+    const out = await h.run(alarms);
+    const kept = out.alarms[0].cycles[0].mainAlarmId;
+    const extra = ['dup-a', 'dup-b'].filter((id) => id !== kept);
+    assert.deepEqual([...h.orphanIds], extra);
+    assert.deepEqual(out.pendingOrphanIds, extra);
+    // The next pass keeps blocking, and cancels once it can.
+    const second = await h.run(h.durable(alarms));
+    assert.deepEqual(second.pendingOrphanIds, extra);
+    os.failCancelWhen = null;
+    const third = await h.run(h.durable(alarms));
+    assert.deepEqual(third.pendingOrphanIds, []);
+    assert.ok(!os.entries.has(extra[0]));
+  });
+
+  test('duplicate check-ins found during adoption are cancelled too', async () => {
+    const alarms = [definition([cycle(at(16))])];
+    const os = osFor(alarms);
+    os.entries.delete(`checkin-${at(16)}`);
+    for (const id of ['ci-a', 'ci-b']) {
+      os.add({
+        id,
+        owned: {
+          owner: ALREADY_UP_OWNER, kind: CHECK_IN_KIND, alarmId: 'alarm-1',
+          cycleId: `cycle-${at(16)}`, mainAlarmId: `main-${at(16)}`,
+        },
+        atMs: getCheckInAtMs(at(16), alarms[0].cycles[0].armedAtMs),
+      });
+    }
+    const h = harness(os);
+    const out = await h.run(alarms);
+    const kept = out.alarms[0].cycles[0].checkInNotificationId;
+    assert.deepEqual(
+      [...os.entries.keys()].filter((id) => id.startsWith('ci-')),
+      [kept],
+    );
+    assert.deepEqual([...h.orphanIds], []);
+  });
+});
+
+describe('every unresolved cancellation blocks refill in the same pass', () => {
+  const legacyWorld = (overrides: Partial<StoredAlarm> = {}) => {
+    const list = [definition([cycle(at(16), 'armed', overrides)])];
+    const os = osFor(list);
+    for (const entry of os.entries.values()) entry.relative = true;
+    return { list, os };
+  };
+
+  test('legacy migration: a failed old main/check-in cancel is pending and reported', async () => {
+    const { list, os } = legacyWorld();
+    os.failCancel.add(`main-${at(16)}`);
+    os.failCancel.add(`checkin-${at(16)}`);
+    const out = await harness(os).run(list);
+    assert.deepEqual([...out.pendingOrphanIds].sort(), [`checkin-${at(16)}`, `main-${at(16)}`]);
+  });
+
+  test('legacy migration: a cancel that resolves but leaves the old main queued is pending', async () => {
+    const { list, os } = legacyWorld();
+    os.silentCancel.add(`main-${at(16)}`);
+    const h = harness(os);
+    const out = await h.run(list);
+    assert.deepEqual(out.pendingOrphanIds, [`main-${at(16)}`]);
+    assert.ok(h.orphanIds.has(`main-${at(16)}`), 'still journaled, not untracked');
+  });
+
+  test('legacy migration: an unreadable queue after the cancel leaves it pending', async () => {
+    const { list, os } = legacyWorld();
+    os.unreadableAfterCancel = true;
+    const h = harness(os);
+    const out = await h.run(list);
+    assert.ok(out.pendingOrphanIds.includes(`main-${at(16)}`));
+    assert.ok(h.orphanIds.has(`main-${at(16)}`));
+  });
+
+  test('legacy check-in replacement: a failed old check-in cancel is pending', async () => {
+    const list = [definition([cycle(at(16))])];
+    const os = osFor(list);
+    os.entries.get(`checkin-${at(16)}`)!.relative = true;
+    os.failCancel.add(`checkin-${at(16)}`);
+    const out = await harness(os).run(list);
+    assert.deepEqual(out.pendingOrphanIds, [`checkin-${at(16)}`]);
+  });
+
+  test('legacy check-in replacement: a silent cancel is pending', async () => {
+    const list = [definition([cycle(at(16))])];
+    const os = osFor(list);
+    os.entries.get(`checkin-${at(16)}`)!.relative = true;
+    os.silentCancel.add(`checkin-${at(16)}`);
+    const out = await harness(os).run(list);
+    assert.deepEqual(out.pendingOrphanIds, [`checkin-${at(16)}`]);
+  });
+
+  test('dropNew: a new main that cannot be cancelled after the due time is pending', async () => {
+    const { list, os } = legacyWorld();
+    const now = { value: NOW };
+    os.failCancelWhen = (id) => id.startsWith('new-main-');
+    const h = harness(os, { now, onSchedule: () => { now.value = at(16); } });
+    const out = await h.run(list);
+    assert.equal(out.pendingOrphanIds.length, 1);
+    assert.match(out.pendingOrphanIds[0], /^new-main-/);
+  });
+
+  test('dropNew: a silent cancel of the new main is pending', async () => {
+    const { list, os } = legacyWorld();
+    const now = { value: NOW };
+    os.silentCancel.add('new-main-x');
+    const h = harness(os, { now, onSchedule: () => { now.value = at(16); } });
+    os.silentCancel = { has: (id: string) => id.startsWith('new-main-') } as Set<string>;
+    const out = await h.run(list);
+    assert.equal(out.pendingOrphanIds.length, 1);
+    assert.match(out.pendingOrphanIds[0], /^new-main-/);
+  });
+
+  test('checkpoint rollback: a new main that cannot be cancelled is pending and journaled', async () => {
+    const { list, os } = legacyWorld();
+    os.failCancelWhen = (id) => id.startsWith('new-main-');
+    const h = harness(os, { failCheckpointCall: 1 });
+    await assert.rejects(() => h.run(list), (error: unknown) => error instanceof ScheduledNotificationRollbackError);
+    assert.equal([...h.orphanIds].filter((id) => id.startsWith('new-main-')).length, 1);
+  });
+
+  test('checkpoint rollback: a silent cancel counts as unrecovered, not rolled back', async () => {
+    const { list, os } = legacyWorld();
+    os.silentCancel = { has: (id: string) => id.startsWith('new-main-') } as Set<string>;
+    const h = harness(os, { failCheckpointCall: 1 });
+    await assert.rejects(() => h.run(list), (error: unknown) => error instanceof ScheduledNotificationRollbackError);
+    assert.equal([...h.orphanIds].filter((id) => id.startsWith('new-main-')).length, 1);
+  });
+
+  test('checkpoint rollback pending ids are reported through the recovery outcome', async () => {
+    const { list, os } = legacyWorld();
+    os.failCancelWhen = (id) => id.startsWith('new-main-');
+    const h = harness(os, { failCheckpointCall: 1 });
+    const error = await h.run(list).catch((e: unknown) => e);
+    const recovered = await recoverAbortedReconciliation(error, async () => list, list);
+    assert.ok(recovered.unrecoveredNotificationIds.some((id) => id.startsWith('new-main-')));
+  });
+
+  test('duplicate extras: a silent cancel stays tracked and pending', async () => {
+    const list = [definition([cycle(at(16))])];
+    const os = osFor(list);
+    os.entries.delete(`main-${at(16)}`);
+    for (const id of ['adopt-a', 'adopt-b']) {
+      os.add({
+        id,
+        owned: { owner: ALREADY_UP_OWNER, kind: MAIN_ALARM_KIND, alarmId: 'alarm-1', cycleId: `cycle-${at(16)}` },
+        atMs: at(16),
+      });
+    }
+    os.silentCancel.add('adopt-b');
+    const h = harness(os);
+    const out = await h.run(list);
+    assert.deepEqual(out.pendingOrphanIds, ['adopt-b']);
+    assert.ok(h.orphanIds.has('adopt-b'));
+  });
+
+  test('duplicate extras: an unreadable queue after the cancel is pending, never silently settled', async () => {
+    const list = [definition([cycle(at(16))])];
+    const os = osFor(list);
+    os.entries.delete(`main-${at(16)}`);
+    for (const id of ['adopt-a', 'adopt-b']) {
+      os.add({
+        id,
+        owned: { owner: ALREADY_UP_OWNER, kind: MAIN_ALARM_KIND, alarmId: 'alarm-1', cycleId: `cycle-${at(16)}` },
+        atMs: at(16),
+      });
+    }
+    os.unreadableAfterCancel = true;
+    const h = harness(os);
+    const out = await h.run(list);
+    assert.ok(out.pendingOrphanIds.includes('adopt-b'));
+    assert.ok(h.orphanIds.has('adopt-b'));
+  });
+
+  test('replan: an old pair whose cancel resolved silently is kept in the store, not forgotten', async () => {
+    const wrong = at(16, 8);
+    const list = [definition([cycle(wrong)])];
+    const os = osFor(list);
+    os.silentCancel = { has: (id: string) => id.endsWith(`-${wrong}`) } as Set<string>;
+    const out = await harness(os).run(list);
+    assert.ok(
+      out.alarms[0].cycles.some((c) => c.dueAtMs === wrong),
+      'an old cycle that is still queued must stay stored so it keeps being tracked',
+    );
+  });
+
+  test('a stale old check-in left by a relink with a failed cancel is pending', async () => {
+    const list = [definition([cycle(at(16))])];
+    const os = osFor(list);
+    os.entries.delete(`main-${at(16)}`);
+    os.failCancel.add(`checkin-${at(16)}`);
+    const out = await harness(os).run(list);
+    assert.ok(out.pendingOrphanIds.includes(`checkin-${at(16)}`));
+  });
+
+  test('a pending cancellation blocks refill and warns in that same pass', async () => {
+    const { list, os } = legacyWorld();
+    os.failCancel.add(`main-${at(16)}`);
+    const out = await harness(os).run(list);
+    const summary = summarizeReconciliation({
+      statuses: out.statuses,
+      repaired: out.repaired,
+      replanned: out.replanned,
+      zoneChanged: false,
+      pendingOrphanIds: out.pendingOrphanIds,
+      queueVerified: out.queueKnown,
+    });
+    assert.deepEqual(summary.problemKeys.includes('queue_orphans_pending'), true);
+    assert.equal(summary.notice?.tone, 'danger');
+  });
+});
+
+// The check-in cancel itself can consume the last milliseconds before due.
+test('legacy migration reads the deadline again before cancelling each old id', async () => {
+  const list = [definition([cycle(at(16))])];
+  const os = osFor(list);
+  for (const entry of os.entries.values()) entry.relative = true;
+  const now = { value: at(16) - 100 };
+  const h = harness(os, { now, onCancel: (id) => {
+    if (id === `checkin-${at(16)}`) now.value = at(16);
+  }});
+  const out = await h.run(list);
+  assert.ok(os.entries.has(`main-${at(16)}`));
+  assert.ok(!h.calls.includes(`cancel:main-${at(16)}`));
+  assert.ok(h.orphanIds.has(`main-${at(16)}`));
+  assert.ok(out.pendingOrphanIds.includes(`main-${at(16)}`));
 });

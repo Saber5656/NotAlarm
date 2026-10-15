@@ -101,3 +101,42 @@ test('concurrent adds are not lost', async () => {
   await Promise.all([store.add(['a']), store.add(['b']), store.remove(['z']), store.add(['c'])]);
   assert.deepEqual((await store.load()).sort(), ['a', 'b', 'c']);
 });
+
+test('exact payloads are stored with their ids and dropped with them', async () => {
+  const backing = memoryStore();
+  const store = createOrphanStore(backing);
+  const exact = { kind: 'main_alarm' as const, alarmId: 'a1', cycleId: 'c1' };
+  await store.add(['legacy', 'plain'], { legacy: exact });
+  assert.deepEqual(await store.loadExact!(), { legacy: exact });
+  await store.add(['later']); // a later add keeps earlier records
+  assert.deepEqual(await store.loadExact!(), { legacy: exact });
+  await store.remove(['legacy']);
+  assert.deepEqual(await store.loadExact!(), {});
+  assert.equal(JSON.parse(backing.raw()!).exact, undefined);
+});
+
+test('a journal written before exact records still loads, and old readers still read the ids', async () => {
+  const old = JSON.stringify({ version: 1, ids: ['a', 'b'] });
+  const backing = memoryStore(old);
+  const store = createOrphanStore(backing);
+  assert.deepEqual(await store.load(), ['a', 'b']);
+  assert.deepEqual(await store.loadExact!(), {});
+  await store.add(['c'], { c: { kind: 'main_alarm', alarmId: 'a1', cycleId: 'c1' } });
+  const written = JSON.parse(backing.raw()!);
+  assert.equal(written.version, 1);
+  assert.deepEqual(written.ids, ['a', 'b', 'c']);
+});
+
+test('malformed exact entries are ignored without making the journal unreadable', async () => {
+  const raw = JSON.stringify({
+    version: 1,
+    ids: ['a', 'b'],
+    exact: {
+      a: { kind: 'main_alarm', alarmId: 'a1', cycleId: 'c1' },
+      b: { kind: 'other', alarmId: 'a1', cycleId: 'c1' },
+    },
+  });
+  const store = createOrphanStore(memoryStore(raw));
+  assert.deepEqual(await store.load(), ['a', 'b']);
+  assert.deepEqual(Object.keys(await store.loadExact!()), ['a']);
+});
