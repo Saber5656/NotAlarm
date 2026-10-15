@@ -347,3 +347,106 @@ test('sun callbacks are stable so effects and permission never loop', () => {
     /useDeviceLocation|requestPermission/,
   );
 });
+
+test('edit re-checks the lock at run time and runs under the suppression lock', () => {
+  const edit = block('const editAlarm = useCallback', 'const confirmDeleteAlarm');
+  assert.match(edit, /runUnlessAlarmListLocked/);
+  assert.match(edit, /getAlarms: \(\) => alarmsRef\.current/);
+  assert.match(edit, /nowMs: Date\.now/);
+  const persist = block(
+    'async function editAlarmPersistently',
+    'async function recoverPendingAlarmEdits',
+  );
+  assert.match(persist, /suppressionJournal\.exclusive/);
+  assert.match(persist, /transactAlarmDefinitions/);
+  assert.match(persist, /editAlarmDefinition\(/);
+  // Only the edited alarm's own recorded ids are cancelled, never "all".
+  assert.doesNotMatch(app, /cancelAllScheduledNotificationsAsync/);
+});
+
+test('startup settles unfinished edits before suppressions, and refill skips them', () => {
+  const startup = block(
+    'await recoverPendingAlarmCancellations()',
+    'await refillEnabledSchedules',
+  );
+  const editRecovery = startup.indexOf('recoverPendingAlarmEdits()');
+  assert.notEqual(editRecovery, -1);
+  assert.ok(editRecovery < startup.indexOf('reconcileSuppressions()'));
+  assert.ok(editRecovery < startup.indexOf('markDueCyclesRinging('));
+  const refill = block('async function refillEnabledSchedulesOnce', 'catch (error)');
+  assert.match(refill, /loadPendingAlarmEdits\(\)/);
+});
+
+test('the composer is opened for an edit only through the guarded handler', () => {
+  assert.match(app, /のアラームを編集`\}/);
+  assert.match(app, /onPress=\{\(\) => void openEditComposer\(definition\)\}/);
+  const open = block('const openEditComposer = useCallback', 'const editAlarm = useCallback');
+  assert.match(open, /runUnlessAlarmListLocked/);
+});
+
+test('the edit reads a fresh clock after its locks and after the permission prompt', () => {
+  const persist = block(
+    'async function editAlarmPersistently',
+    'async function recoverPendingAlarmEdits',
+  );
+  assert.match(persist, /now: Date\.now/);
+  assert.doesNotMatch(persist, /nowMs/);
+  const perform = block(
+    'const performEditAlarm = useCallback',
+    'const openEditComposer',
+  );
+  assert.ok(
+    perform.indexOf('await prepareNotifications()') <
+      perform.indexOf('const editedAtMs = Date.now()'),
+    'the clock must be read after the permission prompt',
+  );
+  assert.doesNotMatch(perform, /nowMs: editedAtMs/);
+});
+
+test('requested notification ids reach expo-notifications as `identifier`', () => {
+  const service = readFileSync(
+    new URL('../src/notificationService.ts', import.meta.url),
+    'utf8',
+  );
+  assert.equal(service.match(/identifier: input\.identifier/g)?.length, 2);
+});
+
+test('a pending reset blocks edit recovery and new edits', () => {
+  const startup = block('let cancellationRecoveryFailed = false;', 'await refillEnabledSchedules');
+  assert.ok(
+    startup.indexOf('storageReset.hasPendingReset()') <
+      startup.indexOf('recoverPendingAlarmEdits()'),
+  );
+  const persist = block(
+    'async function editAlarmPersistently',
+    'async function recoverPendingAlarmEdits',
+  );
+  assert.match(persist, /await assertNoPendingReset\(\)/);
+  assert.ok(
+    persist.indexOf('assertNoPendingReset()') <
+      persist.indexOf('transactAlarmDefinitions'),
+  );
+  // The reset lock must not be taken again from inside the edit.
+  assert.doesNotMatch(persist, /storageReset\.reset\(/);
+});
+
+test('edit recovery takes the suppression lock before the storage queue', () => {
+  const recover = block(
+    'async function recoverPendingAlarmEdits',
+    'async function recoverPendingAlarmCancellations',
+  );
+  assert.ok(
+    recover.indexOf('suppressionJournal.exclusive') <
+      recover.indexOf('transactAlarmDefinitions'),
+  );
+});
+
+test('queue reconciliation leaves alarms with an unsettled edit alone', () => {
+  const fn = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  assert.match(fn, /loadPendingAlarmEdits\(\)/);
+});
+
+test('an edit refused by a pending reset surfaces the deletion state', () => {
+  const perform = block('const performEditAlarm = useCallback', 'const openEditComposer');
+  assert.match(perform, /reportResetPending\(error\)/);
+});

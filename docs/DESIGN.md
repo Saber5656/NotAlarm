@@ -258,6 +258,20 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 
 確認ダイアログ後、対象 definition の通知だけを解除する。解除成功後に definition を削除する。
 
+### 編集（時刻・繰り返し。Issue #15）
+
+一覧の「編集」から追加フォームを現在の時刻・繰り返しで事前入力して開く。鳴動中・期限到達済みの周期が1つでもある間は開始も保存も拒否する（`findAlarmListLock`。保存時は最新の状態で再判定）。同じ definition の停止処理・停止 journal・前回の編集が残る間も拒否する。保存は `editAlarmDefinition`（`src/alarmEdit.ts`）が次の順で行い、停止確認と同じ排他（`suppressionJournal.exclusive`）と保存 queue の中で実行する。
+
+1. 排他と保存 queue を取得した後に時計を読み直し（`now()` を注入）、最新の保存データで検査する（未来の周期が10秒以上先か。`today` は元の日付を保持し、日付・時刻が過ぎていれば拒否）。オフの definition は通知を扱わず、時刻と繰り返しだけを保存して終える。
+2. OS の実際の予約数（`getAllScheduledNotificationsAsync`。Expo Go ホストなど他の通知も数える）＋新しい main 通知数（最大3）が64を超える場合は、何も変更せず拒否する。先に確保するのは main だけなので、10件満杯（60件）でも編集できる。main を空けるために別の main を犠牲にすることはしない。
+3. 編集 journal（`already-up/alarm-edit-journal/v1`）に旧 ID 一覧を記録し（`scheduling`）、新しい main を1件ずつ予約する。予約する ID は呼び出し側で決め（`${cycleId}-main`。SDK 57 の `scheduleNotificationAsync` の `identifier`）、OS 呼び出しの前に journal へ記録する。クラッシュや応答の喪失があっても、記録済みの ID を取り消せば孤児が残らない。
+4. 予約に1件でも失敗（メイン通知）した場合は、記録済みの新 ID だけを取り消し、旧アラームはそのまま残す。取り消しを確認できない新 ID は journal に残して次回起動で再試行する。
+5. 予約後に時計を読み直し、旧周期が期限に達していた、または新周期の先頭が10秒未満になった場合は、新 ID を取り消して中止する（旧アラームは完全に不変）。問題なければ新周期（check-in ID は予約前に記録）を journal に記録（`replacing`）してから、自分の旧 ID だけを確認付きで取り消す。順序は旧 main → 旧 check-in。各取り消しの直前に時計を読み直し、期限に達した旧周期の通知は取り消さず、その周期のデータ（鳴動前後を含む）も新しい definition に残す。旧 main を1件も消す前に失敗・期限到達した場合は新 ID を取り消して旧アラームを維持する（旧 check-in にも触れていないため、完全に不変）。旧 main を消した後に失敗した場合は、新周期が予約済みのため新しい内容で確定し、残った旧 ID を journal に残して注意を表示する（`cleanupPending`）。取り消しが例外でも OS の一覧から消えていれば取り消し済みとして扱う。
+6. 旧通知を解放した後に、新しい check-in を予約する（任意）。予約数を数え直し、64を超える場合や予約に失敗した場合は、その周期の check-in だけを省略して警告にする。main は決して省かない。
+7. 保存直前にもう一度時計を読み、期限に達していて main を取り消せていない旧周期は新周期と一緒に保存する。新しい definition（時刻・繰り返し・歩数と window は 0 から）の保存に成功したら journal を消す。保存が2回失敗した場合は journal を残し、次回起動で `recoverPendingAlarmEdit` が完了させる。
+
+復旧は起動時（停止 journal の復旧より前）に行う。`scheduling` は新 ID のみ取り消して旧アラームを維持し、`replacing` は新周期を保存して残った旧 ID を取り消す（OS に存在しない新 check-in ID は外す。復旧時点で期限に達している旧周期とその通知は残す）。journal が残る definition は補充・オン/オフ・削除・再編集を行わない。`suppressed` を確定する条件（記録済み ID の取り消し確認後）と、Expo Go ホストなど無関係な通知を取り消さない原則は変えない。歩数の方針（前面・予定の60分前から）も変えない。
+
 ### 鳴動停止・起床確認後
 
 `today` は無効化する。繰り返し設定は完了周期を残りの周期と区別し、予約枠を最大3件へ補充する。
@@ -283,7 +297,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 上部はブランド、画面タイトル、追加ボタンだけにし、prototype / presentation 表示を置かない。
 - 次回アラームは時刻、日付、残り時間を表示する。歩数 window 開始前は進捗barを出さず「起床確認は HH:MM から」「アプリ表示中に100歩」と開始時刻を示し、window 中だけ「起床確認 N / 100歩」と進捗barを表示する。進捗は現在の window で数えた歩数だけを使う。
 - 通常文字サイズでは有効時 / idleのsummary cardを同じ140pt固定高とし、一覧の開始位置を動かさない。Dynamic Typeのアクセシビリティscroll時だけ、文字を切らないため同じ140pt最小高から内容に応じて拡張する。
-- 設定一覧は時刻、repeat label、次回日付、toggle、予約範囲、削除を表示する。予約範囲は `describeScheduleCoverage`（`src/scheduleCoverage.ts`）で、未来の `armed` / `step_candidate` 周期だけから求める。
+- 設定一覧は時刻、repeat label、次回日付、toggle、予約範囲、編集、削除を表示する。「編集」は削除と同じ44pt以上のボタンで、押すと追加フォームを同じ部品のまま事前入力して開く（タイトル「アラームを編集」、確定「この内容で保存」。オフの definition は「オフのまま保存します」と概要に示す）。予約範囲は `describeScheduleCoverage`（`src/scheduleCoverage.ts`）で、未来の `armed` / `step_candidate` 周期だけから求める。
 
   | `describeScheduleCoverage` | 行の表示 |
   |---|---|
@@ -474,6 +488,13 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 | UI-08 | 高さ700pt未満、幅360pt未満、または`fontScale > 1.3` | フォーム本体だけがスクロールし、全操作へ到達できる |
 | UI-09 | 02:00 / 06:00 / 12:00 / 18:00 / 21:00のlocal time | phaseとnight / dawn / day / dusk写真weightが期待する状態になる |
 | UI-10 | 23:59:59から00:00:00へ遷移 | night写真weightが不連続に飛ばない |
+| EDT-01 | 有効なアラームを時刻・繰り返し変更 | 新しい3周期を先に予約し、旧 check-in → main の自分の ID だけを確認付きで取り消し、新周期（歩数 0）を保存する。他の definition の ID は不変 |
+| EDT-02 | 新周期の予約失敗、記録の保存失敗、最初の旧 main の取り消し失敗、予約中の期限到達 | 記録済みの新 ID を取り消し、旧アラーム（check-in を含む ID と保存内容）は不変（`tests/alarmEdit.test.ts`） |
+| EDT-03 | OS の予約数＋新 main 数が64超 / 10件満杯（60件） | 何も予約・取り消しせず拒否 / 10件満杯でも編集でき、常に64以内。空きが足りない check-in だけ省略（main は省かない） |
+| EDT-07 | 待機・予約・取り消しの途中で旧周期が期限に達する | 期限到達済みの旧通知は取り消さず、旧周期のデータを残す（取り消し前なら編集を中止） |
+| EDT-04 | 鳴動中・期限到達済み・停止処理未完了・前回の編集が未完了 | 開始も保存も拒否 |
+| EDT-05 | 途中で終了（`scheduling` / `replacing`） | 起動時に新 ID だけ取り消して旧維持 / 新周期を保存して残りの旧 ID を取り消す |
+| EDT-06 | オフのアラーム / `today` の編集 | 通知を触らず保存 / 元の日付を保持し、過ぎていれば拒否 |
 | UI-11 | alarm toggle完全成功 / 部分予約失敗 / 例外失敗 | 完全成功時はbannerなし、部分予約失敗時はwarning、例外失敗時はdanger noticeを表示する |
 | NTF-01 | iOS 未決定・拒否 / provisional / 許可＋音オフ / 許可 / 未知の status / 結果なし | `off` / `silent` / `silent` / `ok` / `unknown` / `unknown` |
 | NTF-02 | `ok` 以外でオンのアラームあり | 閉じられない警告 card と各行の警告を表示し、「次のアラーム」「…まで予約済み」を表示しない |

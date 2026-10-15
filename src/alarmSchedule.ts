@@ -59,6 +59,22 @@ export function makeAlarmRepeat(
   }
 }
 
+/**
+ * The repeat a saved edit should use. A today-only alarm that stays today-only
+ * keeps its original date; it is never silently moved to another day.
+ */
+export function resolveEditedRepeat(
+  original: AlarmRepeat,
+  kind: RepeatKind,
+  customWeekdays: readonly Weekday[],
+  nowMs: number,
+): AlarmRepeat {
+  if (kind === 'today' && original.kind === 'today') {
+    return original;
+  }
+  return makeAlarmRepeat(kind, nowMs, customWeekdays);
+}
+
 export function normalizeWeekdays(values: readonly number[]): Weekday[] {
   return [...new Set(values)]
     .filter((value): value is Weekday =>

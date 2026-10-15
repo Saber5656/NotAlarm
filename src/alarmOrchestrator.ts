@@ -17,12 +17,16 @@ export interface AlarmSchedulingGateway {
     dueAtMs: number;
     /** False for a today-only alarm, which has no later occurrence. */
     repeats: boolean;
+    /** Caller-chosen OS identifier (expo-notifications `identifier`). */
+    identifier?: string;
   }): Promise<string>;
   scheduleCheckIn(input: {
     alarmId: string;
     cycleId: string;
     mainAlarmId: string;
     checkInAtMs: number;
+    /** Caller-chosen OS identifier (expo-notifications `identifier`). */
+    identifier?: string;
   }): Promise<string>;
 }
 

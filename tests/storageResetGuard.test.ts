@@ -5,6 +5,7 @@ import test from "node:test";
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import type { PendingAlarmEdit } from "../src/alarmEdit";
 import * as storage from "../src/alarmStorage";
 import * as gateModule from "../src/storageResetGate";
 import {
@@ -191,4 +192,50 @@ test("mutations are allowed again once the retried reset finishes", async () => 
   await service.reset();
   const next = await storage.mutateAlarmDefinitions((current) => current);
   assert.deepEqual(next, []);
+});
+
+const pendingEdit: PendingAlarmEdit = {
+  alarmId: "a1",
+  stage: "scheduling",
+  requestedAtMs: 1,
+  hour: 6,
+  minute: 30,
+  repeat: { kind: "daily", weekdays: [0, 1, 2, 3, 4, 5, 6] },
+  oldNotificationIds: ["m1"],
+  newNotificationIds: ["n1"],
+  newCycles: [],
+};
+
+test("while a reset is pending, the edit journal refuses writes and removals", async () => {
+  seed();
+  const kept = JSON.stringify({ version: 1, entries: [pendingEdit] });
+  data.set(storage.ALARM_EDIT_JOURNAL_KEY, kept);
+  failures.removeKey = storage.ACTIVE_ALARM_STORAGE_KEY;
+  await assert.rejects(service.reset());
+
+  await assert.rejects(
+    storage.savePendingAlarmEdit({ ...pendingEdit, alarmId: "a2" }),
+    gateModule.StorageResetPendingError,
+  );
+  await assert.rejects(
+    storage.removePendingAlarmEdit("a1"),
+    gateModule.StorageResetPendingError,
+  );
+  // The unfinished reset still owns the journal; nothing else touched it.
+  assert.equal(data.get(storage.ALARM_EDIT_JOURNAL_KEY), kept);
+
+  await service.reset();
+  assert.equal(data.has(storage.ALARM_EDIT_JOURNAL_KEY), false);
+  await storage.savePendingAlarmEdit(pendingEdit);
+  assert.equal(data.has(storage.ALARM_EDIT_JOURNAL_KEY), true);
+});
+
+test("edit journal results from before a finished reset are stale", async () => {
+  seed();
+  await storage.savePendingAlarmEdit(pendingEdit);
+  const before = await storage.loadPendingAlarmEdits();
+  assert.equal(gateModule.isStaleStorageResult(before), false);
+  await service.reset();
+  assert.equal(gateModule.isStaleStorageResult(before), true);
+  assert.equal(gateModule.isStaleStorageResult(await storage.loadPendingAlarmEdits()), false);
 });

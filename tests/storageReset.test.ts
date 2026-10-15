@@ -8,6 +8,7 @@ import {
   ACTIVE_ALARM_STORAGE_KEY,
   ALARM_CANCELLATION_JOURNAL_KEY,
   ALARM_DEFINITIONS_STORAGE_KEY,
+  ALARM_EDIT_JOURNAL_KEY,
 } from "../src/alarmStorage";
 import {
   STORAGE_RESET_INTENT_KEY,
@@ -25,6 +26,7 @@ const OWNED_KEYS = [
   ALARM_DEFINITIONS_STORAGE_KEY,
   ACTIVE_ALARM_STORAGE_KEY,
   ALARM_CANCELLATION_JOURNAL_KEY,
+  ALARM_EDIT_JOURNAL_KEY,
   SUPPRESSION_JOURNAL_KEY,
   SUN_PREFERENCE_KEY,
 ];
@@ -485,4 +487,73 @@ test("an unreadable orphan journal does not stop a reset from cancelling marked 
 
   assert.deepEqual(cancelled, ["m1"]);
   assert.equal(store.data.has(ORPHANED_NOTIFICATIONS_KEY), false);
+});
+
+const editJournal = JSON.stringify({
+  version: 1,
+  entries: [
+    {
+      alarmId: "a1",
+      stage: "replacing",
+      requestedAtMs: 1_000,
+      hour: 6,
+      minute: 30,
+      repeat: { kind: "daily", weekdays: [0, 1, 2, 3, 4, 5, 6] },
+      oldNotificationIds: ["old-main"],
+      newNotificationIds: ["new-main", "new-checkin"],
+      newCycles: [
+        {
+          alarmId: "a1",
+          cycleId: "c-new",
+          mainAlarmId: "new-main",
+          checkInNotificationId: "new-checkin",
+          armedAtMs: 1,
+          dueAtMs: 100_000,
+          phase: "armed",
+          stepCount: 0,
+          stepCandidateRecorded: false,
+        },
+      ],
+    },
+  ],
+});
+
+function unrecognisable(identifier: string): ScheduledNotificationSnapshot {
+  return {
+    identifier,
+    content: { title: "x", categoryIdentifier: null, data: {} },
+  };
+}
+
+test("cancels ids preallocated in a valid edit journal, then clears that journal", async () => {
+  const store = makeStore({ [ALARM_EDIT_JOURNAL_KEY]: editJournal });
+  const { gateway, scheduled, cancelled } = makeGateway([
+    unrecognisable("old-main"),
+    unrecognisable("new-main"),
+    unrecognisable("new-checkin"),
+    foreign("host-1"),
+  ]);
+
+  await service(store, gateway).reset();
+
+  assert.deepEqual(cancelled.sort(), ["new-checkin", "new-main", "old-main"]);
+  assert.deepEqual(
+    scheduled.map((item) => item.identifier),
+    ["host-1"],
+  );
+  assert.equal(store.data.has(ALARM_EDIT_JOURNAL_KEY), false);
+});
+
+test("keeps the edit journal when a journaled id cannot be cancelled", async () => {
+  const store = makeStore({ [ALARM_EDIT_JOURNAL_KEY]: editJournal });
+  const { gateway } = makeGateway([unrecognisable("new-main")], {
+    failCancel: new Set(["new-main"]),
+  });
+
+  await assert.rejects(
+    service(store, gateway).reset(),
+    StorageResetIncompleteError,
+  );
+  assert.equal(store.data.has(ALARM_EDIT_JOURNAL_KEY), true);
+  assert.equal(store.data.has(STORAGE_RESET_INTENT_KEY), true);
 });

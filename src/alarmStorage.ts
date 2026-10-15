@@ -5,6 +5,7 @@ import {
   replaceStoredCycle,
   updateMonitoringCycleStepCount,
 } from './alarmDefinitionMutations';
+import { isPendingAlarmEdit, type PendingAlarmEdit } from './alarmEdit';
 import {
   MAX_ALARM_COUNT,
   isAlarmRepeat,
@@ -18,6 +19,8 @@ export const ACTIVE_ALARM_STORAGE_KEY = 'already-up/active-alarm/v1';
 export const ALARM_DEFINITIONS_STORAGE_KEY = 'already-up/alarm-definitions/v2';
 export const ALARM_CANCELLATION_JOURNAL_KEY =
   'already-up/alarm-cancellation-journal/v1';
+
+export const ALARM_EDIT_JOURNAL_KEY = 'already-up/alarm-edit-journal/v1';
 
 export type AlarmCancellationCompletion = 'disable' | 'delete';
 
@@ -76,6 +79,11 @@ interface AlarmCancellationJournalV1 {
   entries: PendingAlarmCancellation[];
 }
 
+interface AlarmEditJournalV1 {
+  version: 1;
+  entries: PendingAlarmEdit[];
+}
+
 type AlarmDefinitionsMutator = (
   alarms: StoredAlarmDefinition[],
 ) => StoredAlarmDefinition[] | Promise<StoredAlarmDefinition[]>;
@@ -91,6 +99,7 @@ type AlarmDefinitionsTransaction = (
 
 let mutationQueue: Promise<void> = Promise.resolve();
 let cancellationJournalQueue: Promise<void> = Promise.resolve();
+let editJournalQueue: Promise<void> = Promise.resolve();
 
 export async function loadAlarmDefinitions(): Promise<StoredAlarmDefinition[]> {
   const raw = await AsyncStorage.getItem(ALARM_DEFINITIONS_STORAGE_KEY);
@@ -176,6 +185,60 @@ export function removePendingAlarmCancellation(
   alarmId: string,
 ): Promise<PendingAlarmCancellation[]> {
   return mutatePendingAlarmCancellations((current) =>
+    current.filter((entry) => entry.alarmId !== alarmId),
+  );
+}
+
+export async function loadPendingAlarmEdits(): Promise<PendingAlarmEdit[]> {
+  const raw = await AsyncStorage.getItem(ALARM_EDIT_JOURNAL_KEY);
+  if (!raw) {
+    return [];
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!isAlarmEditJournalV1(parsed)) {
+    throw new Error('未完了のアラーム編集を読み取れません。');
+  }
+  return stampStorageResult(parsed.entries);
+}
+
+function mutatePendingAlarmEdits(
+  mutator: (current: PendingAlarmEdit[]) => PendingAlarmEdit[],
+): Promise<PendingAlarmEdit[]> {
+  const operation = editJournalQueue.then(async () => {
+    // Inside the queue: a stale edit cannot rewrite a journal a reset removed.
+    await assertNoPendingReset();
+    const current = await loadPendingAlarmEdits();
+    const entries = mutator(current);
+    const journal: AlarmEditJournalV1 = { version: 1, entries };
+    if (!isAlarmEditJournalV1(journal)) {
+      throw new Error('アラーム編集を保存できません。');
+    }
+    if (entries.length === 0) {
+      await AsyncStorage.removeItem(ALARM_EDIT_JOURNAL_KEY);
+    } else {
+      await AsyncStorage.setItem(ALARM_EDIT_JOURNAL_KEY, JSON.stringify(journal));
+    }
+    return stampStorageResult(entries);
+  });
+
+  editJournalQueue = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+export async function savePendingAlarmEdit(
+  pending: PendingAlarmEdit,
+): Promise<void> {
+  await mutatePendingAlarmEdits((current) => [
+    ...current.filter((entry) => entry.alarmId !== pending.alarmId),
+    pending,
+  ]);
+}
+
+export async function removePendingAlarmEdit(alarmId: string): Promise<void> {
+  await mutatePendingAlarmEdits((current) =>
     current.filter((entry) => entry.alarmId !== alarmId),
   );
 }
@@ -282,15 +345,18 @@ export function markDueCyclesRinging(
  * interleave with an add, stop or refill in this process.
  */
 export function runExclusiveAlarmStorage<T>(run: () => Promise<T>): Promise<T> {
-  const operation = Promise.all([mutationQueue, cancellationJournalQueue]).then(
-    run,
-  );
+  const operation = Promise.all([
+    mutationQueue,
+    cancellationJournalQueue,
+    editJournalQueue,
+  ]).then(run);
   const settled = operation.then(
     () => undefined,
     () => undefined,
   );
   mutationQueue = settled;
   cancellationJournalQueue = settled;
+  editJournalQueue = settled;
   return operation;
 }
 
@@ -301,6 +367,18 @@ export function readValidAlarmDefinitions(
   try {
     const parsed: unknown = JSON.parse(raw);
     return isAlarmStoreV2(parsed) ? parsed.alarms : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Strictly validated read of the edit journal; unreadable data yields null. */
+export function readValidAlarmEditJournal(
+  raw: string,
+): PendingAlarmEdit[] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isAlarmEditJournalV1(parsed) ? parsed.entries : null;
   } catch {
     return null;
   }
@@ -318,6 +396,21 @@ export function readValidLegacyAlarm(
   } catch {
     return null;
   }
+}
+
+function isAlarmEditJournalV1(value: unknown): value is AlarmEditJournalV1 {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const journal = value as Partial<AlarmEditJournalV1>;
+  return (
+    journal.version === 1 &&
+    Array.isArray(journal.entries) &&
+    journal.entries.length <= MAX_ALARM_COUNT &&
+    new Set(journal.entries.map((entry) => entry?.alarmId)).size ===
+      journal.entries.length &&
+    journal.entries.every(isPendingAlarmEdit)
+  );
 }
 
 function isAlarmCancellationJournalV1(
