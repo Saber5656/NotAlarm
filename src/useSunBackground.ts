@@ -89,6 +89,10 @@ export function useSunBackground(
       }
       setPreference(loaded.preference);
       setLoadNotice(loaded.notice ?? null);
+      if (loaded.notice === 'reset-pending') {
+        // Disable the controls now, not after their first rejected write.
+        setWritesBlocked(true);
+      }
     } catch {
       if (epoch !== epochRef.current) {
         return;

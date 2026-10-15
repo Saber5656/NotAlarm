@@ -347,3 +347,21 @@ test("saves run inside the shared storage lock", async () => {
   await c.chooseRegion("tokyo");
   assert.deepEqual(events, ["lock", "unlock"]);
 });
+
+test("starting with an unfinished deletion reports reset-pending immediately", async () => {
+  const saved = JSON.stringify({ version: 1, mode: "region", regionId: "london" });
+  const { store } = memoryStore({ [SUN_PREFERENCE_KEY]: saved });
+  const pending = { value: true };
+  const c = guardedController(store, gateway().gateway, pending);
+  const loaded = await c.load();
+  assert.deepEqual(loaded.preference, { version: 1, mode: "fixed" });
+  assert.equal(loaded.notice, "reset-pending");
+  pending.value = false;
+  assert.equal((await c.load()).notice, undefined);
+});
+
+test("a corrupt value found while a deletion is pending still reports reset-pending", async () => {
+  const { store } = memoryStore({ [SUN_PREFERENCE_KEY]: "{not json" });
+  const c = guardedController(store, gateway().gateway, { value: true });
+  assert.equal((await c.load()).notice, "reset-pending");
+});
