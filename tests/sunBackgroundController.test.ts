@@ -365,3 +365,15 @@ test("a corrupt value found while a deletion is pending still reports reset-pend
   const c = guardedController(store, gateway().gateway, { value: true });
   assert.equal((await c.load()).notice, "reset-pending");
 });
+
+test("no saved preference but an unfinished deletion still reports reset-pending", async () => {
+  // A reset removed the preference key, then failed on the durable intent key.
+  const { store } = memoryStore();
+  const pending = { value: true };
+  const c = guardedController(store, gateway().gateway, pending);
+  const loaded = await c.load();
+  assert.deepEqual(loaded.preference, { version: 1, mode: "fixed" });
+  assert.equal(loaded.notice, "reset-pending");
+  pending.value = false;
+  assert.equal((await c.load()).notice, undefined);
+});
