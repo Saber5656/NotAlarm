@@ -563,7 +563,7 @@ test('a delivered main notification rings through the atomic transition only', (
     'getLastNotificationResponse',
   );
   assert.match(listener, /saveCycleRinging\(/);
-  assert.match(listener, /\},\s*Date\.now,\s*\)/);
+  assert.match(listener, /saveCycleRinging\(\s*identity,\s*Date\.now,\s*\)/);
   assert.doesNotMatch(listener, /Date\.now\(\)/);
   assert.match(listener, /notification\.request\.identifier/);
   assert.doesNotMatch(listener, /loadStoredAlarmByCycleId|saveStoredAlarm/);

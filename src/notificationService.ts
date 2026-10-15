@@ -4,6 +4,8 @@ import * as Notifications from 'expo-notifications';
 import {
   ALREADY_UP_OWNER,
   AWAKE_CHECKIN_CATEGORY,
+  buildMainNotificationData,
+  buildSnoozeNotificationData,
   CHECK_IN_KIND,
   CONFIRM_AWAKE_ACTION,
   MAIN_ALARM_KIND,
@@ -199,12 +201,7 @@ export async function scheduleMainAlarmNotification(input: {
       sound: 'default',
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
-      data: {
-        owner: ALREADY_UP_OWNER,
-        kind: MAIN_ALARM_KIND,
-        alarmId: input.alarmId,
-        cycleId: input.cycleId,
-      } satisfies AlarmNotificationData,
+      data: { ...buildMainNotificationData(input) },
     },
     trigger: dateTrigger(input.dueAtMs, ALARM_CHANNEL_ID),
   });
@@ -229,13 +226,7 @@ export async function scheduleSnoozeNotification(input: {
       sound: 'default',
       interruptionLevel: 'timeSensitive',
       priority: Notifications.AndroidNotificationPriority.MAX,
-      data: {
-        owner: ALREADY_UP_OWNER,
-        kind: MAIN_ALARM_KIND,
-        alarmId: input.alarmId,
-        cycleId: input.cycleId,
-        snooze: input.snoozeNumber,
-      } satisfies AlarmNotificationData,
+      data: { ...buildSnoozeNotificationData(input) },
     },
     trigger: dateTrigger(input.dueAtMs, ALARM_CHANNEL_ID),
   });

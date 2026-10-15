@@ -167,7 +167,7 @@ import {
 } from './src/notificationDelivery';
 import {
   CONFIRM_AWAKE_ACTION,
-  MAIN_ALARM_KIND,
+  readMainDeliveryIdentity,
 } from './src/alarmContracts';
 import {
   RINGING_STOP_HINT,
@@ -1753,22 +1753,20 @@ function AlarmApp() {
       });
     const receivedSubscription = Notifications.addNotificationReceivedListener(
       (notification) => {
-        const data = notification.request.content.data;
-        if (
-          data?.kind !== MAIN_ALARM_KIND ||
-          typeof data.cycleId !== 'string'
-        ) {
+        // The payload's exact scheduled due time is checked by the transition;
+        // a malformed one is ignored, a missing one is the legacy fallback.
+        const identity = readMainDeliveryIdentity(
+          notification.request.content.data,
+          notification.request.identifier,
+        );
+        if (!identity) {
           return;
         }
 
         // Read, check and write happen inside one queued mutation, so a stop
         // that commits first is never overwritten by this delivery.
         void saveCycleRinging(
-          {
-            alarmId: typeof data.alarmId === 'string' ? data.alarmId : undefined,
-            cycleId: data.cycleId,
-            mainAlarmId: notification.request.identifier,
-          },
+          identity,
           Date.now,
         )
           .then(({ alarms, status }) => {
@@ -2636,7 +2634,7 @@ function AlarmApp() {
           setCurrentAlarms(next);
           return changed;
         },
-        // Only each cycle's own delivered notification is dismissed.
+        // Only each persisted cycle's own main and accepted snooze ids are dismissed.
         dismissDelivered: dismissDeliveredNotification,
         refill: refreshAfterCycleCompletion,
       });
