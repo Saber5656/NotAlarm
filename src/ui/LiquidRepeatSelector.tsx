@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 
 import type { RepeatKind } from '../alarmSchedule';
+import { segmentRadioSemantics } from './choiceSemantics';
 import { GlassSurface } from './GlassSurface';
 import { useText } from './I18nContext';
 import { UI_COLORS } from './tokens';
@@ -65,6 +66,7 @@ export function LiquidRepeatSelector({
   return (
     <View
       accessibilityLabel={messages.repeat.sectionLabel}
+      accessibilityRole="radiogroup"
       onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
       style={styles.track}
       testID="repeat-selector"
@@ -98,8 +100,7 @@ export function LiquidRepeatSelector({
         const selected = value === option.kind;
         return (
           <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ disabled, selected }}
+            {...segmentRadioSemantics(selected, disabled)}
             disabled={disabled}
             key={option.kind}
             onPress={() => onChange(option.kind)}
