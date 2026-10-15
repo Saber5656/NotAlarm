@@ -10,6 +10,7 @@ import {
   readValidAlarmDefinitions,
   readValidLegacyAlarm,
 } from './alarmStorage';
+import { SUN_PREFERENCE_KEY } from './sunPreference';
 import {
   ORPHANED_NOTIFICATIONS_KEY,
   parseOrphanJournal,
@@ -42,6 +43,7 @@ const ALARM_STORAGE_KEYS = [
   ORPHANED_NOTIFICATIONS_KEY,
   // Not alarm data, but local state; a missing zone is simply a no-op.
   PLANNING_ZONE_KEY,
+  SUN_PREFERENCE_KEY,
 ] as const;
 
 const MAX_REMEMBERED_IDS = 1_000;

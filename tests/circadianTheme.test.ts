@@ -65,3 +65,88 @@ test('keeps the night photograph continuous across midnight', () => {
 test('rejects invalid dates rather than silently choosing a theme', () => {
   assert.throws(() => getCircadianTheme(new Date(Number.NaN)), TypeError);
 });
+
+test('an explicit sun schedule shifts the phases and uses its own zone', () => {
+  const tokyoSummer = {
+    sunriseMinute: 4 * 60 + 25,
+    sunsetMinute: 19 * 60,
+    timeZone: 'Asia/Tokyo',
+  };
+  // 04:40 in Tokyo is shortly after sunrise: bright dawn, not night.
+  const earlyTokyo = new Date('2026-06-20T19:40:00Z');
+  assert.equal(getCircadianTheme(earlyTokyo, tokyoSummer).phase, 'dawn');
+  assert.ok(getCircadianTheme(earlyTokyo, tokyoSummer).photoWeights.dawn > 0.5);
+  // The fixed default would still call 04:40 night.
+  const fixed = getCircadianTheme(new Date(2026, 5, 21, 4, 40));
+  assert.equal(fixed.phase, 'night');
+  // 19:30 Tokyo is dusk-ish after the 19:00 sunset, evaluated in Tokyo time.
+  const eveningTokyo = new Date('2026-06-21T10:30:00Z');
+  assert.equal(getCircadianTheme(eveningTokyo, tokyoSummer).phase, 'dusk');
+});
+
+test('a late sunset keeps weights valid and in range', () => {
+  const schedule = {
+    sunriseMinute: 3 * 60,
+    sunsetMinute: 23 * 60 + 30,
+    timeZone: 'Atlantic/Reykjavik',
+  };
+  for (let minute = 0; minute < 24 * 60; minute += 7) {
+    const date = new Date(Date.UTC(2026, 5, 21, 0, 0) + minute * 60_000);
+    const { photoWeights } = getCircadianTheme(date, schedule);
+    for (const weight of Object.values(photoWeights)) {
+      assert.ok(weight >= 0 && weight <= 1 && Number.isFinite(weight));
+    }
+  }
+});
+
+test('a schedule with a bad zone falls back to the fixed clock', () => {
+  const date = new Date(2026, 0, 15, 2);
+  assert.deepEqual(
+    getCircadianTheme(date, {
+      sunriseMinute: 300,
+      sunsetMinute: 1000,
+      timeZone: 'Nowhere/Land',
+    }),
+    getCircadianTheme(date),
+  );
+});
+
+test('a resolved region schedule drives the theme in that region\'s own zone and date', async () => {
+  const { resolveSunBackground } = await import('../src/sunSchedule');
+  const resolve = (regionId: string, nowMs: number) =>
+    resolveSunBackground({
+      preference: { version: 1, mode: 'region', regionId },
+      nowMs,
+      deviceTimeZone: 'Asia/Tokyo',
+    }).schedule ?? undefined;
+
+  // London midsummer, USNO sunrise 04:43 BST: 04:00 BST (03:00Z) is before
+  // dawn, while the fixed 06:00 clock reads the device's own 12:00 as day.
+  const londonDawn = Date.parse('2026-06-21T03:50:00Z'); // 04:50 BST
+  const london = resolve('london', londonDawn);
+  assert.ok(london);
+  assert.equal(getCircadianTheme(new Date(londonDawn), london).phase, 'dawn');
+  assert.equal(
+    getCircadianTheme(new Date(londonDawn), undefined).phase,
+    getCircadianTheme(new Date(londonDawn)).phase,
+  );
+
+  // Same instant, Auckland (NZ civil date is already 21 Dec, 15:50 NZST+1):
+  // the schedule is Auckland's own day, not the device's or UTC's.
+  const auckland = resolve('auckland', londonDawn);
+  assert.ok(auckland);
+  assert.equal(auckland.timeZone, 'Pacific/Auckland');
+  assert.notDeepEqual(auckland, london);
+
+  // Fixed preference leaves the default theme byte-for-byte unchanged.
+  const fixed = resolveSunBackground({
+    preference: { version: 1, mode: 'fixed' },
+    nowMs: londonDawn,
+    deviceTimeZone: 'Asia/Tokyo',
+  }).schedule;
+  assert.equal(fixed, null);
+  assert.deepEqual(
+    getCircadianTheme(new Date(londonDawn), fixed ?? undefined),
+    getCircadianTheme(new Date(londonDawn)),
+  );
+});

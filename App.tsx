@@ -39,6 +39,8 @@ import {
 import { getCircadianTheme } from './src/circadianTheme';
 import { AlarmComposerModal } from './src/ui/AlarmComposerModal';
 import { SettingsModal } from './src/ui/SettingsModal';
+import { SunriseSettings } from './src/ui/SunriseSettings';
+import { useSunBackground } from './src/useSunBackground';
 import { CircadianBackground } from './src/ui/CircadianBackground';
 import { GlassSurface } from './src/ui/GlassSurface';
 import {
@@ -243,6 +245,14 @@ const storageReset = createStorageResetService({
 });
 // Every alarm write and reservation re-checks this inside the storage locks.
 installStorageResetGate(() => storageReset.hasPendingReset());
+
+// The sun preference shares the alarm storage lock and the reset gate, so a
+// late save cannot interleave with a deletion or refill deleted data.
+const sunStorageCoordination = {
+  exclusive: <T,>(run: () => Promise<T>) =>
+    suppressionJournal.exclusive(() => runExclusiveAlarmStorage(run)),
+  assertWritable: assertNoPendingReset,
+};
 
 const cancellationGateway = {
   cancelScheduled: cancelNotificationIfPresent,
@@ -785,9 +795,10 @@ function AlarmApp() {
   const deletionInFlightRef = useRef(false);
   const reportedScheduleProblemsRef = useRef<ReadonlySet<string>>(new Set());
   const localMinuteKey = Math.floor(nowMs / 60_000);
+  const sun = useSunBackground(nowMs, sunStorageCoordination);
   const circadianTheme = useMemo(
-    () => getCircadianTheme(new Date(nowMs)),
-    [localMinuteKey],
+    () => getCircadianTheme(new Date(nowMs), sun.schedule),
+    [localMinuteKey, sun.schedule],
   );
 
   const setCurrentAlarms = useCallback((next: StoredAlarmDefinition[]) => {
@@ -2058,9 +2069,12 @@ function AlarmApp() {
       return;
     }
     setIsBusy(true);
+    // Before any await: an in-flight GPS answer or save must now do nothing.
+    sun.beginDeletion();
     try {
       const { ambiguousCount } = await storageReset.reset();
       applyLocalDataDeleted();
+      sun.completeDeletion();
       setNotice(
         ambiguousCount > 0
           ? { tone: 'danger', text: STORAGE_RESET_COPY.ambiguousWarning }
@@ -2069,11 +2083,12 @@ function AlarmApp() {
     } catch {
       // The failure card stays; part of the data may already be gone and a
       // retry resumes from the saved intent.
+      sun.failDeletion();
       setNotice({ tone: 'danger', text: STORAGE_RESET_COPY.failed });
     } finally {
       setIsBusy(false);
     }
-  }, [applyLocalDataDeleted, isBusy, loadFailed]);
+  }, [applyLocalDataDeleted, isBusy, loadFailed, sun]);
 
   const performLocalDataDeletion = useCallback(async () => {
     // Re-checked when the dialog is confirmed: an alarm may have started.
@@ -2092,9 +2107,11 @@ function AlarmApp() {
     deletionInFlightRef.current = true;
     setIsBusy(true);
     setSettingsNotice(null);
+    sun.beginDeletion();
     try {
       const outcome = await deleteAllLocalData(storageReset);
       if (outcome.kind === 'failed') {
+        sun.failDeletion();
         // The in-memory list is not rewritten; storage may be partly removed,
         // and alarm writes are refused until a retry finishes.
         setDeletionPending(true);
@@ -2102,6 +2119,7 @@ function AlarmApp() {
         return;
       }
       applyLocalDataDeleted();
+      sun.completeDeletion();
       setIsSettingsOpen(false);
       setNotice(
         outcome.ambiguousCount > 0
@@ -2112,7 +2130,7 @@ function AlarmApp() {
       deletionInFlightRef.current = false;
       setIsBusy(false);
     }
-  }, [applyLocalDataDeleted, isBusy, isLoaded]);
+  }, [applyLocalDataDeleted, isBusy, isLoaded, sun]);
 
   const confirmLocalDataDeletion = useCallback(() => {
     const availability = getLocalDataDeletionAvailability({
@@ -3075,6 +3093,7 @@ function AlarmApp() {
             {settingsNotice}
           </Text>
         ) : null}
+        <SunriseSettings resetPending={deletionPending} state={sun} />
         <Pressable
           accessibilityHint={LOCAL_DATA_COPY.deleteHint}
           accessibilityLabel={LOCAL_DATA_COPY.deleteAction}

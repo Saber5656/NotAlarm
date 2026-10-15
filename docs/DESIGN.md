@@ -305,7 +305,7 @@ repeat rule から先3周期を再計算し、新しい cycle ID と notificatio
 - 追加フォームの「時刻／繰り返し」とrepeat controlは、それぞれ1つのglass lensを選択肢間でspring移動させ、単なる背景色の切替にしない。native GlassView自体のopacityはanimateせず、wrapperのgeometryを移動する。Reduce Motion時は選択位置を即時更新する。
 - Glass surface 上でも本文・操作のコントラストを維持し、tintは主操作・選択・statusの意味がある箇所だけに使う。glass-on-glassを避ける。
 - ホーム背景は端末のローカル時刻とtimezoneだけから決定し、同一の湖畔景観をphotorealisticに生成した夜明け、昼、夕暮れ、夜の4 assetを連続cross-fadeする。基準の日の出は06:00、日の入りは18:00とし、codeで星、太陽、月、山を描くillustration layerは使わない。背景はdecorativeとしてaccessibility treeから除外し、上部scrimでstatus barとheaderの白文字contrastを維持する。
-- 背景assetのopacity計算は純粋関数に分離し、任意時刻で隣接する最大2 assetだけを合計opacity 1でblendする。React Nativeの`Image`もopacityが0より大きい最大2枚だけをmountし、4枚同時decodeを避ける。位置情報、国籍、networkは現行モデルへ入力しない。実地点・季節の日の出時刻を使う拡張は、任意の位置情報権限、手動地域設定、privacy copyを別途承認してから追加する。
+- 背景assetのopacity計算は純粋関数に分離し、任意時刻で隣接する最大2 assetだけを合計opacity 1でblendする。React Nativeの`Image`もopacityが0より大きい最大2枚だけをmountし、4枚同時decodeを避ける。既定は位置情報を使わない固定06:00/18:00で、任意の日の出・日の入り設定は11.5に従う。国籍、networkは入力しない。
 - Web は UI smoke test とし、通知操作を disabled にする。
 
 ### 11.1 通知配送状態
@@ -515,3 +515,17 @@ Expo Go 配布のままでは、アプリを閉じる・画面がロックされ
 - [Apple: Scheduling a notification locally](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)
 - [Apple: UILocalNotification pending limit](https://developer.apple.com/documentation/uikit/uilocalnotification)
 - [Apple Watch notifications](https://support.apple.com/guide/watch/notifications-apd9b833c9f3/watchos)
+
+### 11.5 任意の日の出・日の入り背景（ALR-017）
+
+**設計の根拠（UI実装前に確定）。** 目的は、背景の明暗の切替を実際の日照に近づける任意機能であり、アラームの時刻・鳴動・予約とは独立する。既存の共通 `SettingsModal`（issue 21）の本文へ差し込む1セクション `SunriseSettings` とし、新しい設定入口・sheetは作らない。部品は設定sheetの白いsurfaceに合わせ、既存の `UI_COLORS` と `LiquidRepeatSelector` 系の角丸chipの見た目を流用する。選択状態は `radio` role と `checked` で伝え、全操作は高さ48pt以上、地域は折り返すgridで最大文字サイズでも崩れない。glassは主要操作限定の方針（11章）に従い、このセクションでは使わない。状態は1行の `polite` live regionで、固定へ戻した理由を短く事実だけで示す。
+
+- 既定は固定06:00/18:00。保存がなければ見た目は従来と完全に同一。
+- 選択肢は「固定」「小さな内蔵地域（座標＋IANA timezone。権限不要）」「現在地を使う（明示ボタンのみ）」。
+- 現在地は、そのボタンを押した時だけ前景で一度、`Accuracy.Lowest`（約3km）で取得する。起動時・設定画面表示時に権限を求めない。バックグラウンド位置・追跡・サーバー・ジオコーディングは使わない。10秒で時間切れとし、失敗は固定のまま。固定・地域の選択やデータ削除の後に届いた古い結果は破棄する。
+- 保存は `already-up/sun-preference/v1` のみ。`mode`、地域ID、または0.1度（約11km）に丸めた緯度経度＋timezone＋保存時刻。生の座標や移動履歴は保存しない。固定を選ぶと位置は削除される。全データ削除（`storageReset`）はこのキーも消す。
+- 日の出・日の入りは `suncalc`（2.1.1、MIT、依存なし）で端末内計算する。日付は選択地点のtimezoneの暦日で決め、DST当日・日付変更線をまたぐ地域も地点の暦日で扱う。位置情報モードは保存時のtimezoneと端末のtimezoneが一致する間だけ使う。
+- 次の場合は固定に戻し、短く理由を示す: 権限の取り消し、端末timezoneの変更、保存データの不正・未知の地域、timezoneを確定できない、白夜・極夜。
+- 結果は地点＋暦日ごとに最大4件だけ保持し、日付変更・前面復帰で再計算する。タイマーによる位置取得はしない。
+
+**統合済み。** `App.tsx` が `useSunBackground(nowMs, sunStorageCoordination)` を無条件に呼び、`getCircadianTheme(new Date(nowMs), sun.schedule)` へ渡す。`SunriseSettings` は共通 `SettingsModal` の本文に置く。保存はアラームと同じ排他制御と `assertNoPendingReset` の内側で行い、削除確定時に `beginDeletion()` で取得中の位置問い合わせ・読み込み・保存を同期的に無効化する。完了で `completeDeletion()`、失敗で `failDeletion()`（設定と許可操作は再実行まで無効）。計算の検証は USNO API の取得値（`tests/sunSchedule.test.ts` 内のURLと座標・日付・UTCオフセット）を基準にする。物理端末での位置情報許可・取得は未確認。
