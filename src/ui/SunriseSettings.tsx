@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SUN_REGIONS } from '../sunRegions';
 import { sunStatusText } from '../sunStatusText';
 import type { SunBackgroundState } from '../useSunBackground';
-import { radioSemantics } from './radioSemantics';
+import { deviceChoiceSemantics, radioSemantics } from './radioSemantics';
 import { UI_COLORS } from './tokens';
 
 interface SunriseSettingsProps {
@@ -24,6 +24,8 @@ export function SunriseSettings({
   const { preference, isBusy } = state;
   const disabled = isBusy || state.writesBlocked || resetPending;
   const status = resetPending ? 'reset-pending' : state.status;
+  const deviceSelected = preference.mode === 'device';
+  const device = deviceChoiceSemantics(deviceSelected, disabled);
 
   return (
     <View style={styles.section} testID="sunrise-settings">
@@ -62,28 +64,26 @@ export function SunriseSettings({
 
       <Pressable
         accessibilityHint="押したときだけ、おおよその現在地を一度使います。"
-        accessibilityLabel="現在地を使う"
-        accessibilityRole="button"
-        accessibilityState={{
-          busy: isBusy,
-          disabled,
-          selected: preference.mode === 'device',
-        }}
+        accessibilityLabel={device.accessibilityLabel}
+        accessibilityRole={device.accessibilityRole}
+        accessibilityState={{ ...device.accessibilityState, busy: isBusy }}
+        aria-checked={device['aria-checked']}
         disabled={disabled}
         onPress={() => void state.useDeviceLocation()}
         style={({ pressed }) => [
           styles.deviceButton,
-          preference.mode === 'device' && styles.selected,
+          deviceSelected && styles.selected,
           pressed && styles.pressed,
           disabled && styles.disabled,
         ]}
         testID="sun-device"
       >
-        <Text style={styles.label}>
-          {preference.mode === 'device'
-            ? '現在地を使用中（約10km単位）'
-            : '現在地を使う'}
+        <Text style={[styles.label, deviceSelected && styles.labelSelected]}>
+          {deviceSelected ? '現在地を使用中（約10km単位）' : '現在地を使う'}
         </Text>
+        {device.marker ? (
+          <Text style={styles.marker}>{device.marker}</Text>
+        ) : null}
         <Text style={styles.detail}>
           ボタンを押したときだけ、おおよその位置を一度確認します。位置は約10km単位に丸めて端末内にだけ保存し、追跡や送信はしません。
         </Text>
