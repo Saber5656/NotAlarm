@@ -14,6 +14,7 @@ import {
   type AlarmEditJournal,
   type PendingAlarmEdit,
 } from '../src/alarmEdit';
+import { getCheckInAtMs } from '../src/alarmPolicy';
 import { makeAlarmRepeat } from '../src/alarmSchedule';
 import type {
   AlarmPhase,
@@ -1183,5 +1184,115 @@ describe('unconfirmed old cancellation and fresh check-in clock', () => {
     for (const request of requests) {
       assert.ok(request.at > request.clock, 'check-in must be in the future');
     }
+  });
+});
+
+describe('PR40 review fixes', () => {
+  const recoverInput = (
+    h: Harness,
+    alarms: StoredAlarmDefinition[],
+    entry: PendingAlarmEdit,
+    checkpoint: (next: StoredAlarmDefinition[]) => Promise<void>,
+  ) => ({
+    alarms,
+    entry,
+    gateway: h.gateway,
+    journal: h.journal,
+    now: () => h.clock,
+    checkpoint,
+  });
+
+  test('recovery re-reads the clock per old cycle and spares one that became due during its awaits', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const newCycles = [cycle('a1', 7)];
+    const entry: PendingAlarmEdit = {
+      alarmId: 'a1',
+      stage: 'replacing',
+      requestedAtMs: NOW,
+      hour: 6,
+      minute: 30,
+      repeat: makeAlarmRepeat('weekdays', NOW),
+      oldNotificationIds: ['a1-main-1', 'a1-check-1', 'a1-main-2'],
+      newNotificationIds: newCycles.map((c) => c.mainAlarmId),
+      newCycles,
+    };
+    h.journalEntries.set('a1', entry);
+    // Still in the future when recovery starts; due once the checkpoint ends.
+    const result = await recoverPendingAlarmEdit(
+      recoverInput(h, [a1], entry, async (next) => {
+        h.saved.push(next);
+        h.clock = a1.cycles[0].dueAtMs + 1;
+      }),
+    );
+
+    assert.ok(h.scheduled.has('a1-main-1'), 'the newly due main is not cancelled');
+    assert.ok(h.scheduled.has('a1-check-1'));
+    assert.ok(!h.scheduled.has('a1-main-2'), 'a future cycle is still replaced');
+    assert.deepEqual(
+      result[0].cycles.find((c) => c.cycleId === a1.cycles[0].cycleId),
+      a1.cycles[0],
+    );
+  });
+
+  test('keeps a newly due old cycle journaled until the definition checkpoint, so a crash still tracks it', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const second = a1.cycles[1];
+    h.after(
+      (event) => event === 'cancel:a1-main-1',
+      () => {
+        h.clock = second.dueAtMs + 1;
+      },
+    );
+    h.failCheckpointTimes = 2;
+
+    await assert.rejects(
+      editAlarmDefinition(h.input([a1])),
+      (error: unknown) =>
+        error instanceof AlarmEditError && error.code === 'save_failed',
+    );
+
+    const entry = h.journalEntries.get('a1')!;
+    assert.ok(entry.oldNotificationIds.includes('a1-main-2'));
+    assert.ok(entry.oldNotificationIds.includes('a1-check-2'));
+    assert.ok(h.scheduled.has('a1-main-2'));
+
+    // The disk still holds the old definition: recovery must keep cycle 2.
+    const result = await recoverPendingAlarmEdit(
+      recoverInput(h, [a1], entry, async (next) => void h.saved.push(next)),
+    );
+    assert.ok(h.scheduled.has('a1-main-2'));
+    assert.deepEqual(
+      result[0].cycles.find((c) => c.cycleId === second.cycleId),
+      second,
+    );
+    assert.equal(h.journalEntries.size, 0);
+  });
+
+  test('schedules and persists the check-in from the same arm time', async () => {
+    const a1 = definition('a1');
+    const h = harness([a1]);
+    const requests: number[] = [];
+    const original = h.gateway.scheduleCheckIn;
+    h.gateway.scheduleCheckIn = async (request) => {
+      requests.push(request.checkInAtMs);
+      return original(request);
+    };
+    h.after(
+      (event) => event === `schedule:${NEW_MAINS[2]}`,
+      () => {
+        h.clock = NOW + 20_000;
+      },
+    );
+
+    const result = await editAlarmDefinition(
+      h.input([a1], { hour: 12, minute: 2, repeat: makeAlarmRepeat('daily', NOW) }),
+    );
+
+    const first = result.alarms[0].cycles.find(
+      (c) => c.cycleId === 'new-cycle-1',
+    )!;
+    assert.equal(requests[0], getCheckInAtMs(first.dueAtMs, first.armedAtMs));
   });
 });
