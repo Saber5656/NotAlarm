@@ -36,6 +36,17 @@
 | ALR-016 | P0 | 本番用アプリ識別子とストア素材を確定する | prototype 識別子のまま別アプリとして配布される |
 | ALR-017 | P2 | 実地点の日の出・日の入りを任意反映する | 固定時刻の空が地域・季節とずれる |
 
+### 現在の到達状況（2026-10-15 時点）
+
+「すべて完了」ではない。残りは性質の違う 4 種類に分かれる。
+
+| 区分 | 内容 | 該当 |
+|---|---|---|
+| コード完了（自動テスト・typecheck・export 済み） | #13 予約照合、#15 編集、#16 画面上のスヌーズ（5 分 × 最大 3 回）、#19 リセット、#20 診断コード、#21 設定・データ削除、#22 国際化・アクセシビリティ（実装と自動/ブラウザ確認）、#23 controller 分割、#24 / #29 / #30 ほか | ALR-003 / 007〜011 / 013 / 015 / 017 など |
+| コード未実装（ネイティブ化の承認待ち） | Native #26〜#28: background/native での継続補充、ロック画面・通知 action からのスヌーズ、terminated 時の Watch action、AlarmKit 等 | ALR-001 / 002 / 010（background 部分） |
+| 物理端末で未検証 | 実機（Expo Go）での鳴動・編集・スヌーズ・再起動復旧・VoiceOver・Dynamic Type・位置情報・Watch。自動テストと `expo export` / `expo-doctor` は実機動作の証明ではない | ALR-004 / 005 / 006 / 008 / 013 ほか（`docs/DEVICE_TEST.md`） |
+| ストア・所有者の決定待ち | 本番 bundle identifier / package / URL / アイコン・素材 / 署名。既存の Expo Go 実機テストの前提ではない。ストア提出可能とは言えない | ALR-016 |
+
 ---
 
 ## ALR-001: Focus・消音を含む鳴動保証を設計する
@@ -248,7 +259,7 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 
 ### 対応状況（2026-10-15、実装済み・実機は未検証）
 
-- 起動時（`markDueCyclesRinging` の後）と `active` 復帰時に、保存した未来の周期と OS の保留通知を照合する（`src/scheduleReconciliation.ts`、App.tsx の `reconcileScheduleWithQueue`。順序・rollback は [DESIGN 6.1](DESIGN.md)）。main が無ければ同じ周期で再予約し、check-in だけ無ければ check-in だけ再予約する。権限が戻った後の次の照合で修復する。
+- 起動時（`markDueCyclesRinging` の後）と `active` 復帰時に、保存した未来の周期と OS の保留通知を照合する（`src/scheduleReconciliation.ts`、`src/app/core/queueReconciler.ts` の `reconcileScheduleWithQueue`（実 IO の接続は `src/app/platform/coordinators.ts`）。順序・rollback は [DESIGN 6.1](DESIGN.md)）。main が無ければ同じ周期で再予約し、check-in だけ無ければ check-in だけ再予約する。権限が戻った後の次の照合で修復する。
 - キューを読めない・権限がない場合は修復せず、行に「通知の予約状況を確認できません」「通知が端末に見つかりません」を表示して「予約済み」としない。
 - 繰り返しの `HH:mm` はローカル壁時計、「今日だけ」は元のローカル日付に固定（[DESIGN 4.1](DESIGN.md)）。タイムゾーン変更で壁時計とずれた周期は、新規予約 → cancel の順で組み直し、組み直した旨を notice で示す。計画時のタイムゾーンを保存する。
 - 未完了の cancel / suppression journal がある alarm、オフの alarm、`suppressed` / `dismissed` / `ringing` の周期、無関係な通知 ID には触れない。照合は suppression ロックと保存キューの内側で直列に実行し、同時実行は共有する。
@@ -295,7 +306,13 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 - [ ] キャンセル失敗では `suppressed` と表示しない
 - [ ] retry が重複通知や誤キャンセルを起こさない
 
-### Issue #20 の状況（診断コードと事実ベースの復旧 UI、2026-10-15）
+### Issue #20 の現在の状況（2026-10-15、統合後）
+
+- コード完了（実機は未確認）。#13 / #15 / #16 / #22 / #30 は統合済みで、下の「他 Issue のマージ後に統合が必要」は **履歴**（当時の引き継ぎメモ）であり、現在は未完了ではない。
+- `MAIN_UNVERIFIED` の孤児通知について、下の制限（「ID が不明なため自動では解除しない」）は **履歴**。現在は main の ID を予約前に耐久記録（事前割り当て、scoped provisional ownership）し、失敗時もその ID で解除・照合できる。判別不能な旧形式の通知だけは従来どおり残り得る（ALR-009 の #19 の項）。
+- 残り: 実機での表示確認（`docs/DEVICE_TEST.md` 項目 18）、`console` 診断ログ・共有機能は ALR-011 の方針により意図的に未実装。
+
+### Issue #20 の状況（診断コードと事実ベースの復旧 UI、2026-10-15・当時の記録）
 
 - コード完了（物理端末は未確認）: `src/errorCatalog.ts` に一意な診断コード・事実だけの日本語文言・回復手順・retry 区分・翻訳キーを集約し、通知権限／メイン登録・確認／起床確認のみ／歩数センサー（利用可否・許可・読み取り）／保存（破損・読み出し・保存）／無効な操作・期限／取り消し不明を別コードにした（docs/DESIGN.md 11.5）。メインは予約後に OS の予約一覧で確認し、確認できなければ `MAIN_UNVERIFIED` として保存せず成功表示しない。起床確認だけの失敗はメインを残して警告する。UI は例外の `message` を表示しない。破壊的操作は自動再試行せず、再開するのは既存の耐久ジャーナルのみ。
 - 受け入れ条件との対応: 一意なコード・説明＝カタログと `tests/errorCatalog.test.ts`／メイン未確認で成功表示しない＝`tests/diagnostics.test.ts`／取り消し失敗で suppressed と表示しない＝既存テスト＋`CANCEL_UNKNOWN`／retry が重複・誤キャンセルを起こさない＝取り消しを再実行しないことを回数で検証。「メインは残っている」と「アラーム未設定」の視覚的な区別は、tone（warning／danger）と文言のみ。専用の図記号は追加していない。
@@ -324,9 +341,15 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 
 ### 背景
 
-複数アラームと曜日繰り返しは実装済みで、通知上限を守るため各アラームの直近 3 回分を one-shot 通知として予約する。アプリを長期間起動しない場合の継続補充、既存アラームの編集、スヌーズは未実装である。
+複数アラームと曜日繰り返しは実装済みで、通知上限を守るため各アラームの直近 3 回分を one-shot 通知として予約する。アプリを長期間起動しない場合の継続補充は未実装（当時の記述。編集と画面上のスヌーズは実装済み、background 補充とロック画面操作は #26〜#28 待ち）。
 
-### 対応状況（2026-10-05）
+### 現在の状況（2026-10-15）
+
+- 実装済み（コード完了・実機未検証）: 画面上のスヌーズ（5 分 × 最大 3 回、元の期限は変えず、失敗時は鳴動を維持）と、時刻・繰り返しの編集。
+- 未実装（Native #26〜#28 の承認待ち）: background/native での継続補充、ロック画面・通知 action からのスヌーズ。アプリを前面に戻さない利用者は 3 周期後に止まる点は変わらない。
+- 下の「対応状況（2026-10-05）」は当時の記録（履歴）で、そこにある「スヌーズは未実装」は現在は当てはまらない。
+
+### 対応状況（2026-10-05・履歴）
 
 暫定対策のみ。本番リリース前の native/background 再予約は引き続き必須である。
 
@@ -335,7 +358,7 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 - そのアラームの直近の補充が予約に失敗した・停止処理が終わっていないため補充しなかった場合は、アプリを開いていても補充できないため「…まで予約済み・先の分を予約できませんでした」と表示する（`recordRefillAttempt`、`getScheduleCoverageLine` の `refillFailed`）。
 - 繰り返しアラームの main 通知の本文に「アプリを開くと次回以降の予約を続けます。」を添えた。「今日だけ」には添えない（`getMainAlarmNotificationBody`）。
 - 終了した「今日だけ」は元の日付と「終了」を行に表示し、オン・日付の付け替えを拒否する（コード・自動テスト済み）。実機での表示・VoiceOver 読み上げ・大きい文字サイズでの確認は未実施。
-- 編集（2026-10-15, Issue #15）: コードとして実装済み。一覧の「編集」から時刻・繰り返しを変更でき、新 main を先に予約（ID は journal に事前記録）→自分の旧 main・check-in だけを確認付きで取り消す→空いた枠に check-in を追加→保存する。各段階を耐久 journal に記録し、失敗時は旧アラームを維持（旧 main を消した後の失敗のみ前進して注意表示）。待機中に期限へ達した旧周期は取り消さず保持する。鳴動中は開始も保存も拒否。予約数は実際の OS 予約数で数え、main が収まらない場合のみ変更せず拒否する（10件満杯でも編集可）（[DESIGN.md 9章](DESIGN.md)）。**実機（Expo Go）での編集・再起動復旧・VoiceOver・最大文字サイズ・小画面の確認は未実施**で、自動テストと `expo export` は実機動作の証拠ではない。スヌーズは未実装のまま。
+- 編集（2026-10-15, Issue #15）: コードとして実装済み。一覧の「編集」から時刻・繰り返しを変更でき、新 main を先に予約（ID は journal に事前記録）→自分の旧 main・check-in だけを確認付きで取り消す→空いた枠に check-in を追加→保存する。各段階を耐久 journal に記録し、失敗時は旧アラームを維持（旧 main を消した後の失敗のみ前進して注意表示）。待機中に期限へ達した旧周期は取り消さず保持する。鳴動中は開始も保存も拒否。予約数は実際の OS 予約数で数え、main が収まらない場合のみ変更せず拒否する（10件満杯でも編集可）（[DESIGN.md 9章](DESIGN.md)）。**実機（Expo Go）での編集・再起動復旧・VoiceOver・最大文字サイズ・小画面の確認は未実施**で、自動テストと `expo export` は実機動作の証拠ではない。スヌーズは未実装のまま（当時。2026-10-15 に画面上のスヌーズは実装済み、上の「現在の状況」参照）。
 - 残り: 通知だけで使い、アプリを前面に戻さない利用者は3周期後にアラームが止まる。下のスコープの background/native 補充と、前面復帰時の補充の実機検証が必要。
 
 ### スコープ
@@ -362,6 +385,10 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 
 権限・通知・ライフサイクル不具合の解析には evidence が必要だが、睡眠や行動時刻はセンシティブである。
 
+### 現在の状況（2026-10-15）
+
+プライバシー方針により、ログ収集・外部送信・export は **意図的に実装していない**（コード不足ではない、`docs/PRIVACY.md`）。fail-safe 判定はログに依存しない。下の最後の受け入れ条件は、この設計どおりであることの自動テスト上の確認が主で、実機確認は未実施。
+
 ### スコープ
 
 - 保存するイベントと保持期間を最小化する
@@ -386,6 +413,10 @@ Expo Pedometer の live update は foreground 向けであり、iPhone ロック
 
 HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改善になり得るが、Watch 未装着時やデータ遅延を理由にアラームを止めてはならない。
 
+### 現在の状況（2026-10-15）
+
+将来の評価項目であり、追加で作ると約束した別アプリではない。未着手（物理 Watch・HealthKit の実測が前提）。
+
 ### スコープ
 
 - HealthKit の awake / asleep sample の更新遅延と権限を実測する
@@ -409,6 +440,11 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 ### 背景
 
 起床直後の短い確認操作は、VoiceOver、Dynamic Type、色覚、運動機能、言語設定にかかわらず誤操作しにくい必要がある。
+
+### 現在の状況（2026-10-15）
+
+- 実装と自動／ブラウザ確認は完了（Issue #22: 日英の文言・日時表記、locale 変更時の通知の再生成、アクセシビリティ label / 状態の公開、composer 検証メッセージ）。
+- **ネイティブの VoiceOver・Dynamic Type・最大文字サイズ・実機の locale 切替は未検証**。下の受け入れ条件は物理確認が要るため、意図的にチェックしていない。
 
 ### スコープ
 
@@ -465,7 +501,14 @@ Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` �
 
 ### 背景
 
-安全判定と通知順序は純粋な policy / orchestrator に分離済みで、追加モーダルとGlass surfaceも `src/ui/` へ分離した。一方、`App.tsx` には通知listener、Pedometer lifecycle、画面状態、ホーム画面renderingとstylesが残っている。即時の安全欠陥ではないが、将来のUI変更とライフサイクル変更の影響範囲がまだ広い。
+安全判定と通知順序は純粋な policy / orchestrator に分離済みで、追加モーダルとGlass surfaceも `src/ui/` へ分離した。（分割前は `App.tsx` に通知listener、Pedometer lifecycle、画面状態、ホーム画面renderingとstylesが同居していた。Issue 23 で `App.tsx` は composition のみとなり、`src/app/`（controller・責務別 hook・RN 非依存 core・platform edge）と `src/ui/screens/`（状態別 screen）へ分割した。）即時の安全欠陥ではないが、将来のUI変更とライフサイクル変更の影響範囲がまだ広い。
+
+### 現在の状況（2026-10-15）
+
+- コード完了。`App.tsx` は `SafeAreaProvider` と `AlarmApp` だけを組み立てる。責務は `src/app/useAlarmController.ts`（alarm list・loading・busy・notice の単一所有者）、責務別 hook（`useAlarmLifecycle` / `useAlarmMutations` / `useRingingActions` / `useSuppressionResponses` / `useStepCandidate` / `useNotificationEvents` / `useLocalDataDeletion` / `useDeviceText` ほか）、RN 非依存の `src/app/core/`（`refillCoordinator` / `queueReconciler` / `suppressionReconciler` / `homeView` / `formatters`）、`src/app/platform/`（gateway・coordinator・native edge）、`src/ui/screens/`（状態別 screen）に置く。行数での制限は設けていない（責務と import の依存方向だけを検査する）。
+- 配線テスト `tests/appWiring.test.ts` は `tests/support/source.ts` の `OWNER` で担当モジュールを 1 つ指定し、その中でだけアンカーを解決する。locale 追従（`tests/noticeLocalization.test.ts`、`tests/noticeProducersLocale.test.ts`、`tests/refillCoordinator.test.ts`）も同じ担当モジュールを読む。
+- 実行結果（最終統合後）: `npm test` 1179 / 1179 pass、`npm run typecheck`・`npm run security:check` exit 0、`expo install --check` up to date、`expo-doctor` 21/21、iOS / Web export 成功（記録: Agents Vault の issue23-final-integration-result.md）。
+- 未確認: 実機・Simulator での画面回帰（描画テストは無く、tsx では RN を描画できない）。下の最後の受け入れ条件は、画面別の目視確認が要るため未チェック。
 
 ### スコープ
 
@@ -476,9 +519,9 @@ Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` �
 
 ### 受け入れ条件
 
-- [ ] 通知response、Pedometer、UI renderingの責務が別moduleになっている
-- [ ] `alarmPolicy` / `alarmOrchestrator` にReact Native依存が入らない
-- [ ] 現在の 60 テスト相当以上が通過する
+- [x] 通知response、Pedometer、UI renderingの責務が別moduleになっている（`tests/appBoundaries.test.ts`、`tests/appImportGraph.test.ts`）
+- [x] `alarmPolicy` / `alarmOrchestrator` にReact Native依存が入らない（`tests/i18n.test.ts`、`tests/appBoundaries.test.ts`）
+- [x] 分割前（旧記述の 60 テスト相当、実際の baseline は 1124）以上が通過する（最終統合後の実行結果は下の「現在の状況」）
 - [ ] armed / step candidate / suppressed / ringingの画面回帰を確認できる
 
 ---
@@ -490,6 +533,10 @@ Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` �
 ### 背景
 
 現行の iOS bundle identifier と Android package は `app.alreadyup.prototype` である。既存インストールとの同一性、署名、ストア登録、deep link、通知権限の引き継ぎに影響するため、本 task では自己判断で変更していない。
+
+### 現在の状況（2026-10-15）
+
+本番の識別子・URL・アイコンなどの素材・署名は **未決定（所有者の判断待ち）**。既存の Expo Go での実機テストの前提ではない。ストア提出可能とは言えない。
 
 ### スコープ
 
