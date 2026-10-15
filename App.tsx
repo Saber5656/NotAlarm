@@ -1146,7 +1146,10 @@ function AlarmApp() {
         );
         reportedScheduleProblemsRef.current = reconciled.reported;
         if (reconciled.hasNew && result.notice) {
-          setNotice(result.notice);
+          // The refill awaited across a possible locale change; rebuild now.
+          setNotice(
+            relocalizeNotice(result.notice, textRef.current) ?? result.notice,
+          );
         }
         return result.alarms;
       } finally {
