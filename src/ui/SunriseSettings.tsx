@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SUN_REGIONS } from '../sunRegions';
 import { sunStatusText } from '../sunStatusText';
 import type { SunBackgroundState } from '../useSunBackground';
+import { radioSemantics } from './radioSemantics';
 import { UI_COLORS } from './tokens';
 
 interface SunriseSettingsProps {
@@ -122,11 +123,13 @@ function Row({
   selected,
   testID,
 }: RowProps) {
+  const semantics = radioSemantics(selected, disabled);
   return (
     <Pressable
       accessibilityLabel={label}
-      accessibilityRole="radio"
-      accessibilityState={{ checked: selected, disabled }}
+      accessibilityRole={semantics.accessibilityRole}
+      accessibilityState={semantics.accessibilityState}
+      aria-checked={semantics['aria-checked']}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
@@ -141,6 +144,9 @@ function Row({
       <Text style={[styles.label, selected && styles.labelSelected]}>
         {label}
       </Text>
+      {semantics.marker ? (
+        <Text style={styles.marker}>{semantics.marker}</Text>
+      ) : null}
       {detail ? <Text style={styles.detail}>{detail}</Text> : null}
     </Pressable>
   );
@@ -185,6 +191,7 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.5 },
   label: { color: UI_COLORS.textPrimary, fontSize: 15, fontWeight: '600' },
+  marker: { color: UI_COLORS.accentLabel, fontSize: 12, fontWeight: '800' },
   labelSelected: { color: UI_COLORS.accentLabel, fontWeight: '800' },
   detail: { color: UI_COLORS.textMuted, fontSize: 12, lineHeight: 17 },
   status: { color: UI_COLORS.textSecondary, fontSize: 13, lineHeight: 19 },
