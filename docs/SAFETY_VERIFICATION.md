@@ -23,6 +23,17 @@ Issue 29（保存の版管理・冪等性）で実際に存在し、実行した
 - `npx expo export --platform ios`: 成功（実機起動の証明ではない）
 - `npm run security:check`: 成功
 
+### Issue 23 最終統合後の実行結果（2026-10-15、本 worktree、最新の #22 を含む）
+
+上の履歴とは別の実行。実際に実行した結果だけを記す。
+
+- `npm test`: tests 1179 / pass 1179 / fail 0
+- `npm run typecheck`: exit 0
+- `npm run security:check`: exit 0
+- `npx expo install --check`: up to date（SDK 57.0.0）、`expo-doctor`: 21/21
+- `npx expo export --platform ios` / `--platform web`: 成功
+- いずれも実機起動の証明ではない。物理端末・Simulator での確認は未実施。
+
 ## 鳴動遷移（配信された main 通知 → ringing）
 
 実装: `markCycleRinging`（`src/alarmDefinitionMutations.ts`）、`saveCycleRinging`（`src/alarmStorage.ts`）。App の received listener はこの 1 経路だけで ringing にする（Issue 16 の `markDeliveredCycleRinging` は App から外し、2 回の遷移は走らせない。同関数は `src/snooze.ts` に残り、Issue 16 のテストだけが使う）。時計は queue 内 transaction で `readNowMs()` により読む。App は `Date.now` 関数を渡す（数値を事前取得しない）。
@@ -48,8 +59,8 @@ Issue 29（保存の版管理・冪等性）で実際に存在し、実行した
 | snooze 配信が回復窓を超えて見つかれば無音 missed | `classifyDueCycle` | › a snooze delivery found past the recovery window becomes silent missed |
 | snooze 配信と停止の競合、重複配信で dismissed を復活させない | `transactAlarmDefinitions` | › a snooze delivery racing a stop never revives the stopped cycle |
 | snooze の時計も queue 内で読む | `saveCycleRinging` | › the snooze clock is read inside the queued transaction |
-| listener の catch は reset 保留を `reportResetPending` で表示し、一般の保存失敗にしない | `App.tsx` | `tests/appWiring.test.ts` › a failed delivery save reports a pending deletion instead of a generic failure（配線検査） |
-| App が `saveCycleRinging` のみを `Date.now` 関数付きで呼ぶ | `App.tsx` | `tests/appWiring.test.ts` › a delivered alarm notification is applied to the latest stored state / a delivered main notification rings through the atomic transition only |
+| listener の catch は reset 保留を `reportResetPending` で表示し、一般の保存失敗にしない | `src/app/useNotificationEvents.ts` | `tests/appWiring.test.ts` › a failed delivery save reports a pending deletion instead of a generic failure（配線検査） |
+| 配信 listener が `saveCycleRinging` のみを `Date.now` 関数付きで呼ぶ | `src/app/useNotificationEvents.ts` | `tests/appWiring.test.ts` › a delivered alarm notification is applied to the latest stored state / a delivered main notification rings through the atomic transition only |
 | Issue 16 の snooze 遷移（現行 snooze 通知のみ・元 deadline 不変・上限 3 回） | `markDeliveredCycleRinging`（旧経路、テスト専用） | `tests/snoozeLockIntegration.test.ts`（変更なし、緑） |
 
 UI は `isStaleStorageResult` で reset 前の結果を捨てる `setCurrentAlarms` 経由でのみ状態を反映する。reset 保留中の他の変異拒否は `tests/storageResetGuard.test.ts` が対象。
@@ -72,7 +83,7 @@ UI は `isStaleStorageResult` で reset 前の結果を捨てる `setCurrentAlar
 
 ## 配信 due の完全一致と missed 確認応答（PR 47 後追い）
 
-実装: `buildMainNotificationData` / `buildSnoozeNotificationData` / `readMainDeliveryIdentity`（`src/alarmContracts.ts`）、`src/notificationService.ts`、`App.tsx` の received listener、`acknowledgeMissedAlarms`（`src/missedAcknowledgement.ts`）。
+実装: `buildMainNotificationData` / `buildSnoozeNotificationData` / `readMainDeliveryIdentity`（`src/alarmContracts.ts`）、`src/notificationService.ts`、`src/app/useNotificationEvents.ts` の received listener、`acknowledgeMissedAlarms`（`src/missedAcknowledgement.ts`）。
 
 | 基準 | テスト |
 |---|---|

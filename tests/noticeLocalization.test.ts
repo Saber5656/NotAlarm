@@ -1,7 +1,6 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -14,8 +13,7 @@ import { getMainAlarmNotificationBody } from '../src/alarmNotificationContent';
 import { noticeFromCodeIn, noticeFromCodesIn } from '../src/i18n/errorText';
 import { localizedNotice, relocalizeNotice } from '../src/i18n/localizedNotice';
 import { EN_TEXT, JA_TEXT, en, ja } from './support/text';
-
-const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+import { OWNER, blockIn, read } from './support/source';
 
 test('a catalog notice is rendered again in the new language with the same code and tone', () => {
   const before = noticeFromCodeIn(en, 'STOP_RINGING_FAILED');
@@ -105,20 +103,56 @@ test('the added-alarm notice uses the text it is given at completion', () => {
 });
 
 test('addAlarm reads the latest text at completion instead of a stale closure', () => {
-  const start = app.indexOf('const addAlarm = useCallback');
-  const end = app.indexOf('const performToggleAlarm = useCallback');
-  assert.ok(start >= 0 && end > start);
-  const body = app.slice(start, end);
+  const body = blockIn(OWNER.mutations, 'const addAlarm = useCallback', 'const performToggleAlarm = useCallback');
 
   assert.doesNotMatch(body, /(?<![\w.])messages\./);
   assert.doesNotMatch(body, /(?<![\w.])formatter\./);
+  assert.match(body, /describeAlarmAdded\(/);
   assert.match(body, /textRef\.current/);
 });
 
-test('the foreground locale refresh re-renders stateful notices and the settings notice', () => {
-  assert.match(app, /setNotice\(\(previous\) => relocalizeNotice\(previous, nextText\)\)/);
-  assert.match(app, /useState<SettingsNotice \| null>\(null\)/);
-  assert.doesNotMatch(app, /useState<string \| null>\(null\);\s*const \[pedometerState/);
+test('the device text owner re-renders stateful notices when the locale changes', () => {
+  const deviceText = read(OWNER.deviceText);
+  assert.match(deviceText, /setNotice\(\(previous\) => relocalizeNotice\(previous, nextText\)\)/);
+  assert.match(read(OWNER.controller), /useDeviceText\(setNotice\)/);
+});
+
+test('the settings notice is a descriptor written in the current language when drawn', () => {
+  const deletion = read(OWNER.deletion);
+  assert.match(deletion, /useState<SettingsNotice \| null>\(null\)/);
+  assert.match(deletion, /setSettingsNotice\(blockedDeletionNotice\(deletionState\)\)/);
+  assert.doesNotMatch(deletion, /useState<string \| null>/);
+  assert.match(read(OWNER.settingsSheet), /settingsNotice\.text\(messages\)/);
+});
+
+test('manual warnings are written through localizedNotice from the latest text', () => {
+  const owners: Array<[string, RegExp[]]> = [
+    [OWNER.lifecycle, [/settings\.ambiguousWarning/]],
+    [OWNER.notificationEvents, [/ringing\.persistFailed/]],
+    [OWNER.stepCandidate, [/CANCEL_NOT_VERIFIED/, /stepsCancelUnconfirmed/]],
+    [OWNER.suppression, [/skip\.stoppedRefillFailed/, /skip\.failed/]],
+    [OWNER.bedside, [/keepAwakeFailure/]],
+    [OWNER.mutations, [/snoozedLockedNotice/]],
+    [OWNER.deletion, [/settings\.failedHome/, /settings\.ambiguousWarning/, /resetAmbiguous/]],
+  ];
+  for (const [owner, patterns] of owners) {
+    const source = read(owner);
+    assert.match(source, /localizedNotice\(/, owner);
+    for (const pattern of patterns) {
+      assert.match(source, pattern, `${owner} ${pattern}`);
+    }
+    assert.doesNotMatch(source, /setNotice\(\{\s*tone: '(?:warning|danger)'/, owner);
+  }
+  const bedside = read(OWNER.bedside);
+  assert.match(bedside, /keepAwakeDeliveryRef/);
+  assert.doesNotMatch(bedside, /keepAwakeFailureTextRef/);
+});
+
+test('schedule issue notices are localized in the schedule, mutation and refill owners', () => {
+  assert.match(read(OWNER.schedule), /describeScheduleIssuesLocalized\(/);
+  const mutations = read(OWNER.mutations);
+  assert.equal(mutations.match(/describeScheduleIssuesLocalized\(/g)?.length, 2);
+  assert.match(read(OWNER.refill), /rememberRebuild\(/);
 });
 
 test('an English repeating-alarm notification separates its two sentences', () => {
@@ -139,10 +173,7 @@ test('the Japanese repeating-alarm notification keeps no extra space', () => {
 });
 
 test('a refill notice that arrives after a locale change is rebuilt against the latest text', () => {
-  const start = app.indexOf('const refillEnabledSchedules = useCallback');
-  const end = app.indexOf('const openNotificationSettings');
-  assert.ok(start >= 0 && end > start);
-  const body = app.slice(start, end);
+  const body = blockIn(OWNER.schedule, 'const refillEnabledSchedules = useCallback', 'const reconcileWithQueue = useCallback');
 
   assert.match(body, /relocalizeNotice\(result\.notice, textRef\.current\)/);
   assert.doesNotMatch(body, /setNotice\(result\.notice\)/);

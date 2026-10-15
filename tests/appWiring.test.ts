@@ -1,27 +1,45 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { en, ja } from '../src/i18n';
+import {
+  OWNER,
+  blockIn,
+  countIn,
+  read,
+  sourcesUnder,
+} from './support/source';
 
-// App.tsx cannot be rendered under tsx, so these checks read its source to
-// guard the wiring that pure-function tests cannot see. They are a tripwire,
-// not a substitute for the device checks in docs/DEVICE_TEST.md.
-const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+// The app cannot be rendered under tsx, so these checks read the source of the
+// module that owns each responsibility (see OWNER) to guard wiring that
+// pure-function tests cannot see. Every anchor is resolved inside one named
+// module: an anchor that moves fails here instead of matching elsewhere. The
+// reconcile and refill coordinators also have execution tests
+// (queueReconciler / refillCoordinator / suppressionReconciler). This is a
+// tripwire, not a substitute for the device checks in docs/DEVICE_TEST.md.
+const appSources = [
+  OWNER.root,
+  ...sourcesUnder('src/app'),
+  ...sourcesUnder('src/ui/screens'),
+];
 
-function block(start: string, end: string): string {
-  const from = app.indexOf(start);
-  assert.notEqual(from, -1, `missing ${start}`);
-  const to = app.indexOf(end, from + start.length);
-  assert.notEqual(to, -1, `missing ${end}`);
-  return app.slice(from, to);
-}
+const STARTUP = [
+  OWNER.lifecycle,
+  'await recoverPendingAlarmCancellations()',
+  'await refillEnabledSchedules',
+] as const;
+const FOREGROUND = [
+  OWNER.lifecycle,
+  "return subscribeAppState((state) => {\n      if (state !== 'active')",
+  '  }, [\n    isLoaded,',
+] as const;
 
 test('toggle and delete re-check the latest alarms and clock when they run', () => {
-  const toggle = block('const toggleAlarm = useCallback', 'const deleteAlarm');
-  const remove = block(
+  const toggle = blockIn(OWNER.mutations, 'const toggleAlarm = useCallback', 'const deleteAlarm');
+  const remove = blockIn(
+    OWNER.mutations,
     'const deleteAlarm = useCallback',
     'const confirmDeleteAlarm',
   );
@@ -31,24 +49,25 @@ test('toggle and delete re-check the latest alarms and clock when they run', () 
     assert.match(body, /nowMs: Date\.now/);
   }
   // The delete dialog confirms through the guarded action, not the raw one.
-  const confirm = block('const confirmDeleteAlarm', 'const stopRinging');
+  const confirm = blockIn(OWNER.mutations, 'const confirmDeleteAlarm', 'return {\n    addAlarm');
   assert.match(confirm, /void deleteAlarm\(definition\)/);
   assert.doesNotMatch(confirm, /performDeleteAlarm/);
 });
 
 test('both suppression paths write to the persistent journal', () => {
-  assert.equal(app.match(/journal: suppressionJournal,/g)?.length, 4);
-  const awake = block('processAwakeResponseFailSafe(', 'confirmedAtMs: Date.now()');
+  // Awake response + in-app skip (useSuppressionResponses), step threshold
+  // (useStepCandidate) and the module-level recovery (coordinators).
+  assert.equal(countIn(OWNER.suppression, /journal: suppressionJournal,/g), 2);
+  assert.equal(countIn(OWNER.stepCandidate, /journal: suppressionJournal,/g), 1);
+  assert.equal(countIn(OWNER.coordinators, /journal: suppressionJournal,/g), 1);
+  const awake = blockIn(OWNER.suppression, 'processAwakeResponseFailSafe(', 'confirmedAtMs: Date.now()');
   assert.match(awake, /journal: suppressionJournal/);
-  const steps = block('processStepThresholdFailSafe(', 'countedFromMs,\n          },');
+  const steps = blockIn(OWNER.stepCandidate, 'processStepThresholdFailSafe(', 'countedFromMs,\n          },');
   assert.match(steps, /journal: suppressionJournal/);
 });
 
 test('startup settles suppressions before marking cycles due or refilling', () => {
-  const startup = block(
-    'await recoverPendingAlarmCancellations()',
-    'await refillEnabledSchedules',
-  );
+  const startup = blockIn(...STARTUP);
   const reconcile = startup.indexOf('reconcileSuppressions()');
   const markDue = startup.indexOf('markDueCyclesRinging(');
   assert.notEqual(reconcile, -1);
@@ -56,10 +75,7 @@ test('startup settles suppressions before marking cycles due or refilling', () =
 });
 
 test('foreground return reconciles before refilling', () => {
-  const foreground = block(
-    "const subscription = AppState.addEventListener('change', (state) => {\n      if (state !== 'active')",
-    'return () => subscription.remove();',
-  );
+  const foreground = blockIn(...FOREGROUND);
   assert.ok(
     foreground.indexOf('reconcileSuppressions()') <
       foreground.indexOf("'foreground'"),
@@ -67,41 +83,48 @@ test('foreground return reconciles before refilling', () => {
 });
 
 test('refill skips alarms with unsettled suppressions and fails closed if unreadable', () => {
-  const refill = block('async function refillEnabledSchedulesOnce', 'catch (error)');
-  assert.match(refill, /await suppressionJournal\.load\(\)/);
+  const refill = blockIn(OWNER.refill, 'async function refillEnabledSchedulesOnce', 'catch (error)');
+  assert.match(refill, /await deps\.loadSuppressionIntents\(\)/);
   assert.match(refill, /pendingAlarmIds\.add\(pending\.alarmId\)/);
+  // The injected port is the persistent journal itself.
+  assert.match(read(OWNER.coordinators), /loadSuppressionIntents: \(\) => suppressionJournal\.load\(\)/);
 });
 
 test('suppression failures are shown through the dedicated warning, not "alarm on"', () => {
-  assert.equal(
-    app.match(/classifySuppressionFailure\(error, messagesNow\(\)\)/g)?.length,
-    3,
-  );
-  assert.match(app, /testID="suppression-warning"/);
+  assert.equal(countIn(OWNER.suppression, /classifySuppressionFailure\(error, messagesNow\(\)\)/g), 2);
+  assert.equal(countIn(OWNER.stepCandidate, /classifySuppressionFailure\(error, messagesNow\(\)\)/g), 1);
+  assert.match(read(OWNER.home), /testID="suppression-warning"/);
 });
 
 test('storage reset is reachable only from two confirmations in the load-failed card', () => {
-  const sources = ['App.tsx', ...readdirSync(new URL('../src', import.meta.url))
-    .filter((name) => /\.tsx?$/.test(name))
-    .map((name) => `src/${name}`)];
-  for (const name of sources) {
-    const text = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
+  for (const name of appSources) {
+    const text = read(name);
     assert.doesNotMatch(
       text,
       /cancelAllScheduledNotificationsAsync/,
       `${name} must never cancel the shared queue`,
     );
-    if (name !== 'App.tsx') {
-      assert.doesNotMatch(text, /storageReset\.reset\(/);
+    if (name !== OWNER.deletion) {
+      assert.doesNotMatch(text, /storageReset\.reset\(/, name);
+    }
+  }
+  for (const name of sourcesUnder('src')) {
+    if (!name.startsWith('src/app/') && !name.startsWith('src/ui/screens/')) {
+      assert.doesNotMatch(read(name), /cancelAllScheduledNotificationsAsync/, name);
+      assert.doesNotMatch(read(name), /storageReset\.reset\(/, name);
     }
   }
 
-  assert.equal(app.match(/storageReset\.reset\(/g)?.length, 1);
-  const perform = block('const performStorageReset = useCallback', 'const confirmStorageReset');
+  const total = appSources.reduce(
+    (sum, name) => sum + countIn(name, /storageReset\.reset\(/g),
+    0,
+  );
+  assert.equal(total, 1);
+  const perform = blockIn(OWNER.deletion, 'const performStorageReset = useCallback', 'const confirmStorageReset');
   assert.match(perform, /storageReset\.reset\(/);
   assert.match(perform, /!loadFailed/);
 
-  const confirm = block('const confirmStorageReset = useCallback', 'const stopRinging');
+  const confirm = blockIn(OWNER.deletion, 'const confirmStorageReset = useCallback', 'useEffect(() => {');
   assert.equal(confirm.match(/Alert\.alert\(/g)?.length, 2);
   assert.match(confirm, /!loadFailed/);
   // The reset runs only from the second dialog's destructive button.
@@ -109,19 +132,29 @@ test('storage reset is reachable only from two confirmations in the load-failed 
   assert.match(second, /performStorageReset\(\)/);
   assert.equal(confirm.match(/performStorageReset\(\)/g)?.length, 1);
 
-  const card = block('testID="storage-load-failed"', ') : deliveryWarningCopy');
+  // The only control that starts it is in the load-failed card, and the home
+  // screen renders that card only for a failed load.
+  const card = read(OWNER.loadFailedCard);
+  assert.match(card, /testID="storage-load-failed"/);
   assert.match(card, /confirmStorageReset/);
-  assert.equal(app.match(/onPress=\{confirmStorageReset\}/g)?.length, 1);
+  assert.equal(card.match(/onPress=\{confirmStorageReset\}/g)?.length, 1);
+  for (const name of appSources) {
+    if (name !== OWNER.loadFailedCard) {
+      assert.doesNotMatch(read(name), /onPress=\{confirmStorageReset\}/, name);
+    }
+  }
+  assert.match(read(OWNER.home), /loadFailed \? \(\s*<LoadFailedCard/);
 });
 
 test('startup keeps the failure card while an earlier reset is unfinished', () => {
-  const startup = block('let cancellationRecoveryFailed = false;', 'await recoverPendingAlarmCancellations');
+  const startup = blockIn(OWNER.lifecycle, 'let cancellationRecoveryFailed = false;', 'await recoverPendingAlarmCancellations');
   assert.match(startup, /storageReset\.hasPendingReset\(\)/);
   assert.match(startup, /throw /);
 });
 
 test('settings deletion confirms twice, reuses the reset service and never runs while ringing', () => {
-  const confirm = block(
+  const confirm = blockIn(
+    OWNER.deletion,
     'const confirmLocalDataDeletion = useCallback',
     'const confirmStorageReset',
   );
@@ -129,7 +162,8 @@ test('settings deletion confirms twice, reuses the reset service and never runs 
   assert.match(confirm, /getLocalDataDeletionAvailability/);
   assert.match(confirm, /void performLocalDataDeletion\(\)/);
 
-  const perform = block(
+  const perform = blockIn(
+    OWNER.deletion,
     'const performLocalDataDeletion = useCallback',
     'const confirmLocalDataDeletion',
   );
@@ -137,25 +171,28 @@ test('settings deletion confirms twice, reuses the reset service and never runs 
   assert.match(perform, /getRingingCycle\(alarmsRef\.current\)/);
   assert.match(perform, /deleteAllLocalData\(storageReset\)/);
   // A failure must not touch the in-memory alarm list.
-  const failure = block("outcome.kind === 'failed'", 'applyLocalDataDeleted();');
+  const failure = blockIn(OWNER.deletion, "outcome.kind === 'failed'", 'applyLocalDataDeleted();');
   assert.doesNotMatch(failure, /setCurrentAlarms/);
 
-  assert.match(app, /visible=\{isSettingsOpen && !ringingCycle\}/);
-  assert.match(app, /accessibilityLabel=\{messages\.settings\.openLabel\}/);
+  assert.match(read(OWNER.app), /visible=\{settings\.isOpen && !ringingCycle\}/);
+  assert.match(read(OWNER.header), /accessibilityLabel=\{messages\.settings\.openLabel\}/);
 });
 
 test('an unfinished deletion blocks refill reservations and new alarms', () => {
-  const refill = block(
-    'mutateAlarmDefinitions(async (current) => {\n          // An unfinished deletion',
+  const refill = blockIn(
+    OWNER.refill,
+    'deps.storage.mutate(async (current) => {\n          // An unfinished deletion',
     'fillEnabledSchedules(',
   );
-  assert.match(refill, /storageReset\.hasPendingReset\(\)/);
+  assert.match(refill, /deps\.hasPendingReset\(\)/);
   assert.match(refill, /return current;/);
-  assert.match(app, /!deletionPending &&\n\s+alarms\.length < MAX_ALARM_COUNT/);
+  assert.match(read(OWNER.coordinators), /hasPendingReset: \(\) => storageReset\.hasPendingReset\(\)/);
+  assert.match(read(OWNER.homeView), /!deletionPending &&\n\s+alarms\.length < MAX_ALARM_COUNT/);
 });
 
 test('startup treats an unfinished reset as a recovery state before any refill', () => {
-  const startup = block(
+  const startup = blockIn(
+    OWNER.lifecycle,
     'await storageReset.hasPendingReset()',
     'await recoverPendingAlarmCancellations()',
   );
@@ -163,29 +200,41 @@ test('startup treats an unfinished reset as a recovery state before any refill',
 });
 
 test('the reset gate is installed at the storage layer and completion advances the epoch', () => {
-  assert.match(app, /installStorageResetGate\(\(\) => storageReset\.hasPendingReset\(\)\)/);
-  const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
+  const gateways = read(OWNER.gateways);
+  assert.match(gateways, /installStorageResetGate\(\(\) => storageReset\.hasPendingReset\(\)\)/);
+  const reset = blockIn(OWNER.gateways, 'export const storageReset = createStorageResetService', 'installStorageResetGate');
   assert.match(
     reset,
     /onCompleted: \(\) => \{\s*advanceStorageEpoch\(\);\s*snoozeService\.forgetUnsettled\(\);\s*\/\/[^\n]*\s*schedulingGateway\.clearUnresolved\(\);/,
   );
+  // Armed once: nothing outside the gateway module installs a gate or handler.
+  for (const name of appSources) {
+    if (name !== OWNER.gateways) {
+      assert.doesNotMatch(read(name), /installStorageResetGate\(|installForegroundNotificationHandler\(/, name);
+    }
+  }
+  assert.equal(countIn(OWNER.gateways, /installStorageResetGate\(/g), 1);
+  assert.equal(countIn(OWNER.gateways, /installForegroundNotificationHandler\(\)/g), 1);
 });
 
 test('results read before a finished deletion never reach the screen', () => {
-  const setter = block('const setCurrentAlarms', 'alarmsRef.current = next;');
+  const setter = blockIn(OWNER.controller, 'const setCurrentAlarms', 'alarmsRef.current = next;');
   assert.match(setter, /isStaleStorageResult\(next\)/);
-  const refill = block('await refillEnabledSchedulesOnce(', 'recordRefill(result.attempt)');
+  const refill = blockIn(OWNER.refill, 'await refillEnabledSchedulesOnce(', 'apply(result)');
   assert.match(refill, /isStaleStorageResult\(result\.alarms\)/);
 });
 
 test('a finished deletion clears warning memory owned by the deleted alarms', () => {
-  const applied = block('const applyLocalDataDeleted', 'setCurrentAlarms([])');
-  assert.match(applied, /reportedScheduleProblemsRef\.current = new Set\(\)/);
+  const forget = blockIn(OWNER.schedule, 'const forgetDeletedAlarms', 'setRefillFailedAlarmIds(new Set())');
+  assert.match(forget, /reportedScheduleProblemsRef\.current = new Set\(\)/);
+  const applied = blockIn(OWNER.deletion, 'const applyLocalDataDeleted', 'setCurrentAlarms([])');
+  assert.match(applied, /forgetDeletedAlarms\(\)/);
 });
 
 test('a refused stop stops sound and the banner itself and never rewrites the alarm list', () => {
-  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
-  const refused = block(
+  const stop = blockIn(OWNER.ringingActions, 'const stopOccurrence = useCallback', 'const stopRinging');
+  const refused = blockIn(
+    OWNER.ringingActions,
     'if (isStorageResetPendingError(error) && !stoppedCycle) {',
     '} else if (stoppedCycle) {',
   );
@@ -200,41 +249,47 @@ test('a refused stop stops sound and the banner itself and never rewrites the al
   assert.doesNotMatch(stop, /saveStoredAlarm\(/);
 });
 
+const RECONCILE_ONCE = [
+  OWNER.queueReconciler,
+  'async function reconcileScheduleWithQueueOnce',
+  '/** Concurrent callers',
+] as const;
+
 test('queue reconciliation serialises against stops and user cancellations', () => {
-  const fn = block(
-    'async function reconcileScheduleWithQueueOnce',
-    'let scheduleReconcileInFlight',
-  );
+  const fn = blockIn(...RECONCILE_ONCE);
   // Order: suppression lock, then the storage queue, then the OS queue read.
-  const exclusive = fn.indexOf('suppressionJournal.exclusive(');
-  const transact = fn.indexOf('transactAlarmDefinitions(');
-  const inspect = fn.indexOf('readScheduledNotificationQueue');
+  const exclusive = fn.indexOf('deps.exclusive(');
+  const transact = fn.indexOf('deps.storage.transact(');
+  const inspect = fn.indexOf('readQueue: deps.readQueue');
   assert.ok(exclusive !== -1 && exclusive < transact);
   assert.ok(transact < inspect, 'the OS queue is read inside the storage turn');
   // Unfinished cancels and half-done stops exclude their alarm.
-  assert.match(fn, /loadPendingAlarmCancellations\(\)/);
-  assert.match(fn, /suppressionJournal\.load\(\)/);
+  assert.match(fn, /deps\.loadPendingAlarmCancellations\(\)/);
+  assert.match(fn, /deps\.loadSuppressionIntents\(\)/);
   assert.match(fn, /excludedAlarmIds/);
-  // The queue is read through the content-aware reader, again after each step.
-  assert.match(fn, /readQueue: readScheduledNotificationQueue/);
   assert.doesNotMatch(fn, /listScheduledNotificationIds/);
-  assert.match(fn, /orphans: orphanStore/);
+  // The injected edges are the real suppression lock, storage turn and the
+  // content-aware queue reader.
+  const wiring = blockIn(OWNER.coordinators, 'export const reconcileScheduleWithQueue', '/** One refill coordinator');
+  assert.match(wiring, /exclusive: \(run\) => suppressionJournal\.exclusive\(run\)/);
+  assert.match(wiring, /transact: transactAlarmDefinitions/);
+  assert.match(wiring, /readQueue: readScheduledNotificationQueue/);
+  assert.doesNotMatch(wiring, /listScheduledNotificationIds/);
+  assert.match(wiring, /orphans: orphanStore/);
 });
 
 test('an aborted reconciliation re-reads the durable checkpoint before any refill', () => {
-  const fn = block(
-    'async function reconcileScheduleWithQueueOnce',
-    'let scheduleReconcileInFlight',
-  );
+  const fn = blockIn(...RECONCILE_ONCE);
   const catchBlock = fn.slice(fn.lastIndexOf('} catch (error)'));
   assert.match(catchBlock, /recoverAbortedReconciliation\(/);
-  assert.match(catchBlock, /loadAlarmDefinitions/);
+  assert.match(catchBlock, /deps\.storage\.load/);
   assert.match(catchBlock, /unrecoveredNotificationIds/);
-  // The recovered state flows into App state; the stale input is not reused.
-  const reconcile = block('const reconcileWithQueue = useCallback', 'const clearQueueStatus');
+  assert.match(read(OWNER.coordinators), /load: loadAlarmDefinitions/);
+  // The recovered state flows into the alarm state; the stale input is not reused.
+  const reconcile = blockIn(OWNER.schedule, 'const reconcileWithQueue = useCallback', 'const clearQueueStatus');
   assert.match(reconcile, /unrecoveredNotificationIds/);
   // The refill decision comes from the tested gate, never from `?? restored`.
-  const startup = block('await recoverPendingAlarmCancellations()', 'await refillEnabledSchedules');
+  const startup = blockIn(...STARTUP);
   assert.doesNotMatch(startup, /\?\? restored/);
   assert.match(startup, /safeToRefill = state\.safeToRefill/);
   assert.match(reconcile, /assessReconciledState\(/);
@@ -242,25 +297,22 @@ test('an aborted reconciliation re-reads the durable checkpoint before any refil
 });
 
 test('queue reconciliation is not re-entered and shares the in-flight run', () => {
-  const shared = block('let scheduleReconcileInFlight', 'const ALARM_SUMMARY_CARD_HEIGHT');
-  assert.match(shared, /if \(scheduleReconcileInFlight\)/);
-  assert.match(shared, /return scheduleReconcileInFlight/);
-  assert.match(shared, /scheduleReconcileInFlight = null/);
+  const shared = blockIn(OWNER.queueReconciler, 'export function createQueueReconciler', '\n  };\n}');
+  assert.match(shared, /if \(inFlight\)/);
+  assert.match(shared, /return inFlight/);
+  assert.match(shared, /inFlight = null/);
+  // One shared run for the whole app: the reconciler is created once at module level.
+  assert.equal(countIn(OWNER.coordinators, /createQueueReconciler\(/g), 1);
+  assert.match(read(OWNER.coordinators), /export const reconcileScheduleWithQueue = createQueueReconciler/);
 });
 
 test('startup and foreground reconcile with the OS queue before refilling', () => {
-  const startup = block(
-    'await recoverPendingAlarmCancellations()',
-    'await refillEnabledSchedules',
-  );
+  const startup = blockIn(...STARTUP);
   assert.ok(
     startup.indexOf('markDueCyclesRinging(') <
       startup.indexOf('reconcileWithQueue('),
   );
-  const foreground = block(
-    "const subscription = AppState.addEventListener('change', (state) => {\n      if (state !== 'active')",
-    'return () => subscription.remove();',
-  );
+  const foreground = blockIn(...FOREGROUND);
   assert.ok(
     foreground.indexOf('reconcileWithQueue(') <
       foreground.indexOf("'foreground'"),
@@ -268,26 +320,23 @@ test('startup and foreground reconcile with the OS queue before refilling', () =
 });
 
 test('rows show the OS-queue verification instead of claiming a reservation', () => {
-  assert.match(app, /queueStatus: queueStatuses\[definition\.id\]/);
-  assert.match(app, /testID="queue-verification-warning"|queueStatuses/);
+  assert.match(read(OWNER.list), /queueStatus: queueStatuses\[definition\.id\]/);
+  assert.match(read(OWNER.home), /queueStatuses=\{queueStatuses\}/);
 });
 
 test('a pending storage reset is checked before any reconcile, recovery or refill', () => {
-  const reconcile = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  const reconcile = blockIn(...RECONCILE_ONCE);
   assert.ok(
-    reconcile.indexOf('storageReset.hasPendingReset()') <
-      reconcile.indexOf('prepareNotificationsIfGranted()'),
+    reconcile.indexOf('deps.hasPendingReset()') <
+      reconcile.indexOf('deps.prepareNotificationsIfGranted()'),
   );
   assert.ok(
-    reconcile.lastIndexOf('storageReset.hasPendingReset()') <
-      reconcile.indexOf('reconcileAlarmSchedules('),
+    reconcile.lastIndexOf('deps.hasPendingReset()') <
+      reconcile.indexOf('deps.reconcileSchedules('),
   );
-  const refill = block('async function refillEnabledSchedulesOnce', 'fillEnabledSchedules(');
-  assert.match(refill, /storageReset\.hasPendingReset\(\)/);
-  const foreground = block(
-    "const subscription = AppState.addEventListener('change', (state) => {\n      if (state !== 'active')",
-    'return () => subscription.remove();',
-  );
+  const refill = blockIn(OWNER.refill, 'async function refillEnabledSchedulesOnce', 'fillEnabledSchedules(');
+  assert.match(refill, /deps\.hasPendingReset\(\)/);
+  const foreground = blockIn(...FOREGROUND);
   assert.ok(
     foreground.indexOf('storageReset.hasPendingReset()') <
       foreground.indexOf('reconcileSuppressions()'),
@@ -295,39 +344,45 @@ test('a pending storage reset is checked before any reconcile, recovery or refil
 });
 
 test('an obsolete reconciliation never restores queue status or warnings after a deletion', () => {
-  const reconcile = block('const reconcileWithQueue = useCallback', 'const clearQueueStatus');
+  const reconcile = blockIn(OWNER.schedule, 'const reconcileWithQueue = useCallback', 'const clearQueueStatus');
   assert.ok(
     reconcile.indexOf('isObsoleteReconcileResult(result)') <
       reconcile.indexOf('setQueueStatuses(result.statuses)'),
   );
-  const applied = block('const applyLocalDataDeleted', 'setCurrentAlarms([])');
-  assert.match(applied, /reportedQueueProblemsRef\.current = new Set\(\)/);
-  assert.match(applied, /setQueueStatuses\(\{\}\)/);
-  const fn = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  const forget = blockIn(OWNER.schedule, 'const forgetDeletedAlarms', 'return {');
+  assert.match(forget, /reportedQueueProblemsRef\.current = new Set\(\)/);
+  assert.match(forget, /setQueueStatuses\(\{\}\)/);
+  const fn = blockIn(...RECONCILE_ONCE);
   const zoneSave = fn.slice(fn.indexOf('if (settled'), fn.indexOf('if (settled') + 120);
   assert.match(zoneSave, /isStaleStorageResult\(alarms\)/);
-  assert.match(fn, /await assertNoPendingReset\(\)/);
+  assert.match(fn, /await deps\.assertNoPendingReset\(\)/);
 });
 
 test('sun background hook is called unconditionally and feeds the theme', () => {
-  const hook = app.indexOf('useSunBackground(nowMs, sunStorageCoordination)');
+  const controller = read(OWNER.controller);
+  const hook = controller.indexOf('useSunBackground(nowMs, sunStorageCoordination)');
   assert.notEqual(hook, -1);
-  const theme = block('const circadianTheme = useMemo', 'const setCurrentAlarms');
+  const theme = blockIn(OWNER.controller, 'const circadianTheme = useMemo', 'useDeviceText');
   assert.match(theme, /getCircadianTheme\(new Date\(nowMs\), sun\.schedule\)/);
   assert.match(theme, /\[localMinuteKey, sun\.schedule\]/);
   // Not inside any condition, loop or callback: the line is a top-level const.
-  assert.match(app, /\n  const sun = useSunBackground\(/);
+  assert.match(controller, /\n  const sun = useSunBackground\(/);
+  assert.equal(countIn(OWNER.controller, /useSunBackground\(/g), 1);
   // The shared storage lock/gate is one module-level object (stable identity).
   assert.match(
-    app,
-    /\nconst sunStorageCoordination = \{[^}]*assertWritable: assertNoPendingReset/s,
+    read(OWNER.gateways),
+    /\nexport const sunStorageCoordination = \{[^}]*assertWritable: assertNoPendingReset/s,
   );
 });
 
 test('sunrise settings live inside the shared settings modal', () => {
-  const modal = block('<SettingsModal', '</SettingsModal>');
+  const modal = blockIn(OWNER.settingsSheet, '<SettingsModal', '</SettingsModal>');
   assert.match(modal, /<SunriseSettings/);
-  assert.equal(app.match(/<SettingsModal/g)?.length, 1);
+  const total = appSources.reduce(
+    (sum, name) => sum + countIn(name, /<SettingsModal/g),
+    0,
+  );
+  assert.equal(total, 1);
 });
 
 test('confirmed deletion invalidates the sun lookup before awaiting and settles it after', () => {
@@ -335,7 +390,7 @@ test('confirmed deletion invalidates the sun lookup before awaiting and settles 
     ['const performStorageReset = useCallback', 'const performLocalDataDeletion', 'await storageReset.reset()'],
     ['const performLocalDataDeletion = useCallback', 'const confirmLocalDataDeletion', 'await deleteAllLocalData(storageReset)'],
   ] as const) {
-    const body = block(start, end);
+    const body = blockIn(OWNER.deletion, start, end);
     const begin = body.indexOf('sun.beginDeletion()');
     assert.notEqual(begin, -1, start);
     assert.ok(begin < body.indexOf(call), `${start}: invalidate before reset`);
@@ -345,10 +400,7 @@ test('confirmed deletion invalidates the sun lookup before awaiting and settles 
 });
 
 test('sun callbacks are stable so effects and permission never loop', () => {
-  const hook = readFileSync(
-    new URL('../src/useSunBackground.ts', import.meta.url),
-    'utf8',
-  );
+  const hook = read('src/useSunBackground.ts');
   for (const name of [
     'chooseFixed',
     'chooseRegion',
@@ -367,51 +419,56 @@ test('sun callbacks are stable so effects and permission never loop', () => {
 });
 
 test('edit re-checks the lock at run time and runs under the suppression lock', () => {
-  const edit = block('const editAlarm = useCallback', 'const confirmDeleteAlarm');
+  const edit = blockIn(OWNER.mutations, 'const editAlarm = useCallback', 'const confirmDeleteAlarm');
   assert.match(edit, /runUnlessAlarmListLocked/);
   assert.match(edit, /getAlarms: \(\) => alarmsRef\.current/);
   assert.match(edit, /nowMs: Date\.now/);
-  const persist = block(
-    'async function editAlarmPersistently',
-    'async function recoverPendingAlarmEdits',
+  const persist = blockIn(
+    OWNER.alarmServices,
+    'export async function editAlarmPersistently',
+    'export async function recoverPendingAlarmEdits',
   );
   assert.match(persist, /suppressionJournal\.exclusive/);
   assert.match(persist, /transactAlarmDefinitions/);
   assert.match(persist, /editAlarmDefinition\(/);
   // Only the edited alarm's own recorded ids are cancelled, never "all".
-  assert.doesNotMatch(app, /cancelAllScheduledNotificationsAsync/);
+  for (const name of appSources) {
+    assert.doesNotMatch(read(name), /cancelAllScheduledNotificationsAsync/, name);
+  }
 });
 
 test('startup settles unfinished edits before suppressions, and refill skips them', () => {
-  const startup = block(
-    'await recoverPendingAlarmCancellations()',
-    'await refillEnabledSchedules',
-  );
+  const startup = blockIn(...STARTUP);
   const editRecovery = startup.indexOf('recoverPendingAlarmEdits()');
   assert.notEqual(editRecovery, -1);
   assert.ok(editRecovery < startup.indexOf('reconcileSuppressions()'));
   assert.ok(editRecovery < startup.indexOf('markDueCyclesRinging('));
-  const refill = block('async function refillEnabledSchedulesOnce', 'catch (error)');
-  assert.match(refill, /loadPendingAlarmEdits\(\)/);
+  const refill = blockIn(OWNER.refill, 'async function refillEnabledSchedulesOnce', 'catch (error)');
+  assert.match(refill, /deps\.loadPendingAlarmEdits\(\)/);
 });
 
 test('the composer is opened for an edit only through the guarded handler', () => {
-  assert.match(app, /messages\.edit\.editSpoken\(/);
+  const list = read(OWNER.list);
+  assert.match(list, /messages\.edit\.editSpoken\(/);
   assert.match(ja.edit.editSpoken('7:00', '毎日'), /のアラームを編集/);
   assert.match(en.edit.editSpoken('7:00', 'Daily'), /Edit the 7:00 alarm/);
-  assert.match(app, /onPress=\{\(\) => void openEditComposer\(definition\)\}/);
-  const open = block('const openEditComposer = useCallback', 'const editAlarm = useCallback');
+  assert.match(list, /onPress=\{\(\) => void openEditComposer\(definition\)\}/);
+  const open = blockIn(OWNER.mutations, 'const openEditComposer = useCallback', 'const editAlarm = useCallback');
   assert.match(open, /runUnlessAlarmListLocked/);
+  // The screen is handed the guarded handler, never the form setters.
+  assert.match(read(OWNER.controller), /openEditComposer: mutations\.openEditComposer/);
 });
 
 test('the edit reads a fresh clock after its locks and after the permission prompt', () => {
-  const persist = block(
-    'async function editAlarmPersistently',
-    'async function recoverPendingAlarmEdits',
+  const persist = blockIn(
+    OWNER.alarmServices,
+    'export async function editAlarmPersistently',
+    'export async function recoverPendingAlarmEdits',
   );
   assert.match(persist, /now: Date\.now/);
   assert.doesNotMatch(persist, /nowMs/);
-  const perform = block(
+  const perform = blockIn(
+    OWNER.mutations,
     'const performEditAlarm = useCallback',
     'const openEditComposer',
   );
@@ -424,23 +481,21 @@ test('the edit reads a fresh clock after its locks and after the permission prom
 });
 
 test('requested notification ids reach expo-notifications as `identifier`', () => {
-  const service = readFileSync(
-    new URL('../src/notificationService.ts', import.meta.url),
-    'utf8',
-  );
+  const service = read('src/notificationService.ts');
   // Main, check-in and snooze requests all pass their stored id through.
   assert.equal(service.match(/identifier: input\.identifier/g)?.length, 3);
 });
 
 test('a pending reset blocks edit recovery and new edits', () => {
-  const startup = block('let cancellationRecoveryFailed = false;', 'await refillEnabledSchedules');
+  const startup = blockIn(OWNER.lifecycle, 'let cancellationRecoveryFailed = false;', 'await refillEnabledSchedules');
   assert.ok(
     startup.indexOf('storageReset.hasPendingReset()') <
       startup.indexOf('recoverPendingAlarmEdits()'),
   );
-  const persist = block(
-    'async function editAlarmPersistently',
-    'async function recoverPendingAlarmEdits',
+  const persist = blockIn(
+    OWNER.alarmServices,
+    'export async function editAlarmPersistently',
+    'export async function recoverPendingAlarmEdits',
   );
   assert.match(persist, /await assertNoPendingReset\(\)/);
   assert.ok(
@@ -452,9 +507,10 @@ test('a pending reset blocks edit recovery and new edits', () => {
 });
 
 test('edit recovery takes the suppression lock before the storage queue', () => {
-  const recover = block(
-    'async function recoverPendingAlarmEdits',
-    'async function recoverPendingAlarmCancellations',
+  const recover = blockIn(
+    OWNER.alarmServices,
+    'export async function recoverPendingAlarmEdits',
+    'export async function recoverPendingAlarmCancellations',
   );
   assert.ok(
     recover.indexOf('suppressionJournal.exclusive') <
@@ -463,28 +519,25 @@ test('edit recovery takes the suppression lock before the storage queue', () => 
 });
 
 test('queue reconciliation leaves alarms with an unsettled edit alone', () => {
-  const fn = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
-  assert.match(fn, /loadPendingAlarmEdits\(\)/);
+  const fn = blockIn(...RECONCILE_ONCE);
+  assert.match(fn, /deps\.loadPendingAlarmEdits\(\)/);
 });
 
 test('an edit refused by a pending reset surfaces the deletion state', () => {
-  const perform = block('const performEditAlarm = useCallback', 'const openEditComposer');
+  const perform = blockIn(OWNER.mutations, 'const performEditAlarm = useCallback', 'const openEditComposer');
   assert.match(perform, /reportResetPending\(error\)/);
 });
 
 test('edit success and add open are wired to the composer/queue state helpers', () => {
-  const perform = block('const performEditAlarm', 'const openEditComposer');
+  const perform = blockIn(OWNER.mutations, 'const performEditAlarm', 'const openEditComposer');
   assert.match(perform, /clearQueueStatus\(alarmId\)/);
-  assert.match(app, /resolveComposerValues\(\{\s*mode: 'add'/);
-  assert.match(app, /canSubmitComposer\(\{/);
-  assert.match(app, /disabled=\{!editAvailable\}/);
+  assert.match(read(OWNER.composerForm), /resolveComposerValues\(\{\s*mode: 'add'/);
+  assert.match(read(OWNER.homeView), /canSubmitComposer\(\{/);
+  assert.match(read(OWNER.list), /disabled=\{!editAvailable\}/);
 });
 
 test('startup re-arms snoozes before overdue cycles are classified, on launch and resume', () => {
-  const startup = block(
-    'await recoverPendingAlarmCancellations()',
-    'await refillEnabledSchedules',
-  );
+  const startup = blockIn(...STARTUP);
   assert.ok(
     startup.indexOf('recoverPendingAlarmEdits()') <
       startup.indexOf('recoverSnoozes()'),
@@ -495,7 +548,8 @@ test('startup re-arms snoozes before overdue cycles are classified, on launch an
   assert.ok(
     startup.indexOf('recoverSnoozes()') < startup.indexOf('reconcileWithQueue('),
   );
-  const resume = block(
+  const resume = blockIn(
+    OWNER.lifecycle,
     "const reconciled = await reconcileSuppressions();\n        setSuppressionWarning(",
     "if (alarmsRef.current.some((alarm) => alarm.enabled))",
   );
@@ -505,9 +559,9 @@ test('startup re-arms snoozes before overdue cycles are classified, on launch an
 });
 
 test('stop and snooze go through the shared snooze service, never raw cancellation', () => {
-  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  const stop = blockIn(OWNER.ringingActions, 'const stopOccurrence = useCallback', 'const stopRinging');
   assert.match(stop, /snoozeService\.stop\(cycle\.cycleId\)/);
-  const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
+  const snooze = blockIn(OWNER.ringingActions, 'const snoozeRinging = useCallback', 'return { acknowledgeMissed');
   assert.match(snooze, /snoozeService\.snooze\(ringingCycle\.cycleId/);
   // Success is announced only on the snoozed result.
   assert.ok(
@@ -519,17 +573,17 @@ test('stop and snooze go through the shared snooze service, never raw cancellati
 });
 
 test('snooze, stop and recovery run in one suppression-then-storage transaction', () => {
-  const service = block('const snoozeService = createSnoozeService', '// Order matches the stop path');
+  const service = blockIn(OWNER.gateways, 'export const snoozeService = createSnoozeService', '// Order matches the stop path');
   assert.match(service, /transact: createSnoozeTransaction\(\{/);
   assert.match(service, /exclusive: \(run\) => suppressionJournal\.exclusive\(run\)/);
   assert.match(service, /transact: transactAlarmDefinitions/);
   // The storage queue is never re-entered from the service.
   assert.doesNotMatch(service, /runExclusiveAlarmStorage/);
-  assert.match(app, /snoozeService\.recover\(\)/);
+  assert.match(read(OWNER.schedule), /snoozeService\.recover\(\)/);
 });
 
 test('a delivered alarm notification is applied to the latest stored state', () => {
-  const received = block('addNotificationReceivedListener', 'const lastResponse');
+  const received = blockIn(OWNER.notificationEvents, 'onReceived: (notification) => {', 'const lastResponse');
   assert.match(received, /saveCycleRinging\(/);
   assert.match(received, /notification\.request\.identifier/);
   // One transition only: no second ringing path and no earlier copy written back.
@@ -538,37 +592,31 @@ test('a delivered alarm notification is applied to the latest stored state', () 
 });
 
 test('the list lock covers a waiting snooze and says so', () => {
-  assert.match(app, /isAlarmListLocked\(ringingCycle \?\? snoozedCycle\)/);
-  const notify = block('const notifyListLocked', 'Both read the latest alarms');
+  assert.match(read(OWNER.homeView), /isAlarmListLocked\(ringingCycle \?\? snoozedCycle\)/);
+  const notify = blockIn(OWNER.mutations, 'const notifyListLocked', 'Both read the latest alarms');
   assert.match(notify, /reason === 'snoozed'/);
 });
 
 test('the ringing card keeps stop first and snooze second, both pressable', () => {
-  const card = block('{ringingCycle ? (', 'missedCycles.length > 0 ? (');
+  const card = read(OWNER.ringingCard);
   assert.ok(card.indexOf('stopRinging()') < card.indexOf('snoozeRinging()'));
   assert.match(card, /minHeight|styles\.snoozeButton/);
 });
 
 test('Android channel delivery wiring', () => {
-  const service = readFileSync(
-    new URL('../src/notificationService.ts', import.meta.url),
-    'utf8',
-  );
-  const read = service.slice(
+  const service = read('src/notificationService.ts');
+  const read_ = service.slice(
     service.indexOf('export async function readNotificationDelivery'),
     service.indexOf('Android keeps an absolute'),
   );
 
-    assert.match(read, /mainChannelId: ALARM_CHANNEL_ID/);
-    assert.doesNotMatch(read, /CHECK_IN_CHANNEL_ID|requestPermissionsAsync|setNotificationChannelAsync/);
-    assert.match(read, /getNotificationChannelAsync/);
+  assert.match(read_, /mainChannelId: ALARM_CHANNEL_ID/);
+  assert.doesNotMatch(read_, /CHECK_IN_CHANNEL_ID|requestPermissionsAsync|setNotificationChannelAsync/);
+  assert.match(read_, /getNotificationChannelAsync/);
 });
 
 test('a delivered main notification rings through the atomic transition only', () => {
-  const listener = block(
-    'addNotificationReceivedListener',
-    'getLastNotificationResponse',
-  );
+  const listener = blockIn(OWNER.notificationEvents, 'onReceived: (notification) => {', 'const lastResponse');
   assert.match(listener, /saveCycleRinging\(/);
   assert.match(listener, /saveCycleRinging\(\s*identity,\s*Date\.now,\s*\)/);
   assert.doesNotMatch(listener, /Date\.now\(\)/);
@@ -577,24 +625,18 @@ test('a delivered main notification rings through the atomic transition only', (
 });
 
 test('a failed delivery save reports a pending deletion instead of a generic failure', () => {
-  const listener = block(
-    'addNotificationReceivedListener',
-    'getLastNotificationResponse',
-  );
+  const listener = blockIn(OWNER.notificationEvents, 'onReceived: (notification) => {', 'const lastResponse');
   const caught = listener.slice(listener.indexOf('.catch('));
   assert.match(caught, /reportResetPending\(error\)/);
   assert.ok(
     caught.indexOf('reportResetPending(error)') <
       caught.indexOf('ringing.persistFailed'),
   );
-  assert.match(app, /\[handleAwakeResponse, isLoaded, reportResetPending, setCurrentAlarms\]/);
+  assert.match(read(OWNER.notificationEvents), /\[handleAwakeResponse, isLoaded, reportResetPending, setCurrentAlarms\]/);
 });
 
 test('the stored origin zone advances only through the shared gate, in the zone the run planned for', () => {
-  const reconcile = block(
-    'async function reconcileScheduleWithQueueOnce',
-    'let scheduleReconcileInFlight',
-  );
+  const reconcile = blockIn(...RECONCILE_ONCE);
   assert.match(reconcile, /currentZone: zone,/);
   assert.match(reconcile, /originZone: storedZone,/);
   assert.match(reconcile, /canAdvancePlanningZone\(\{/);
@@ -604,42 +646,68 @@ test('the stored origin zone advances only through the shared gate, in the zone 
 });
 
 test('every refill path hands the stored origin zone to the fill', () => {
-  const calls = app.match(/fillAlarmDefinitionSchedule\(/g)?.length ?? 0;
-  const withOrigin = app.match(/await loadPlanningZone\(AsyncStorage\)/g)?.length ?? 0;
-  // refill (via fillEnabledSchedules), completion refill, enable; a new alarm has no history.
+  const owners = [OWNER.refill, OWNER.schedule, OWNER.mutations];
+  const calls = owners.reduce((sum, name) => sum + countIn(name, /fillAlarmDefinitionSchedule\(/g), 0);
+  const withOrigin =
+    countIn(OWNER.coordinators, /loadPlanningZone\(AsyncStorage\)/g) +
+    countIn(OWNER.schedule, /await loadPlanningZone\(AsyncStorage\)/g) +
+    countIn(OWNER.mutations, /await loadPlanningZone\(AsyncStorage\)/g);
+  // refill (via fillEnabledSchedules), completion refill, enable, and the new
+  // alarm, which has no history and so no origin zone.
   assert.equal(calls, 4);
+  assert.equal(countIn(OWNER.refill, /fillAlarmDefinitionSchedule\(/g), 1);
+  assert.equal(countIn(OWNER.schedule, /fillAlarmDefinitionSchedule\(/g), 1);
+  assert.equal(countIn(OWNER.mutations, /fillAlarmDefinitionSchedule\(/g), 2);
+  // Reconcile and refill read it through the coordinators; completion refill
+  // and enable read it themselves.
   assert.ok(withOrigin >= 4, `origin zone read ${withOrigin} times`);
-  const refill = block('async function refillEnabledSchedulesOnce', 'interface ScreenFrameProps');
+  assert.match(read(OWNER.refill), /await deps\.loadPlanningZone\(\)/);
+  const refill = blockIn(OWNER.refill, 'async function fillEnabledSchedules', 'async function refillEnabledSchedulesOnce');
   assert.match(refill, /unverifiedAlarmIds/);
 });
 
 test('unverified main ids are journaled, block retries, and reconcile/reset resolve them', () => {
-  assert.match(app, /withMainVerification\([\s\S]*?orphans: orphanStore/);
-  assert.match(app, /scheduleMain: schedulingGateway\.scheduleMainForReconcile/);
-  assert.match(app, /await schedulingGateway\.flushUnresolved\(\)/);
+  assert.match(read(OWNER.gateways), /withMainVerification\([\s\S]*?orphans: orphanStore/);
+  assert.match(read(OWNER.gateways), /scheduleMain: schedulingGateway\.scheduleMainForReconcile/);
+  assert.match(read(OWNER.queueReconciler), /await deps\.flushUnresolved\(\)/);
+  assert.match(read(OWNER.coordinators), /flushUnresolved: \(\) => schedulingGateway\.flushUnresolved\(\)/);
 });
 
 test('edit failures and rollbacks go through the catalog and the durable record', () => {
-  const perform = block('const performEditAlarm = useCallback', 'const openEditComposer');
+  const perform = blockIn(OWNER.mutations, 'const performEditAlarm = useCallback', 'const openEditComposer');
   assert.doesNotMatch(perform, /error\.message|error instanceof Error/);
   assert.match(perform, /describeErrorIn\(messagesNow\(\), error\)/);
   assert.match(perform, /noticeFromCodeIn\(messagesNow\(\), 'EDIT_CLEANUP_PENDING'\)/);
   // Every add/enable/refill rollback records ids it could not cancel.
-  const callers = app.match(/withScheduledNotificationRollback\(/g)?.length ?? 0;
-  assert.equal(
-    app.match(/cancellationGateway,\s+orphanStore,\s+schedulingGateway,\s+\)/g)?.length,
-    callers,
+  const owners = [OWNER.refill, OWNER.schedule, OWNER.mutations];
+  const callers = owners.reduce(
+    (sum, name) => sum + countIn(name, /withScheduledNotificationRollback\(/g),
+    0,
   );
+  const recording = owners.reduce(
+    (sum, name) =>
+      sum +
+      countIn(
+        name,
+        /(?:cancellationGateway,\s+orphanStore,\s+schedulingGateway,|deps\.cancellation,\s+deps\.orphans,\s+deps\.scheduling,)\s+\)/g,
+      ),
+    0,
+  );
+  assert.equal(callers, 4);
+  assert.equal(recording, callers);
 });
 
 test('cancellation failure copy is shown only when the resume record exists', () => {
-  assert.match(app, /async function cancellationFailureNotice/);
-  assert.doesNotMatch(app, /setNotice\(noticeFromCodeIn\([^)]*'DELETE_CANCEL_INCOMPLETE'\)\)/);
-  assert.doesNotMatch(app, /:\s*noticeFromCodeIn\([^)]*'DISABLE_CANCEL_INCOMPLETE'\)/);
+  assert.match(read(OWNER.alarmServices), /export async function cancellationFailureNotice/);
+  for (const name of appSources) {
+    const text = read(name);
+    assert.doesNotMatch(text, /setNotice\(noticeFromCodeIn\([^)]*'DELETE_CANCEL_INCOMPLETE'\)\)/, name);
+    assert.doesNotMatch(text, /:\s*noticeFromCodeIn\([^)]*'DISABLE_CANCEL_INCOMPLETE'\)/, name);
+  }
 });
 
 test('a saved stop is shown before the refill, and a refill failure is not a failed stop', () => {
-  const stop = block('const stopOccurrence = useCallback', 'const stopRinging');
+  const stop = blockIn(OWNER.ringingActions, 'const stopOccurrence = useCallback', 'const stopRinging');
   assert.match(stop, /presentStopped\(\s*result,/);
   assert.match(stop, /getSnoozeCopy\.stopFailureCode\(result\.reason\)/);
   assert.match(stop, /noticeFromCodeIn\(messagesNow\(\), 'STOP_FOLLOWUP_FAILED'\)/);
@@ -647,7 +715,7 @@ test('a saved stop is shown before the refill, and a refill failure is not a fai
 });
 
 test('snooze outcomes use catalog codes and a saved snooze survives a failed read-back', () => {
-  const snooze = block('const snoozeRinging = useCallback', 'const orderedAlarms');
+  const snooze = blockIn(OWNER.ringingActions, 'const snoozeRinging = useCallback', 'return { acknowledgeMissed');
   assert.match(snooze, /presentSnoozed\(result, outcomeEffects\(\), textRef\.current\)/);
   assert.match(
     snooze,
@@ -658,21 +726,22 @@ test('snooze outcomes use catalog codes and a saved snooze survives a failed rea
 });
 
 test('reset also cancels every id only memory knows, and recovery maps its outcome by code', () => {
-  const reset = block('const storageReset = createStorageResetService', 'installStorageResetGate');
+  const reset = blockIn(OWNER.gateways, 'export const storageReset = createStorageResetService', 'installStorageResetGate');
   assert.match(reset, /snoozeService\.unsettledIds\(\)/);
   assert.match(reset, /schedulingGateway\.unresolvedMainIds\(\)/);
-  assert.match(app, /getSnoozeCopy\.recoveryCode\(outcome\)/);
+  assert.match(read(OWNER.schedule), /getSnoozeCopy\.recoveryCode\(outcome\)/);
 });
 
 test('the reconcile pass releases its main ids at the checkpoint and abandons the rest when it ends', () => {
-  assert.match(app, /releaseMain: \(ids\) => schedulingGateway\.releaseProvisional\(ids\)/);
-  const pass = block('async function reconcileScheduleWithQueueOnce', 'let scheduleReconcileInFlight');
+  assert.match(read(OWNER.gateways), /releaseMain: \(ids\) => schedulingGateway\.releaseProvisional\(ids\)/);
+  const pass = blockIn(...RECONCILE_ONCE);
   assert.match(pass, /gateway: passGateway/);
-  assert.match(pass, /finally \{\s*schedulingGateway\.abandonProvisional\(registered\);/);
+  assert.match(pass, /finally \{\s*deps\.abandonProvisional\(registered\);/);
+  assert.match(read(OWNER.coordinators), /abandonProvisional: \(ids\) => schedulingGateway\.abandonProvisional\(\[\.\.\.ids\]\)/);
 });
 
 test('missed acknowledgement shows the aggregate notice, not the last refill side effect', () => {
-  const ack = block('const acknowledgeMissed = useCallback', 'const outcomeEffects');
+  const ack = blockIn(OWNER.ringingActions, 'const acknowledgeMissed = useCallback', 'const outcomeEffects');
   assert.match(ack, /getMissedAcknowledgementNotice\(/);
   assert.match(ack, /getMissedAcknowledgementNotice\([^)]*messagesNow\(\)/);
   assert.match(ack, /collectedIssues|refillIssues/);
@@ -680,56 +749,64 @@ test('missed acknowledgement shows the aggregate notice, not the last refill sid
 });
 
 test('the ringing display and focused label use the occurrence date and current ring time', () => {
-  const card = block('{ringingCycle ? (', 'missedCycles.length > 0 ? (');
+  const card = read(OWNER.ringingCard);
   assert.match(card, /getRingingDisplay\(ringingCycle\)/);
   assert.match(card, /getRingingStopA11yLabel\([\s\S]*formatter\.day\(/);
   assert.doesNotMatch(card, /formatNextDate/);
 });
 
 test('missed cycles are announced by tracked ids without moving focus', () => {
-  assert.match(app, /planMissedAnnouncement\(/);
-  assert.match(
-    app,
-    /announceForAccessibility\(\s*messagesNow\(\)\.missed\.cardAnnouncement,?\s*\)/,
-  );
-  assert.doesNotMatch(app, /MISSED_CARD_ANNOUNCEMENT/);
-  const effect = block('planMissedAnnouncement({', 'missed.cardAnnouncement,');
+  const presentation = read(OWNER.ringingPresentation);
+  assert.match(presentation, /planMissedAnnouncement\(/);
+  assert.match(presentation, /announcePolitely\(messagesNow\(\)\.missed\.cardAnnouncement\)/);
+  for (const name of appSources) {
+    assert.doesNotMatch(read(name), /MISSED_CARD_ANNOUNCEMENT/, name);
+  }
+  const effect = blockIn(OWNER.ringingPresentation, 'planMissedAnnouncement({', 'missed.cardAnnouncement');
   assert.doesNotMatch(effect, /setAccessibilityFocus/);
-  assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
+  assert.match(presentation, /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
+  // The announcement edge never moves focus either.
+  const edge = blockIn(OWNER.accessibilityEdge, 'export function announcePolitely', '\n}\n');
+  assert.doesNotMatch(edge, /setAccessibilityFocus/);
 });
 
 test('missed announcements queue on iOS and wait for the app to be active', () => {
-  const effect = block('planMissedAnnouncement({', '[missedCycleIdsKey');
+  const edge = blockIn(OWNER.accessibilityEdge, 'export function announcePolitely', '\n}\n');
   // iOS queues behind current speech; Android keeps the existing API.
-  assert.match(effect, /Platform\.OS === 'ios'/);
-  assert.match(
-    effect,
-    /announceForAccessibilityWithOptions\(\s*messagesNow\(\)\.missed\.cardAnnouncement,\s*\{\s*queue: true\s*\}/,
-  );
-  assert.match(effect, /announceForAccessibility\(\s*messagesNow\(\)\.missed\.cardAnnouncement,?\s*\)/);
+  assert.match(edge, /Platform\.OS === 'ios'/);
+  assert.match(edge, /announceForAccessibilityWithOptions\(text, \{ queue: true \}\)/);
+  assert.match(edge, /announceForAccessibility\(text\)/);
+  assert.match(edge, /Platform\.OS === 'web'/);
   // Only a real `active` state announces; inactive/background stay pending.
-  assert.match(app, /setIsAppActive\(state === 'active'\)/);
-  assert.match(app, /useState\(\s*\(\) => AppState\.currentState === 'active',?\s*\)/);
-  const gate = block('const missedAnnouncedRef', 'planMissedAnnouncement({');
+  const bedside = read(OWNER.bedside);
+  assert.match(bedside, /setIsAppActive\(state === 'active'\)/);
+  assert.match(bedside, /useState\(\s*\(\) => currentAppState\(\) === 'active',?\s*\)/);
+  const gate = blockIn(OWNER.ringingPresentation, 'const missedAnnouncedRef', 'planMissedAnnouncement({');
   assert.match(gate, /if \(!isAppActive\)\s*\{\s*return;/);
-  assert.match(app, /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
+  assert.match(read(OWNER.ringingPresentation), /\[missedCycleIdsKey, ringingCycle !== null, isAppActive\]/);
   // Keep-awake policy is unchanged and the AppState subscription is shared.
-  assert.match(app, /setIsAppForeground\(isForegroundAppState\(state\)\)/);
-  assert.equal(app.match(/setIsAppActive\b/g)?.length, 2);
+  assert.match(bedside, /setIsAppForeground\(isForegroundAppState\(state\)\)/);
+  assert.equal(bedside.match(/setIsAppActive\b/g)?.length, 2);
 });
 
 test('settings close is guarded by the deletion ref and a failed deletion also reaches home in the chosen language', () => {
-  assert.match(app, /canCloseSettings\(\{ deletionInFlight: deletionInFlightRef\.current \}\)/);
-  assert.match(app, /onClose=\{closeSettings\}/);
-  assert.match(app, /setSettingsNotice\(\{ text: \(m\) => m\.settings\.failed \}\)/);
-  assert.match(app, /text: t\.messages\.settings\.failedHome/);
-  assert.doesNotMatch(app, /LOCAL_DATA_COPY/);
+  const deletion = read(OWNER.deletion);
+  assert.match(deletion, /canCloseSettings\(\{ deletionInFlight: deletionInFlightRef\.current \}\)/);
+  assert.match(read(OWNER.settingsSheet), /onClose=\{closeSettings\}/);
+  assert.match(read(OWNER.app), /closeSettings=\{settings\.close\}/);
+  assert.match(deletion, /setSettingsNotice\(\{ text: \(m\) => m\.settings\.failed \}\)/);
+  assert.match(deletion, /text: t\.messages\.settings\.failedHome/);
+  for (const name of appSources) {
+    assert.doesNotMatch(read(name), /LOCAL_DATA_COPY/, name);
+  }
 });
 
 test('the screen scroll policy still drives the failure-card scroll', () => {
-  assert.match(app, /getScreenScrollPolicy\(/);
+  assert.match(read(OWNER.app), /getScreenScrollPolicy\(/);
 });
 
-test('no conflict markers remain in the app entry', () => {
-  assert.doesNotMatch(app, /^(<<<<<<<|=======|>>>>>>>)/m);
+test('no conflict markers remain in the app entry or its modules', () => {
+  for (const name of appSources) {
+    assert.doesNotMatch(read(name), /^(<<<<<<<|=======|>>>>>>>)/m, name);
+  }
 });

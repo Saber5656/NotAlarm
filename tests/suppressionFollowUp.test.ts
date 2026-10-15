@@ -212,17 +212,26 @@ test('skip copy makes no promise about later days (today-only safe)', () => {
 });
 
 test('App wires the shared helpers and keeps the skip action under warnings', () => {
-  const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+  const read = (path: string) =>
+    readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const count = (path: string, pattern: RegExp) =>
+    read(path).match(pattern)?.length ?? 0;
+  const responses = 'src/app/useSuppressionResponses.ts';
+  const steps = 'src/app/useStepCandidate.ts';
   // All three suppression paths persist through the epoch-safe setter.
-  assert.equal(
-    app.match(/createSuppressionSaver\(saveStoredAlarm, setCurrentAlarms\)/g)
-      ?.length,
-    3,
-  );
+  const saver = /createSuppressionSaver\(saveStoredAlarm, setCurrentAlarms\)/g;
+  assert.equal(count(responses, saver), 2);
+  assert.equal(count(steps, saver), 1);
   // Only the module-level journal recovery keeps a plain save (no screen state).
-  assert.equal(app.match(/saveAlarm: async \(cycle\) => \{/g)?.length, 1);
-  assert.equal(app.match(/finishSuppression\(/g)?.length, 3);
+  assert.equal(count('src/app/platform/coordinators.ts', /saveAlarm: async \(cycle\) => \{/g), 1);
+  for (const file of [responses, steps, 'src/app/useAlarmController.ts']) {
+    assert.equal(count(file, /saveAlarm: async \(cycle\) => \{/g), 0, file);
+  }
+  assert.equal(count(responses, /finishSuppression\(/g), 2);
+  assert.equal(count(steps, /finishSuppression\(/g), 1);
   // One button definition, rendered in the monitoring card and under warnings.
-  assert.equal(app.match(/testID="skip-this-occurrence"/g)?.length, 1);
-  assert.equal(app.match(/\{skipAction\}/g)?.length, 2);
+  assert.equal(count('src/ui/screens/SkipButton.tsx', /testID="skip-this-occurrence"/g), 1);
+  assert.equal(count('src/ui/screens/NextAlarmCard.tsx', /\{skipAction\}/g), 1);
+  assert.equal(count('src/ui/screens/DeliveryWarningCard.tsx', /\{skipAction\}/g), 1);
+  assert.equal(count('src/ui/screens/HomeScreen.tsx', /<SkipButton/g), 1);
 });

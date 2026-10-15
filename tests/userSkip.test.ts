@@ -239,15 +239,29 @@ test('skipped occurrence is described as manual stop', () => {
 });
 
 test('App wires the button, confirmation and whole-series distinction', () => {
-  const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
-  assert.match(app, /processUserSkipFailSafe/);
-  assert.match(app, /getUserSkipOffer/);
-  assert.match(app, /testID="skip-this-occurrence"/);
-  assert.match(app, /messages\.alarmList\.rowSpoken\(/);
+  const read = (path: string) =>
+    readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  // The use case lives with the suppression responses, the derived offer in
+  // the alarm view, the button in its own screen component.
+  assert.match(read('src/app/useSuppressionResponses.ts'), /processUserSkipFailSafe/);
+  assert.match(read('src/app/useAlarmView.ts'), /getUserSkipOffer/);
+  assert.match(read('src/ui/screens/SkipButton.tsx'), /testID="skip-this-occurrence"/);
+  assert.match(read('src/ui/screens/AlarmListPanel.tsx'), /messages\.alarmList\.rowSpoken\(/);
   assert.match(ja.alarmList.rowSpoken('7:00', '毎日'), /すべての回/);
   assert.match(en.alarmList.rowSpoken('7:00', 'Daily'), /all occurrences/);
   for (const catalog of [ja, en]) {
     assert.ok(catalog.alarmList.toggleHintOn.length > 0);
   }
-  assert.equal(app.match(/journal: suppressionJournal,/g)?.length, 4);
+  assert.equal(
+    read('src/app/useSuppressionResponses.ts').match(/journal: suppressionJournal,/g)?.length,
+    2,
+  );
+  assert.equal(
+    read('src/app/useStepCandidate.ts').match(/journal: suppressionJournal,/g)?.length,
+    1,
+  );
+  assert.equal(
+    read('src/app/platform/coordinators.ts').match(/journal: suppressionJournal,/g)?.length,
+    1,
+  );
 });

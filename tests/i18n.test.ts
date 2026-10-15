@@ -489,9 +489,21 @@ describe('source hygiene', () => {
   });
 
   test('pure policy modules stay free of React Native and expo-localization', () => {
+    // Native edges: React components (ui/, AlarmApp), the platform gateways and
+    // edge wrappers (src/app/platform), the notification/storage/sound
+    // services and the hooks. Everything else - including src/app/core - must
+    // stay free of React Native.
     const ok = sources('../src').filter(
-      (file) => !file.startsWith('../src/ui/') && !file.endsWith('notificationService.ts') && !file.endsWith('Storage.ts') && !file.endsWith('alarmSound.ts') && !/\/use[A-Z]\w*\.ts$/.test(file),
+      (file) =>
+        !file.startsWith('../src/ui/') &&
+        !file.startsWith('../src/app/platform/') &&
+        !file.endsWith('src/app/AlarmApp.tsx') &&
+        !file.endsWith('notificationService.ts') &&
+        !file.endsWith('Storage.ts') &&
+        !file.endsWith('alarmSound.ts') &&
+        !/\/use[A-Z]\w*\.ts$/.test(file),
     );
+    assert.ok(ok.some((file) => file.startsWith('../src/app/core/')), 'core is checked');
     for (const file of ok) {
       const text = readFileSync(new URL(file, import.meta.url), 'utf8');
       assert.doesNotMatch(text, /from 'react-native'|from 'expo-localization'/, file);

@@ -14,7 +14,11 @@ import {
 import { markCycleRinging } from '../src/alarmDefinitionMutations';
 import type { StoredAlarmDefinition } from '../src/alarmStorage';
 
-const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+// The delivery listener lives with the other notification events.
+const events = readFileSync(
+  new URL('../src/app/useNotificationEvents.ts', import.meta.url),
+  'utf8',
+);
 const service = readFileSync(new URL('../src/notificationService.ts', import.meta.url), 'utf8');
 
 const DUE = 50_000;
@@ -70,10 +74,11 @@ test('the scheduling functions use the payload builders', () => {
 });
 
 test('the listener passes the payload due time to the atomic transition', () => {
-  const listener = app.slice(
-    app.indexOf('addNotificationReceivedListener'),
-    app.indexOf('getLastNotificationResponse'),
+  const listener = events.slice(
+    events.indexOf('onReceived: (notification) => {'),
+    events.indexOf('const lastResponse'),
   );
+  assert.notEqual(events.indexOf('onReceived: (notification) => {'), -1);
   assert.match(listener, /readMainDeliveryIdentity\(/);
   assert.match(listener, /saveCycleRinging\(/);
   assert.doesNotMatch(listener, /mainAlarmId: notification\.request\.identifier/);
