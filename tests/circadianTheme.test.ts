@@ -150,3 +150,110 @@ test('a resolved region schedule drives the theme in that region\'s own zone and
     getCircadianTheme(new Date(londonDawn)),
   );
 });
+
+function weightsAt(
+  schedule: { sunriseMinute: number; sunsetMinute: number; timeZone: string },
+  minute: number,
+) {
+  const date = new Date(Date.UTC(2026, 0, 15, 0, 0) + minute * 60_000);
+  return getCircadianTheme(date, schedule).photoWeights;
+}
+
+function assertContinuous(
+  schedule: { sunriseMinute: number; sunsetMinute: number; timeZone: string },
+  maxStep: number,
+) {
+  let previous = weightsAt(schedule, 0);
+  for (let minute = 1; minute < 24 * 60; minute += 1) {
+    const current = weightsAt(schedule, minute);
+    const total =
+      current.dawn + current.day + current.dusk + current.night;
+    assert.ok(Math.abs(total - 1) < 1e-9, `minute ${minute} total ${total}`);
+    for (const key of ['dawn', 'day', 'dusk', 'night'] as const) {
+      assert.ok(
+        Math.abs(current[key] - previous[key]) <= maxStep,
+        `${key} jumps ${previous[key]} -> ${current[key]} at minute ${minute}`,
+      );
+    }
+    previous = current;
+  }
+}
+
+test('a short winter day cross-fades with no jump between day and dusk', () => {
+  // Daylight of 2.5 h (sunrise + 240 would land after sunset + 30).
+  assertContinuous(
+    { sunriseMinute: 10 * 60 + 30, sunsetMinute: 13 * 60, timeZone: 'UTC' },
+    0.1,
+  );
+  // Even shorter days stay continuous.
+  assertContinuous(
+    { sunriseMinute: 11 * 60, sunsetMinute: 11 * 60 + 40, timeZone: 'UTC' },
+    0.2,
+  );
+});
+
+test('a short day still reaches the daytime photo and then dusk in order', () => {
+  const schedule = {
+    sunriseMinute: 10 * 60 + 30,
+    sunsetMinute: 13 * 60,
+    timeZone: 'UTC',
+  };
+  const midday = weightsAt(schedule, 12 * 60 + 45);
+  assert.ok(midday.day > 0.5, `day ${midday.day}`);
+  const afterSunset = getCircadianTheme(
+    new Date(Date.UTC(2026, 0, 15, 13, 40)),
+    schedule,
+  );
+  assert.equal(afterSunset.phase, 'dusk');
+});
+
+test('a daylight interval running past local midnight keeps valid continuous weights', () => {
+  assertContinuous(
+    { sunriseMinute: 80, sunsetMinute: 24 * 60 + 20, timeZone: 'UTC' },
+    0.1,
+  );
+  // 23:50 is still daylight for a sunset at 00:20 the next day.
+  const lateEvening = weightsAt(
+    { sunriseMinute: 80, sunsetMinute: 24 * 60 + 20, timeZone: 'UTC' },
+    23 * 60 + 50,
+  );
+  assert.ok(lateEvening.night < 0.5, `night ${lateEvening.night}`);
+});
+
+// Sunrise 01:30 and sunset 00:30 the next civil day: the same interval, seen
+// from the day after, is the "previous" schedule that is still in daylight.
+test('a sunset after midnight keeps daylight continuous across 23:59 to 00:00', () => {
+  const wrapped = { sunriseMinute: 90, sunsetMinute: 1470, timeZone: 'UTC' };
+  const schedule = { ...wrapped, previous: { ...wrapped } };
+  const at = (day: number, hour: number, minute: number) =>
+    new Date(Date.UTC(2026, 5, day, hour, minute, 0));
+  const before = getCircadianTheme(at(14, 23, 59), schedule);
+  const after = getCircadianTheme(at(15, 0, 0), schedule);
+  const later = getCircadianTheme(at(15, 0, 10), schedule);
+
+  assert.equal(before.phase, 'golden-hour');
+  assert.equal(after.phase, 'golden-hour');
+  assert.equal(later.phase, 'golden-hour');
+  assert.ok(after.photoWeights.night < 0.05);
+  for (const key of ['dawn', 'day', 'dusk', 'night'] as const) {
+    assert.ok(
+      Math.abs(before.photoWeights[key] - after.photoWeights[key]) < 0.05,
+      `${key} is continuous over midnight`,
+    );
+  }
+  assert.equal(getCircadianTheme(at(15, 0, 29), schedule).phase, 'golden-hour');
+  // Past the real sunset the blend keeps fading rather than jumping to night.
+  assert.ok(getCircadianTheme(at(15, 0, 40), schedule).photoWeights.night < 0.5);
+});
+
+test('a previous schedule that ends before midnight changes nothing', () => {
+  const plain = { sunriseMinute: 360, sunsetMinute: 1080, timeZone: 'UTC' };
+  const withPrevious = { ...plain, previous: { ...plain } };
+  for (let minute = 0; minute < 1440; minute += 7) {
+    const date = new Date(Date.UTC(2026, 5, 15, 0, minute, 0));
+    assert.deepEqual(
+      getCircadianTheme(date, withPrevious),
+      getCircadianTheme(date, plain),
+    );
+  }
+});

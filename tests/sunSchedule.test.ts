@@ -279,3 +279,46 @@ test("cache reuses a result within the same civil day and stays bounded", () => 
   }
   assert.ok(cache.size() <= 3);
 });
+
+// The wrapped interval has no USNO fixture, so the reference is the official
+// SunCalc API itself (the local `suncalc` package), compared by instants.
+test("a sunset after local midnight is kept as a longer same-day interval", async () => {
+  const { getTimes } = await import("suncalc");
+  const tromso = findSunRegion("tromso");
+  assert.ok(tromso);
+  // Tromsø around the start and end of the midnight-sun season.
+  for (const iso of ["2026-05-17T10:00:00Z", "2026-07-26T10:00:00Z"]) {
+    const nowMs = Date.parse(iso);
+    const result = computeSunSchedule({
+      latitude: tromso.latitude,
+      longitude: tromso.longitude,
+      timeZone: tromso.timeZone,
+      nowMs,
+    });
+    assert.equal(result.kind, "ok", iso);
+    if (result.kind !== "ok") {
+      return;
+    }
+    // Same noon-anchored call computeSunSchedule documents: offset 0 here only
+    // changes the anchor, and the sunrise/sunset instants are what is compared.
+    const noonUtc = Date.parse(iso.slice(0, 10) + "T10:00:00Z");
+    const times = getTimes(new Date(noonUtc), tromso.latitude, tromso.longitude, 0, 0);
+    assert.ok(times.sunrise && times.sunset, iso);
+    const lengthMinutes = (times.sunset.getTime() - times.sunrise.getTime()) / 60_000;
+    assert.ok(lengthMinutes > 0 && lengthMinutes < 24 * 60 + 60, iso);
+    assertNear(result.sunsetMinute - result.sunriseMinute, lengthMinutes, iso);
+    assert.ok(result.sunsetMinute > 24 * 60, `${iso} sunset wraps past midnight`);
+  }
+});
+
+test("a wrapped Tromsø day resolves to a schedule, not a corrupt-setting fallback", () => {
+  const resolved = resolveSunBackground({
+    preference: { version: 1, mode: "region", regionId: "tromso" },
+    nowMs: Date.parse("2026-05-17T10:00:00Z"),
+    deviceTimeZone: "Asia/Tokyo",
+    cache: createSunScheduleCache(),
+  });
+  assert.equal(resolved.fallback, undefined);
+  assert.ok(resolved.schedule);
+  assert.ok(resolved.schedule.sunsetMinute > resolved.schedule.sunriseMinute);
+});
