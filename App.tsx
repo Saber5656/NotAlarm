@@ -186,6 +186,9 @@ import {
   describeSuppressedOccurrence,
   describeTodayOnlyExpiry,
   getRingingStopA11yLabel,
+  getRingingDisplay,
+  planMissedAnnouncement,
+  MISSED_CARD_ANNOUNCEMENT,
   canEditAlarm,
   canSubmitComposer,
   getStepGuidance,
@@ -1564,6 +1567,22 @@ function AlarmApp() {
     );
     return () => clearTimeout(focusTimer);
   }, [ringingCycle?.cycleId]);
+
+  const missedCycleIdsKey = missedCycles.map((cycle) => cycle.cycleId).join('|');
+  const missedAnnouncedRef = useRef<ReadonlySet<string>>(new Set());
+  // Polite announcement per newly missed cycle id; focus is never moved. The
+  // string key changes only when the id set does, so the clock tick is silent.
+  useEffect(() => {
+    const plan = planMissedAnnouncement({
+      announced: missedAnnouncedRef.current,
+      missedCycleIds: missedCycles.map((cycle) => cycle.cycleId),
+      isRinging: ringingCycle !== null,
+    });
+    missedAnnouncedRef.current = plan.announced;
+    if (plan.announce && Platform.OS !== 'web') {
+      AccessibilityInfo.announceForAccessibility(MISSED_CARD_ANNOUNCEMENT);
+    }
+  }, [missedCycleIdsKey, ringingCycle !== null]);
 
   const handleComposerDismissed = useCallback(() => {
     if (!ringFocusPendingRef.current) {
@@ -3136,19 +3155,20 @@ function AlarmApp() {
               style={styles.ringingTime}
             >
               {formatAlarmTime(
-                new Date(ringingCycle.dueAtMs).getHours(),
-                new Date(ringingCycle.dueAtMs).getMinutes(),
+                new Date(getRingingDisplay(ringingCycle).timeMs).getHours(),
+                new Date(getRingingDisplay(ringingCycle).timeMs).getMinutes(),
               )}
             </Text>
             <Text style={styles.ringingDate}>
-              {formatNextDate(ringingCycle.dueAtMs)}
+              {formatNextDate(getRingingDisplay(ringingCycle).dateMs)}
             </Text>
             <Text style={styles.ringingTitle}>起きる時間です</Text>
             <Pressable
               accessibilityHint={RINGING_STOP_HINT}
               accessibilityLabel={getRingingStopA11yLabel(
-                new Date(ringingCycle.dueAtMs).getHours(),
-                new Date(ringingCycle.dueAtMs).getMinutes(),
+                new Date(getRingingDisplay(ringingCycle).timeMs).getHours(),
+                new Date(getRingingDisplay(ringingCycle).timeMs).getMinutes(),
+                formatNextDate(getRingingDisplay(ringingCycle).dateMs),
               )}
               accessibilityRole="button"
               accessibilityState={{ disabled: isBusy }}
