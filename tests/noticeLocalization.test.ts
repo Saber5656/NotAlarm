@@ -137,3 +137,13 @@ test('the Japanese repeating-alarm notification keeps no extra space', () => {
     ja.notifications.mainBody + ja.notifications.keepReservingHint,
   );
 });
+
+test('a refill notice that arrives after a locale change is rebuilt against the latest text', () => {
+  const start = app.indexOf('const refillEnabledSchedules = useCallback');
+  const end = app.indexOf('const openNotificationSettings');
+  assert.ok(start >= 0 && end > start);
+  const body = app.slice(start, end);
+
+  assert.match(body, /relocalizeNotice\(result\.notice, textRef\.current\)/);
+  assert.doesNotMatch(body, /setNotice\(result\.notice\)/);
+});
