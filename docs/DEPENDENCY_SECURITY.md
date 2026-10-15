@@ -68,3 +68,9 @@ grep -c '"ev":"braces"' $OUT/*.jsonl; grep -c '"ev":"forge"' $OUT/*.jsonl
 ```
 
 2026-10-15 の再実行（node 26.0.0、`--localhost`）: export は exit 0、sourcemap の source 数は android 758 / ios 750 / web 497、`security:check --dist` は exit 0。manifest は `expo-root` 200 / `custom` 200 / `expo-go` 500、bundle 200。export・dev server ともに `braces` イベント 0、`forge` イベント 0、node-forge の load もなかった。Node 22.23.3 でも `npm test`（282 件）と `security:check --dist` は通った。
+
+## 全インストール版と @expo/cli の固定（PR35 late findings）
+
+- `checkInstalledCopies`: braces / micromatch / node-forge / @expo/code-signing-certificates の node_modules 内の全コピー（ネスト含む）、package-lock の全エントリ、既知 importer から Node 解決で到達する版が、すべて評価版と一致することを要求する。読めない入力・コピー欠落は fail。`check-dependency-security` は例外判定にも全コピーの版を使い、audit の `nodes` も検査する。
+- `checkCliPin`: guard 文字列の存在確認をやめ、評価時の `@expo/cli` 57.0.30 と `utils/codesigning.js` / `run/ios/codeSigning/Security.js` の sha256 を固定する。版か内容が変わったら支配関係を再評価する。
+- 期限（2026-11-14）・例外は変更していない。2026-10-15 の `npm audit` では両 advisory とも upstream 未修正（範囲 `<=3.0.3` / `<=1.4.0`、fix は expo 44 への downgrade のみ）。
