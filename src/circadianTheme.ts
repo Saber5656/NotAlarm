@@ -33,6 +33,12 @@ export interface CircadianSchedule {
   sunsetMinute: number;
   /** IANA zone whose clock the minutes refer to. */
   timeZone: string;
+  /**
+   * The previous civil day's own times (minutes after that day's midnight).
+   * Only consulted when its sunset passed midnight, so the early hours of
+   * today stay in that daylight instead of restarting as night.
+   */
+  previous?: { sunriseMinute: number; sunsetMinute: number };
 }
 
 const MINUTES_PER_DAY = 24 * 60;
@@ -44,33 +50,68 @@ const DUSK: CircadianPhotoWeights = { dawn: 0, day: 0, dusk: 1, night: 0 };
 
 /**
  * Offsets from sunrise/sunset reproduce the original fixed keyframes exactly
- * when sunrise is 06:00 and sunset is 18:00. Results are clamped to the day
- * and kept in order so a very early or late sun never yields a bad blend.
+ * when sunrise is 06:00 and sunset is 18:00. A day too short for the full
+ * morning and evening ramps shares one midday peak instead, and any keyframe
+ * that would land on or before the previous one (or outside the day) is
+ * dropped, so timestamps strictly increase and the blend never jumps.
  */
-function photoKeyframes(
-  sunrise: number,
-  sunset: number,
-): readonly PhotoKeyframe[] {
-  const raw: PhotoKeyframe[] = [
+function rawKeyframes(sunrise: number, sunset: number): PhotoKeyframe[] {
+  const dayStart = sunrise + 240;
+  const dayEnd = sunset - 120;
+  const middle: PhotoKeyframe[] =
+    dayStart <= dayEnd
+      ? [
+          { minute: dayStart, weights: DAY },
+          { minute: dayEnd, weights: DAY },
+        ]
+      : [{ minute: (dayStart + dayEnd) / 2, weights: DAY }];
+  return [
     { minute: 0, weights: NIGHT },
     { minute: sunrise - 90, weights: NIGHT },
     { minute: sunrise + 30, weights: DAWN },
     { minute: sunrise + 120, weights: DAWN },
-    { minute: sunrise + 240, weights: DAY },
-    { minute: sunset - 120, weights: DAY },
+    ...middle,
     { minute: sunset + 30, weights: DUSK },
     { minute: sunset + 120, weights: DUSK },
     { minute: sunset + 210, weights: NIGHT },
-    { minute: MINUTES_PER_DAY, weights: NIGHT },
+    { minute: Math.max(MINUTES_PER_DAY, sunset + 210), weights: NIGHT },
   ];
-  let previous = 0;
-  return raw.map((keyframe) => {
-    previous = Math.min(
-      MINUTES_PER_DAY,
-      Math.max(previous, keyframe.minute),
-    );
-    return { minute: previous, weights: keyframe.weights };
-  });
+}
+
+function photoKeyframes(
+  sunrise: number,
+  sunset: number,
+  previous?: { sunriseMinute: number; sunsetMinute: number },
+): readonly PhotoKeyframe[] {
+  const wrapsIn =
+    previous !== undefined &&
+    Number.isFinite(previous.sunriseMinute) &&
+    Number.isFinite(previous.sunsetMinute) &&
+    previous.sunriseMinute < previous.sunsetMinute &&
+    previous.sunsetMinute + 210 > MINUTES_PER_DAY;
+  // Yesterday's timeline, shifted back a day, leads into today's.
+  const raw = wrapsIn
+    ? [
+        ...rawKeyframes(previous.sunriseMinute, previous.sunsetMinute).map(
+          (keyframe) => ({
+            ...keyframe,
+            minute: keyframe.minute - MINUTES_PER_DAY,
+          }),
+        ),
+        ...rawKeyframes(sunrise, sunset),
+      ]
+    : rawKeyframes(sunrise, sunset);
+  const lowest = wrapsIn ? -MINUTES_PER_DAY : 0;
+  const result: PhotoKeyframe[] = [];
+  for (const keyframe of raw) {
+    const minute = Math.max(lowest, keyframe.minute);
+    const last = result[result.length - 1];
+    if (last && minute <= last.minute) {
+      continue;
+    }
+    result.push({ minute, weights: keyframe.weights });
+  }
+  return result;
 }
 
 const FIXED_KEYFRAMES = photoKeyframes(
@@ -114,7 +155,7 @@ function phaseForMinute(
   if (minute < sunrise + 60) {
     return { phase: 'dawn', phaseLabel: '夜明け' };
   }
-  if (minute < sunrise + 300) {
+  if (minute < Math.min(sunrise + 300, sunset - 120)) {
     return { phase: 'morning', phaseLabel: '朝' };
   }
   if (minute < sunset - 120) {
@@ -180,11 +221,32 @@ export function getCircadianTheme(
       Number.isFinite(schedule.sunsetMinute) &&
       schedule.sunriseMinute < schedule.sunsetMinute
     ) {
+      const previous = schedule.previous;
+      const inPreviousTail =
+        previous !== undefined &&
+        previous.sunriseMinute < previous.sunsetMinute &&
+        previous.sunsetMinute + 180 > MINUTES_PER_DAY &&
+        minute < schedule.sunriseMinute - 60 &&
+        minute + MINUTES_PER_DAY < previous.sunsetMinute + 180;
       return {
-        ...phaseForMinute(minute, schedule.sunriseMinute, schedule.sunsetMinute),
+        ...(inPreviousTail
+          ? phaseForMinute(
+              minute + MINUTES_PER_DAY,
+              previous.sunriseMinute,
+              previous.sunsetMinute,
+            )
+          : phaseForMinute(
+              minute,
+              schedule.sunriseMinute,
+              schedule.sunsetMinute,
+            )),
         photoWeights: photoWeightsForMinute(
           minute,
-          photoKeyframes(schedule.sunriseMinute, schedule.sunsetMinute),
+          photoKeyframes(
+            schedule.sunriseMinute,
+            schedule.sunsetMinute,
+            previous,
+          ),
         ),
       };
     }

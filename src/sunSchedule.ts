@@ -13,7 +13,10 @@ export interface SunScheduleInput {
 export type SunScheduleResult =
   | {
       kind: 'ok';
-      /** Minutes after local midnight in `timeZone`. */
+      /**
+       * Minutes after local midnight in `timeZone`. `sunsetMinute` exceeds
+       * 1440 when the sunset falls after midnight of the next civil day.
+       */
       sunriseMinute: number;
       sunsetMinute: number;
       /** Civil date in `timeZone`, YYYY-MM-DD. */
@@ -95,6 +98,17 @@ function minuteOfCivilDay(ms: number, timeZone: string): number {
   return p.hour * 60 + p.minute + p.second / 60;
 }
 
+/** Whole civil days from `from` to `to` as read on the clock of `timeZone`. */
+function civilDaysBetween(from: number, to: number, timeZone: string): number {
+  const a = zonedParts(from, timeZone);
+  const b = zonedParts(to, timeZone);
+  return Math.round(
+    (Date.UTC(b.year, b.month - 1, b.day) -
+      Date.UTC(a.year, a.month - 1, a.day)) /
+      86_400_000,
+  );
+}
+
 /**
  * Sun times for the civil day (in `timeZone`) that contains `nowMs`. Pure and
  * offline. Anything that cannot be computed truthfully is reported, not guessed.
@@ -140,8 +154,21 @@ export function computeSunSchedule({
       return { kind: 'invalid' };
     }
     const sunriseMinute = minuteOfCivilDay(sunrise.getTime(), timeZone);
-    const sunsetMinute = minuteOfCivilDay(sunset.getTime(), timeZone);
-    if (sunriseMinute >= sunsetMinute) {
+    // Near the midnight-sun seasons the sunset can fall after local midnight;
+    // it is then expressed as minutes past 24:00 of the sunrise's civil day.
+    const extraDays = civilDaysBetween(
+      sunrise.getTime(),
+      sunset.getTime(),
+      timeZone,
+    );
+    const sunsetMinute =
+      minuteOfCivilDay(sunset.getTime(), timeZone) + extraDays * 24 * 60;
+    if (
+      sunset.getTime() <= sunrise.getTime() ||
+      extraDays < 0 ||
+      extraDays > 1 ||
+      sunriseMinute >= sunsetMinute
+    ) {
       return { kind: 'invalid' };
     }
     return {
@@ -165,7 +192,7 @@ export interface SunScheduleCache {
  * return does not recompute; a new local day (or DST change of day) misses.
  */
 export function createSunScheduleCache({
-  maxEntries = 4,
+  maxEntries = 8,
   compute = computeSunSchedule,
 }: {
   maxEntries?: number;
@@ -246,11 +273,29 @@ export function resolveSunBackground({
   if (result.kind === 'invalid') {
     return fixed('invalid-saved');
   }
+  // Yesterday's own times, only so a sunset after midnight is not cut off.
+  const dayStartMs =
+    nowMs - minuteOfCivilDay(nowMs, place.timeZone) * 60_000;
+  const yesterday = cache.get({
+    latitude: place.latitude,
+    longitude: place.longitude,
+    timeZone: place.timeZone,
+    nowMs: dayStartMs - 12 * 3_600_000,
+  });
   return {
     schedule: {
       sunriseMinute: result.sunriseMinute,
       sunsetMinute: result.sunsetMinute,
       timeZone: place.timeZone,
+      ...(yesterday.kind === 'ok' &&
+      yesterday.sunsetMinute + 210 > 24 * 60
+        ? {
+            previous: {
+              sunriseMinute: yesterday.sunriseMinute,
+              sunsetMinute: yesterday.sunsetMinute,
+            },
+          }
+        : {}),
     },
     source: preference.mode,
   };
