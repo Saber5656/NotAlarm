@@ -58,6 +58,88 @@ export function assessNotificationDelivery(
   }
 }
 
+/** The fields read from expo-notifications `NotificationChannel`. */
+export interface AndroidChannelSnapshot {
+  importance?: unknown;
+  sound?: unknown;
+}
+
+// AndroidImportance raw values (expo-notifications).
+const ANDROID_CHANNEL_MIN_API = 26;
+const ANDROID_IMPORTANCE_NONE = 2;
+const ANDROID_IMPORTANCE_MIN = 3;
+const ANDROID_IMPORTANCE_LOW = 4;
+const ANDROID_IMPORTANCE_DEFAULT = 5;
+const ANDROID_IMPORTANCE_HIGH = 6;
+const ANDROID_IMPORTANCE_MAX = 7;
+
+/**
+ * Delivery state of the main alarm channel alone. DEFAULT is the lowest
+ * importance that still plays a sound; a missing or unreadable channel is
+ * never reported as ok.
+ */
+export function assessAndroidAlarmChannel(
+  channel: AndroidChannelSnapshot | null | undefined,
+): NotificationDeliveryState {
+  if (!channel) {
+    return 'unknown';
+  }
+  const { importance, sound } = channel;
+  if (importance === ANDROID_IMPORTANCE_NONE) {
+    return 'off';
+  }
+  if (importance === ANDROID_IMPORTANCE_MIN || importance === ANDROID_IMPORTANCE_LOW) {
+    return 'silent';
+  }
+  if (
+    importance !== ANDROID_IMPORTANCE_DEFAULT &&
+    importance !== ANDROID_IMPORTANCE_HIGH &&
+    importance !== ANDROID_IMPORTANCE_MAX
+  ) {
+    return 'unknown';
+  }
+  if (sound === null) {
+    return 'silent';
+  }
+  return sound === 'default' || sound === 'custom' ? 'ok' : 'unknown';
+}
+
+export interface NotificationDeliveryReaders {
+  platform: string;
+  /** Platform.Version; only meaningful (a number) on Android. */
+  platformVersion?: unknown;
+  mainChannelId: string;
+  getPermissions: () => Promise<NotificationPermissionSnapshot | null | undefined>;
+  getChannel: (channelId: string) => Promise<AndroidChannelSnapshot | null | undefined>;
+}
+
+/**
+ * Global permission first; on Android a granted permission is then checked
+ * against the main alarm channel only (the silent check-in channel is never
+ * read). Read-only: never prompts. Any read failure is 'unknown'.
+ */
+export async function resolveNotificationDelivery(
+  readers: NotificationDeliveryReaders,
+): Promise<NotificationDeliveryState> {
+  try {
+    const permission = assessNotificationDelivery(await readers.getPermissions());
+    if (permission !== 'ok' || readers.platform !== 'android') {
+      return permission;
+    }
+    const api = readers.platformVersion;
+    if (typeof api !== 'number' || !Number.isInteger(api) || api < 1) {
+      return 'unknown';
+    }
+    // Notification channels exist from API 26; below that permission is all there is.
+    if (api < ANDROID_CHANNEL_MIN_API) {
+      return permission;
+    }
+    return assessAndroidAlarmChannel(await readers.getChannel(readers.mainChannelId));
+  } catch {
+    return 'unknown';
+  }
+}
+
 /**
  * The warning applies only after the state was checked (`null` means not yet)
  * and only while some alarm is expected to ring.

@@ -6,7 +6,9 @@ import test, { describe } from 'node:test';
 import {
   type NotificationDeliveryState,
   type NotificationPermissionSnapshot,
+  assessAndroidAlarmChannel,
   assessNotificationDelivery,
+  resolveNotificationDelivery,
   getNotificationDeliveryWarningCopy,
   shouldWarnNotificationDelivery,
 } from '../src/notificationDelivery';
@@ -210,5 +212,135 @@ describe('getNotificationDeliveryWarningCopy', () => {
         }
       }
     }
+  });
+});
+
+// expo-notifications AndroidImportance values.
+const IMPORTANCE = { UNKNOWN: 0, UNSPECIFIED: 1, NONE: 2, MIN: 3, LOW: 4, DEFAULT: 5, HIGH: 6, MAX: 7 };
+
+describe('assessAndroidAlarmChannel', () => {
+  const channel = (over: Record<string, unknown> = {}) => ({
+    importance: IMPORTANCE.MAX,
+    sound: 'default',
+    ...over,
+  });
+
+  test('an audible high-importance channel with a sound is ok', () => {
+    assert.equal(assessAndroidAlarmChannel(channel()), 'ok');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.HIGH, sound: 'custom' })), 'ok');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.DEFAULT })), 'ok');
+  });
+
+  test('a blocked channel is off', () => {
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.NONE })), 'off');
+  });
+
+  test('low or min importance is silent', () => {
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.LOW })), 'silent');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.MIN })), 'silent');
+  });
+
+  test('a channel with no sound is silent even at max importance', () => {
+    assert.equal(assessAndroidAlarmChannel(channel({ sound: null })), 'silent');
+  });
+
+  test('missing channel or unreadable shape is unknown, never ok', () => {
+    assert.equal(assessAndroidAlarmChannel(null), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(undefined), 'unknown');
+    assert.equal(assessAndroidAlarmChannel({} as never), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.UNKNOWN })), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: IMPORTANCE.UNSPECIFIED })), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: 99 })), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(channel({ importance: '7' })), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(channel({ sound: undefined })), 'unknown');
+    assert.equal(assessAndroidAlarmChannel(channel({ sound: 'weird' })), 'unknown');
+  });
+});
+
+describe('resolveNotificationDelivery', () => {
+  const ok = { granted: true };
+  const base = (over: Partial<Parameters<typeof resolveNotificationDelivery>[0]> = {}) => {
+    const calls = { channel: [] as string[], perm: 0 };
+    return {
+      calls,
+      deps: {
+        platform: 'android' as string,
+        platformVersion: 34 as unknown,
+        mainChannelId: 'main',
+        getPermissions: async () => { calls.perm += 1; return ok; },
+        getChannel: async (id: string) => { calls.channel.push(id); return { importance: 7, sound: 'default' }; },
+        ...over,
+      },
+    };
+  };
+
+  test('android reads only the main channel and reports ok when both pass', async () => {
+    const { deps, calls } = base();
+    assert.equal(await resolveNotificationDelivery(deps), 'ok');
+    assert.deepEqual(calls.channel, ['main']);
+  });
+
+  test('global permission off wins and skips the channel read', async () => {
+    const { deps, calls } = base({ getPermissions: async () => ({ granted: false }) });
+    assert.equal(await resolveNotificationDelivery(deps), 'off');
+    assert.deepEqual(calls.channel, []);
+  });
+
+  test('a bad main channel degrades an otherwise granted permission', async () => {
+    const { deps } = base({ getChannel: async () => ({ importance: 2, sound: 'default' }) });
+    assert.equal(await resolveNotificationDelivery(deps), 'off');
+    const silent = base({ getChannel: async () => ({ importance: 7, sound: null }) });
+    assert.equal(await resolveNotificationDelivery(silent.deps), 'silent');
+    const missing = base({ getChannel: async () => null });
+    assert.equal(await resolveNotificationDelivery(missing.deps), 'unknown');
+  });
+
+  test('read errors are unknown', async () => {
+    const a = base({ getChannel: async () => { throw new Error('x'); } });
+    assert.equal(await resolveNotificationDelivery(a.deps), 'unknown');
+    const b = base({ getPermissions: async () => { throw new Error('x'); } });
+    assert.equal(await resolveNotificationDelivery(b.deps), 'unknown');
+  });
+
+  test('ios keeps permission-only delivery and never reads channels', async () => {
+    const { deps, calls } = base({ platform: 'ios', getPermissions: async () => ios(PROVISIONAL) });
+    assert.equal(await resolveNotificationDelivery(deps), 'silent');
+    assert.deepEqual(calls.channel, []);
+    const granted = base({ platform: 'ios', getPermissions: async () => ios(AUTHORIZED) });
+    assert.equal(await resolveNotificationDelivery(granted.deps), 'ok');
+  });
+
+  test('android API 24/25 has no channels: permission-only, channel API not called', async () => {
+    for (const v of [24, 25]) {
+      const { deps, calls } = base({ platformVersion: v });
+      assert.equal(await resolveNotificationDelivery(deps), 'ok');
+      assert.deepEqual(calls.channel, []);
+    }
+    const off = base({ platformVersion: 25, getPermissions: async () => ({ granted: false }) });
+    assert.equal(await resolveNotificationDelivery(off.deps), 'off');
+  });
+
+  test('android API 26+ reads the main channel', async () => {
+    for (const v of [26, 34]) {
+      const { deps, calls } = base({ platformVersion: v });
+      assert.equal(await resolveNotificationDelivery(deps), 'ok');
+      assert.deepEqual(calls.channel, ['main']);
+    }
+  });
+
+  test('android with unknown or malformed API version fails closed without reading channels', async () => {
+    for (const v of [undefined, null, NaN, '25', '', 'x', -1, 0, 25.5, Infinity, {}]) {
+      const { deps, calls } = base({ platformVersion: v });
+      assert.equal(await resolveNotificationDelivery(deps), 'unknown', String(v));
+      assert.deepEqual(calls.channel, []);
+    }
+    const off = base({ platformVersion: undefined, getPermissions: async () => ({ granted: false }) });
+    assert.equal(await resolveNotificationDelivery(off.deps), 'off');
+  });
+
+  test('ios ignores the version value', async () => {
+    const { deps, calls } = base({ platform: 'ios', platformVersion: '17.0', getPermissions: async () => ios(AUTHORIZED) });
+    assert.equal(await resolveNotificationDelivery(deps), 'ok');
+    assert.deepEqual(calls.channel, []);
   });
 });
