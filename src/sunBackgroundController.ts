@@ -160,6 +160,19 @@ export function createSunBackgroundController({
     }
   }
 
+  /** reset-pending notice while a deletion is unfinished, else undefined. */
+  async function pendingResetNotice(): Promise<'reset-pending' | undefined> {
+    try {
+      await exclusive(assertWritable);
+    } catch (error) {
+      if (isStorageResetPendingError(error)) {
+        return 'reset-pending';
+      }
+      throw error;
+    }
+    return undefined;
+  }
+
   return {
     async load() {
       const started = generation;
@@ -169,7 +182,15 @@ export function createSunBackgroundController({
       }
       const read = readSunPreference(raw);
       if (read.kind === 'absent') {
-        return { preference: FIXED_SUN_PREFERENCE };
+        // A reset can remove the preference and still stop before its intent
+        // key; the unfinished deletion must show even with nothing saved.
+        const notice = await pendingResetNotice();
+        if (started !== generation) {
+          return { preference: FIXED_SUN_PREFERENCE, stale: true };
+        }
+        return notice
+          ? { preference: FIXED_SUN_PREFERENCE, notice }
+          : { preference: FIXED_SUN_PREFERENCE };
       }
       if (read.kind === 'invalid') {
         return downgrade(started, 'invalid-saved', true);
@@ -195,14 +216,9 @@ export function createSunBackgroundController({
           return downgrade(started, 'timezone-changed');
         }
       }
-      try {
-        await exclusive(assertWritable);
-      } catch (error) {
-        if (isStorageResetPendingError(error)) {
-          // Deletion unfinished: the saved place must not drive the theme.
-          return { preference: FIXED_SUN_PREFERENCE, notice: 'reset-pending' };
-        }
-        throw error;
+      if (await pendingResetNotice()) {
+        // Deletion unfinished: the saved place must not drive the theme.
+        return { preference: FIXED_SUN_PREFERENCE, notice: 'reset-pending' };
       }
       return { preference };
     },
