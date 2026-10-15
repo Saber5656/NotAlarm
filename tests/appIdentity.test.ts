@@ -73,3 +73,26 @@ test('EAS owner is optional: absent or blank still resolves without owner', () =
 test('explicit EAS owner is trimmed and retained', () => {
   assert.equal(prod({ ALREADYUP_EAS_OWNER: '  acme  ' }).owner, 'acme');
 });
+
+test('placeholder hosts are rejected after trailing-dot and case normalization', () => {
+  for (const host of [
+    'example.com.', 'EXAMPLE.COM', 'www.Example.Org.', 'localhost.', 'foo.invalid.',
+    'a.test.', 'my.example', 'my.example.', 'Site.EXAMPLE',
+  ]) {
+    assert.throws(
+      () => prod({ ALREADYUP_PRIVACY_URL: `https://${host}/privacy` }),
+      /PRIVACY_URL/,
+      host,
+    );
+  }
+});
+
+test('URLs carrying credentials are rejected because extra is public', () => {
+  for (const url of [
+    'https://user:pw@acme.org/privacy',
+    'https://user@acme.org/privacy',
+    'https://:pw@acme.org/privacy',
+  ]) {
+    assert.throws(() => prod({ ALREADYUP_SUPPORT_URL: url }), /SUPPORT_URL/, url);
+  }
+});
