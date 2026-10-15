@@ -83,6 +83,10 @@ function makeGateway(
   const scheduled = [...initial];
   const cancelled: string[] = [];
   const gateway: StorageResetGateway = {
+    async listPresented() {
+      return [];
+    },
+    async dismissPresented() {},
     async listScheduled() {
       return [...scheduled];
     },
@@ -252,6 +256,10 @@ test("keeps ids remembered in the intent when a restart interrupted an earlier r
 test("a failure while listing leaves storage untouched", async () => {
   const store = makeStore({ ...corrupt });
   const gateway: StorageResetGateway = {
+    async listPresented() {
+      return [];
+    },
+    async dismissPresented() {},
     async listScheduled() {
       throw new Error("unavailable");
     },

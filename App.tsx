@@ -147,6 +147,7 @@ import {
   cancelNotificationIfPresent,
   cancelScheduledNotification,
   cancelScheduledNotificationById,
+  listPresentedNotificationSnapshots,
   listScheduledNotificationSnapshots,
   listScheduledNotificationIds,
   readScheduledNotificationQueue,
@@ -322,6 +323,8 @@ const storageReset = createStorageResetService({
   gateway: {
     listScheduled: listScheduledNotificationSnapshots,
     cancelScheduled: cancelScheduledNotificationById,
+    listPresented: listPresentedNotificationSnapshots,
+    dismissPresented: (id) => dismissDeliveredNotification(id),
   },
   exclusive: (run) =>
     suppressionJournal.exclusive(() => runExclusiveAlarmStorage(run)),

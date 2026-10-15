@@ -235,6 +235,10 @@ describe('storage reset tracks snooze notifications', () => {
     const reset = createStorageResetService({
       store,
       gateway: {
+        async listPresented() {
+          return [];
+        },
+        async dismissPresented() {},
         async listScheduled() {
           return [...scheduled];
         },

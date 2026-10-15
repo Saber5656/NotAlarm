@@ -51,11 +51,17 @@ const ALARM_STORAGE_KEYS = [
 ] as const;
 
 const MAX_REMEMBERED_IDS = 1_000;
+/** A notification can move scheduled -> presented between reads; recheck a few times only. */
+const MAX_CLEANUP_PASSES = 4;
 
 export interface StorageResetGateway {
   listScheduled(): Promise<ScheduledNotificationSnapshot[]>;
   /** Must cancel exactly this identifier; never the whole shared queue. */
   cancelScheduled(notificationId: string): Promise<void>;
+  /** Notifications already delivered (tray / Notification Center). */
+  listPresented(): Promise<ScheduledNotificationSnapshot[]>;
+  /** Must dismiss exactly this identifier; never every delivered notification. */
+  dismissPresented(notificationId: string): Promise<void>;
 }
 
 export interface StorageResetDependencies {
@@ -221,6 +227,18 @@ export function createStorageResetService({
     ).length;
   }
 
+  async function ownedPresentedIds(
+    knownIds: ReadonlySet<string>,
+  ): Promise<string[]> {
+    const presented = await gateway.listPresented();
+    return presented
+      .filter(
+        (request) =>
+          knownIds.has(request.identifier) || isOwnedAlarmNotification(request),
+      )
+      .map((request) => request.identifier);
+  }
+
   async function performReset(): Promise<StorageResetResult> {
     const previous = readIntent(await store.getItem(STORAGE_RESET_INTENT_KEY));
     const knownIds = new Set([
@@ -228,23 +246,60 @@ export function createStorageResetService({
       ...(await readOwnedIds(store)),
       ...(extraKnownIds?.() ?? []),
     ]);
-    const intent: StorageResetIntentV1 = {
-      version: 1,
-      requestedAtMs: previous?.requestedAtMs ?? nowMs(),
-      ownedIds: [...knownIds].slice(0, MAX_REMEMBERED_IDS),
-    };
-    // Durable before any cancellation, so a crash can be retried.
-    await store.setItem(STORAGE_RESET_INTENT_KEY, JSON.stringify(intent));
+    const requestedAtMs = previous?.requestedAtMs ?? nowMs();
+    // Durable before any cancellation or dismissal, so a crash can be retried.
+    const persistIntent = () =>
+      store.setItem(
+        STORAGE_RESET_INTENT_KEY,
+        JSON.stringify({
+          version: 1,
+          requestedAtMs,
+          ownedIds: [...knownIds].slice(0, MAX_REMEMBERED_IDS),
+        } satisfies StorageResetIntentV1),
+      );
+    await persistIntent();
 
-    for (const id of await ownedScheduledIds(knownIds)) {
-      try {
-        await gateway.cancelScheduled(id);
-      } catch {
-        // Confirmed below by reading the queue again.
+    // Scheduled is read before presented in every pass: a request leaving the
+    // queue by delivery is then visible in the tray read that follows. A pass
+    // that finds nothing owned in either place ends the cleanup; the bounded
+    // number of passes keeps a notification that never goes away from looping.
+    let clean = false;
+    for (let pass = 0; pass < MAX_CLEANUP_PASSES && !clean; pass += 1) {
+      const scheduledIds = await ownedScheduledIds(knownIds);
+      const before = knownIds.size;
+      scheduledIds.forEach((id) => knownIds.add(id));
+      if (knownIds.size !== before) {
+        await persistIntent();
       }
-    }
+      for (const id of scheduledIds) {
+        try {
+          await gateway.cancelScheduled(id);
+        } catch {
+          // Confirmed by reading the queue again.
+        }
+      }
 
-    if ((await ownedScheduledIds(knownIds)).length > 0) {
+      const presentedIds = await ownedPresentedIds(knownIds);
+      const beforePresented = knownIds.size;
+      presentedIds.forEach((id) => knownIds.add(id));
+      if (knownIds.size !== beforePresented) {
+        await persistIntent();
+      }
+      for (const id of presentedIds) {
+        try {
+          await gateway.dismissPresented(id);
+        } catch {
+          // Confirmed by reading the tray again.
+        }
+      }
+
+      clean =
+        scheduledIds.length === 0 &&
+        presentedIds.length === 0 &&
+        (await ownedScheduledIds(knownIds)).length === 0 &&
+        (await ownedPresentedIds(knownIds)).length === 0;
+    }
+    if (!clean) {
       throw new StorageResetIncompleteError();
     }
 

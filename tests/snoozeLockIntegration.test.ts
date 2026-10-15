@@ -149,6 +149,8 @@ const resetService = createStorageResetService({
   store: AsyncStorage,
   gateway: {
     // Opaque payloads: only ids the stored state names can be recognised.
+    listPresented: async () => [],
+    dismissPresented: async () => {},
     listScheduled: async () =>
       [...queue.ids].map((identifier) => ({ identifier, content: {} })),
     cancelScheduled: async (id) => {

@@ -67,6 +67,8 @@ const legacy = {
 const service = createStorageResetService({
   store: AsyncStorage,
   gateway: {
+    listPresented: async () => [],
+    dismissPresented: async () => {},
     listScheduled: async () => [],
     cancelScheduled: async () => undefined,
   },

@@ -355,3 +355,21 @@ export async function cancelScheduledNotificationById(
   }
   await Notifications.cancelScheduledNotificationAsync(notificationId);
 }
+
+/** Read-only snapshot of what is delivered and still in the tray. */
+export async function listPresentedNotificationSnapshots(): Promise<
+  ScheduledNotificationSnapshot[]
+> {
+  if (Platform.OS === 'web') {
+    return [];
+  }
+  const presented = await Notifications.getPresentedNotificationsAsync();
+  return presented.map(({ request }) => ({
+    identifier: request.identifier,
+    content: {
+      title: request.content.title,
+      categoryIdentifier: request.content.categoryIdentifier,
+      data: request.content.data,
+    },
+  }));
+}
