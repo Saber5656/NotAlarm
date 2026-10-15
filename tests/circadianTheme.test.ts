@@ -257,3 +257,102 @@ test('a previous schedule that ends before midnight changes nothing', () => {
     );
   }
 });
+
+// PR41 review: short days must still peak, and yesterday's tail must not
+// swallow today's dawn.
+type TestSchedule = {
+  sunriseMinute: number;
+  sunsetMinute: number;
+  timeZone: string;
+  previous?: { sunriseMinute: number; sunsetMinute: number };
+};
+
+function peakDay(schedule: TestSchedule) {
+  let best = { minute: -1, day: -1 };
+  for (let minute = 0; minute < 24 * 60; minute += 1) {
+    const { day } = weightsAt(schedule, minute);
+    if (day > best.day) {
+      best = { minute, day };
+    }
+  }
+  return best;
+}
+
+for (const [name, sunrise, sunset] of [
+  ['40 minutes (11:00-11:40)', 11 * 60, 11 * 60 + 40],
+  ['110 minutes (11:00-12:50)', 11 * 60, 12 * 60 + 50],
+] as const) {
+  test(`a ${name} day still reaches the daytime photo inside daylight`, () => {
+    const schedule = {
+      sunriseMinute: sunrise,
+      sunsetMinute: sunset,
+      timeZone: 'UTC',
+    };
+    const peak = peakDay(schedule);
+    assert.ok(peak.day > 0.95, `peak day weight ${peak.day}`);
+    assert.ok(
+      peak.minute >= sunrise && peak.minute <= sunset,
+      `peak at ${peak.minute} outside ${sunrise}-${sunset}`,
+    );
+    // Still night well before and after, and the blend never jumps.
+    assert.ok(weightsAt(schedule, 2 * 60).night > 0.99);
+    assert.ok(weightsAt(schedule, 22 * 60).night > 0.99);
+    assertContinuous(schedule, 0.1);
+  });
+}
+
+test('a day just above the full-ramp threshold is unchanged by the short-day rule', () => {
+  const schedule = { sunriseMinute: 360, sunsetMinute: 720, timeZone: 'UTC' };
+  assert.equal(weightsAt(schedule, 600).day, 1);
+  assert.equal(weightsAt(schedule, 360 + 120).dawn, 1);
+});
+
+test("yesterday's post-sunset tail blends into today's dawn instead of dropping it", () => {
+  // Sunrise 01:30, sunset 00:30 next day; yesterday's tail would reach night
+  // at 04:00, after today's dawn keyframes at 02:00 and 03:30.
+  const wrapped = { sunriseMinute: 90, sunsetMinute: 1470, timeZone: 'UTC' };
+  const schedule = { ...wrapped, previous: { ...wrapped } };
+  assert.ok(weightsAt(schedule, 2 * 60).dawn > 0.99, 'dawn at 02:00');
+  assert.ok(weightsAt(schedule, 3 * 60 + 30).dawn > 0.99, 'dawn at 03:30');
+  assert.ok(weightsAt(schedule, 3 * 60).night < 0.01, 'not night at 03:00');
+  assert.ok(weightsAt(schedule, 8 * 60).day > 0.99, 'day by 08:00');
+  assertContinuous(schedule, 0.1);
+});
+
+test('a 23-hour day is bright at noon, dawn after sunrise and continuous over midnight', () => {
+  const wrapped = { sunriseMinute: 30, sunsetMinute: 1410, timeZone: 'UTC' };
+  const schedule = { ...wrapped, previous: { ...wrapped } };
+  assert.equal(weightsAt(schedule, 12 * 60).day, 1, 'noon');
+  assert.ok(weightsAt(schedule, 90).dawn > 0.99, '01:30 dawn');
+  assertContinuous(schedule, 0.1);
+  const at = (day: number, hour: number, minute: number) =>
+    getCircadianTheme(new Date(Date.UTC(2026, 5, day, hour, minute)), schedule)
+      .photoWeights;
+  const before = at(14, 23, 59);
+  const after = at(15, 0, 0);
+  for (const key of ['dawn', 'day', 'dusk', 'night'] as const) {
+    assert.ok(
+      Math.abs(before[key] - after[key]) < 0.05,
+      `${key} ${before[key]} -> ${after[key]} over midnight`,
+    );
+  }
+});
+
+test('an overlapping tail never drops weights out of range or off total 1', () => {
+  for (const sunrise of [30, 90, 150, 200, 300]) {
+    const prev = { sunriseMinute: 120, sunsetMinute: 1470 };
+    const schedule = {
+      sunriseMinute: sunrise,
+      sunsetMinute: sunrise + 600,
+      timeZone: 'UTC',
+      previous: prev,
+    };
+    assertContinuous(schedule, 0.1);
+    for (let minute = 0; minute < 1440; minute += 5) {
+      const w = weightsAt(schedule, minute);
+      for (const key of ['dawn', 'day', 'dusk', 'night'] as const) {
+        assert.ok(w[key] >= -1e-9 && w[key] <= 1 + 1e-9);
+      }
+    }
+  }
+});
