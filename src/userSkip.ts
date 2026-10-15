@@ -48,7 +48,7 @@ export function describeUserSkipConfirmation(
     title: '今回分だけ止めますか？',
     body: `${formatDate(cycle.dueAtMs)} ${formatClock(
       cycle.dueAtMs,
-    )} の回だけ止めます。繰り返しの設定は変わらず、次の日以降は予定どおり鳴ります。`,
+    )} の回だけ止めます。ほかの予定の回と繰り返しの設定は変わりません。`,
     confirmLabel: USER_SKIP_LABEL,
     cancelLabel: 'キャンセル',
   };
