@@ -242,7 +242,7 @@ describe('CI wiring', () => {
   });
 
   test('uses Node 22', () => {
-    assert.match(ci, /node-version: '22\.x'/);
+    assert.match(ci, /node-version: '22\.23\.4'/);
   });
 });
 
