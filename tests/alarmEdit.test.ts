@@ -931,6 +931,7 @@ describe('recoverPendingAlarmEdit', () => {
       entry,
       gateway: h.gateway,
       journal: h.journal,
+      now: () => h.clock,
       checkpoint: async (next) => void h.saved.push(next),
     });
 
@@ -960,6 +961,7 @@ describe('recoverPendingAlarmEdit', () => {
         entry,
         gateway: h.gateway,
         journal: h.journal,
+        now: () => h.clock,
         checkpoint: async (next) => void h.saved.push(next),
       }),
       AlarmEditError,
@@ -1432,6 +1434,7 @@ describe('per-occurrence metadata through edits', () => {
     };
     const result = await recoverPendingAlarmEdit({
       alarms: [a1], entry, gateway: h.gateway, journal: h.journal,
+      now: () => h.clock,
       checkpoint: async (next) => void h.saved.push(next),
     });
     assert.deepEqual(result[0].cycles, newCycles);
