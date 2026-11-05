@@ -59,6 +59,20 @@ export function evaluateAudit(
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
     return ['invalid current time; cannot evaluate exception expiry'];
   }
+  if (
+    !report || typeof report !== 'object' || 'error' in report ||
+    !report.vulnerabilities || typeof report.vulnerabilities !== 'object' ||
+    Array.isArray(report.vulnerabilities)
+  ) {
+    return ['invalid audit report; cannot establish a clean dependency tree'];
+  }
+  // With no accepted risk, even propagation-only entries must be rejected.
+  // Cycles or an empty `via` list cannot establish that a finding is harmless.
+  if (exceptions.length === 0) {
+    return Object.keys(report.vulnerabilities).map(
+      (name) => `finding not covered by an exception: ${name}`,
+    );
+  }
   const active = new Map<string, AdvisoryException>();
   for (const exception of exceptions) {
     const shapeProblem = exceptionShapeProblem(exception);
@@ -134,7 +148,7 @@ function walk(dir: string, accept: (file: string) => boolean, out: string[] = []
 const ASSESSED_VERSIONS: Record<string, string> = {
   braces: '3.0.3',
   micromatch: '4.0.8',
-  'node-forge': '1.4.0',
+  'node-forge': '1.4.3',
   '@expo/code-signing-certificates': '0.0.6',
 };
 
@@ -142,7 +156,6 @@ const ASSESSED_VERSIONS: Record<string, string> = {
 const ASSESSED_DEPENDENTS: Record<string, string[]> = {
   braces: ['node_modules/micromatch'],
   micromatch: [
-    'node_modules/@expo/metro/node_modules/metro-file-map',
     'node_modules/metro-file-map',
   ],
   'node-forge': [
@@ -153,7 +166,7 @@ const ASSESSED_DEPENDENTS: Record<string, string[]> = {
 
 // The @expo/cli the code-dominance assessment was made against, pinned by version and by the
 // content digest of the two files that import node-forge / call the verification paths.
-export const ASSESSED_CLI_VERSION = '57.0.30';
+export const ASSESSED_CLI_VERSION = '57.0.33';
 export const ASSESSED_CLI_DIGESTS: Record<string, string> = {
   'build/src/utils/codesigning.js': '935fadac6f1dc56bc088acb04416d1fc83bd70505f368b87dd210d0aa4617de2',
   'build/src/run/ios/codeSigning/Security.js': 'af3f12dfb57ef87ae4cb3903af4398eeb034750c08d4fe523bc6a7d3062998b2',
@@ -278,7 +291,6 @@ export function checkCliPin(root: string, cli: string = CLI): string[] {
 }
 
 const METRO_FILE_MAP_COPIES = [
-  'node_modules/@expo/metro/node_modules/metro-file-map',
   'node_modules/metro-file-map',
 ];
 const CLI = 'node_modules/expo/node_modules/@expo/cli';

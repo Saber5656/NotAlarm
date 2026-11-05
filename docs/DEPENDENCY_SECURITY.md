@@ -1,4 +1,19 @@
-# Dependency security: 修正版のない advisory の到達可能性評価（ALR-014）
+# Dependency security: current status and historical assessment
+
+## Current status (2026-11-06)
+
+Expo SDK 57 を維持し、`expo@57.0.32` / `@expo/cli@57.0.33` / `node-forge@1.4.3` に更新しました。新しい lockfile から `npm ci` した状態の `npm audit` は **0 件**です。`security/advisory-exceptions.json` は空で、新しい finding は重大度を問わず security gate が拒否します。空の `via` や循環する伝播情報を持つ finding、不正な audit report も成功として扱いません。
+
+- `node-forge` は旧 advisory の影響範囲（`<=1.4.0`）より新しい版になり、現在の audit から解消しています。
+- [braces の advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) は 2026-10-23 に撤回されました。旧例外の期限延長や新たなリスク受容は行っていません。
+- `@expo/fingerprint@0.20.15` のみに `glob@14.0.3` / `minimatch@11.0.4` の npm override を適用しました。[glob](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) と [minimatch](https://github.com/advisories/GHSA-g3hv-75wg-m249) の修正版を使い、Expo の SDK メジャーや配布方式は変えていません。
+- `tests/fingerprint.test.ts` は実際の一時プロジェクトを fingerprint API で読み、同じファイルの再計算、ignore pattern、対象ファイル変更による hash の変化を確認します。人工的な hash の比較だけを互換性の根拠にしません。
+
+現在の `security:check` は非到達性例外に頼らず、実際の `npm audit` と export の sourcemap を検査します。過去の例外・呼び出し経路の検査関数はテストで維持しており、CI のテスト側には版・ソース hash・依存配置の整合性検査が残ります。SDK のパッチ更新時には、そのテストの評価値も再確認します。SDK 検査も維持しています。実機の起動・通知・歩数は未確認です。
+
+## Historical assessment (2026-10-15; superseded)
+
+以下は当時の原記録です。依存版、未修正という説明、例外の期限、当時の security gate の条件は現在の状態を示しません。
 
 評価日 2026-10-15 / Expo SDK 57.0.29 / React Native 0.86.3 / node 26.0.0。`npm audit` は 16 件（high のみ）。原因は次の 2 advisory で、残りは依存関係の伝播である。どちらも**修正済みとは扱わない**。
 
