@@ -470,7 +470,16 @@ HealthKit の sleep analysis や watchOS app は追加の起床証拠・UX 改�
 
 Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` 直後の `npm audit` は 23 件（moderate 7 / high 16、critical 0）を報告した。原因 advisory は 3 件で、残りは依存関係の伝播である。自動修正候補は `expo@44.0.6` などへの downgrade で、`--force` は使わない。
 
-### 対応状況（2026-10-15）
+### 対応状況（2026-11-06）
+
+- Expo SDK 57 を維持して互換パッチ版へ更新。`node-forge@1.4.3` を含む新しい lockfile からの `npm ci` と `npm audit` で脆弱性 0 件を確認した。
+- `@expo/fingerprint` の `glob@14.0.3` / `minimatch@11.0.4` に限定した npm override を設定。実際のファイル走査、ignore pattern、再計算の安定性、ソース変更の検出をテストする。
+- braces の advisory は 2026-10-23 に撤回された。旧例外を削除し、`security/advisory-exceptions.json` は空。期限延長や新しい例外の追加はしていない。
+- 現在の `security:check` は新しい audit finding を重大度にかかわらず拒否し、旧非到達性例外に頼らない。旧検査関数の回帰テストは CI で維持し、版・ソース hash・依存配置の整合性を検査する。詳細と出典は `docs/DEPENDENCY_SECURITY.md`。
+
+以下の 2026-10-15 の評価は過去の記録であり、現在の依存・例外の状態ではない。
+
+### 対応状況（2026-10-15・履歴）
 
 - 解消: `uuid` GHSA-w5hq-g745-h8pq（moderate）。`xcode@3.0.1`（`@expo/config-plugins` 経由）が固定する `uuid@7.0.3` を `overrides.xcode.uuid = ^11.1.1`（解決 11.1.1）へ更新した。`xcode` は `uuid.v4()` のみ使用し、11.x は CJS `require('uuid')` を維持する。`generateUuid()` の動作、`expo install --check`、expo-doctor 1.20.4（21/21）、export 全 platform で確認した。
 - 残存（修正版なし）: `braces@3.0.3` GHSA-vfj7-8cjw-p6xm（high、`<=3.0.3`。npm の最新も 3.0.3）。経路は `expo > @expo/metro > metro-file-map > micromatch > braces`。
@@ -488,7 +497,7 @@ Expo SDK 57 / React Native 0.86.3 の root のまま、2026-10-15 に `npm ci` �
 
 ### 受け入れ条件
 
-- [x] high / critical advisory が 0、または非到達性と期限付き risk acceptance が記録されている（braces・node-forge は修正版なし。非到達性の根拠と 2026-11-14 期限の例外を記録。advisory 自体は未解決）
+- [x] high / critical advisory が 0、または非到達性と期限付き risk acceptance が記録されている（2026-11-06: 全重大度で audit 0 件、例外なし）
 - [x] `npx expo-doctor` が全チェックを通過する（1.20.4、21/21）
 - [x] `npm test` / `npm run typecheck` / `npx expo export --platform all` が更新後も通る
 - [x] Expo SDK 57 のまま維持し、SDK 変更はない

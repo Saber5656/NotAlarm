@@ -5,7 +5,6 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
-  checkCallPathAssumptions,
   checkAuditNodes,
   checkExportedBundles,
   installedCopyPaths,
@@ -52,11 +51,10 @@ const report = JSON.parse(auditText) as AuditReport;
 const problems = [
   ...evaluateAudit(report, exceptions, new Date(), installed),
   ...checkAuditNodes(root, report),
-  ...checkCallPathAssumptions(root),
   ...(option('--dist') ? checkExportedBundles(option('--dist')!) : []),
 ];
 if (problems.length > 0) {
   console.error(problems.map((p) => `- ${p}`).join('\n'));
   process.exit(1);
 }
-console.log('dependency security: only the documented, unexpired advisory exceptions remain');
+console.log('dependency security: npm audit is clean and no advisory exceptions are active');

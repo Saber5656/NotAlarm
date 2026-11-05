@@ -22,12 +22,15 @@ import {
 } from '../scripts/dependencySecurity';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const exceptions: AdvisoryException[] = JSON.parse(
-  readFileSync(new URL('../security/advisory-exceptions.json', import.meta.url), 'utf8'),
-).exceptions;
+// Historical fixture: the active release gate intentionally has no exceptions.
+const exceptions: AdvisoryException[] = [{
+  package: 'braces',
+  advisoryUrl: 'https://github.com/advisories/GHSA-vfj7-8cjw-p6xm',
+  installedVersion: '3.0.3',
+  expires: '2026-11-14',
+}];
 
 const BRACES = 'https://github.com/advisories/GHSA-vfj7-8cjw-p6xm';
-const FORGE = 'https://github.com/advisories/GHSA-86w9-cpqp-85rv';
 const beforeExpiry = new Date('2026-10-15T00:00:00Z');
 
 function advisory(name: string, url: string, severity = 'high') {
@@ -42,23 +45,38 @@ const currentAudit = auditWith({
   braces: { name: 'braces', severity: 'high', via: [advisory('braces', BRACES)] },
   micromatch: { name: 'micromatch', severity: 'high', via: ['braces'] },
   'metro-file-map': { name: 'metro-file-map', severity: 'high', via: ['micromatch'] },
-  'node-forge': { name: 'node-forge', severity: 'high', via: [advisory('node-forge', FORGE)] },
-  '@expo/code-signing-certificates': {
-    name: '@expo/code-signing-certificates',
-    severity: 'high',
-    via: ['node-forge'],
-  },
 });
 
 describe('advisory exceptions', () => {
-  test('cover exactly the two upstream-unfixed advisories and expire on 2026-11-14', () => {
+  test('active release gate has no exceptions', () => {
+    assert.deepEqual(JSON.parse(readFileSync(new URL('../security/advisory-exceptions.json', import.meta.url), 'utf8')).exceptions, []);
+  });
+  test('the historical exception fixture remains version-pinned and expiring', () => {
     assert.deepEqual(
       exceptions.map((e) => [e.package, e.advisoryUrl, e.installedVersion, e.expires]),
       [
         ['braces', BRACES, '3.0.3', '2026-11-14'],
-        ['node-forge', FORGE, '1.4.0', '2026-11-14'],
       ],
     );
+  });
+
+  test('no exceptions rejects every finding, including empty and circular propagation', () => {
+    const report = auditWith({
+      empty: { name: 'empty', severity: 'low', via: [] },
+      first: { name: 'first', severity: 'moderate', via: ['second'] },
+      second: { name: 'second', severity: 'moderate', via: ['first'] },
+    });
+    const problems = evaluateAudit(report, [], beforeExpiry);
+    for (const name of ['empty', 'first', 'second']) {
+      assert.ok(problems.some((problem) => problem.includes(name)), name);
+    }
+    assert.deepEqual(evaluateAudit(auditWith({}), [], beforeExpiry), []);
+  });
+
+  test('no exceptions fails closed on a malformed audit report', () => {
+    for (const report of [null, {}, { vulnerabilities: [] }, { vulnerabilities: null }]) {
+      assert.ok(evaluateAudit(report as unknown as AuditReport, [], beforeExpiry).length > 0);
+    }
   });
 
   test('accept the known advisories and everything propagated from them', () => {
@@ -112,7 +130,7 @@ describe('advisory exceptions', () => {
   test('fail when the installed version no longer matches the assessed version', () => {
     const problems = evaluateAudit(currentAudit, exceptions, beforeExpiry, {
       braces: '3.0.4',
-      'node-forge': '1.4.0',
+      'node-forge': '1.4.2',
     });
     assert.ok(problems.some((p) => /braces/.test(p) && /3\.0\.4/.test(p)), problems.join('\n'));
   });
@@ -143,7 +161,7 @@ describe('advisory exceptions', () => {
 
   test('fail closed on malformed expiry dates', () => {
     for (const expires of ['2026-13-01', '2026-02-30', '2026-00-10', '2026-11-00', '2026-4-5', '', '2026-11-14T00:00:00Z', ' 2026-11-14', 'never', '20261114']) {
-      const problems = evaluateAudit(currentAudit, [{ ...exceptions[0], expires }, exceptions[1]], beforeExpiry);
+      const problems = evaluateAudit(currentAudit, [{ ...exceptions[0], expires }], beforeExpiry);
       assert.ok(problems.some((p) => /invalid expires/.test(p)), `${JSON.stringify(expires)}: ${problems.join('\n')}`);
       assert.ok(problems.some((p) => /braces/.test(p) && /not covered/.test(p)), `${JSON.stringify(expires)} must not stay active`);
     }
@@ -152,14 +170,14 @@ describe('advisory exceptions', () => {
   test('fail closed on a non-string expiry and on unknown exception shape', () => {
     const bad = [{ ...exceptions[0], expires: 20261114 as unknown as string }];
     assert.ok(evaluateAudit(currentAudit, bad, beforeExpiry).some((p) => /invalid expires/.test(p)));
-    const extra = [{ ...exceptions[0], package: '*' }, exceptions[1]];
+    const extra = [{ ...exceptions[0], package: '*' }];
     assert.ok(evaluateAudit(currentAudit, extra, beforeExpiry).some((p) => /invalid exception/.test(p)));
-    const wildcardUrl = [{ ...exceptions[0], advisoryUrl: '*' }, exceptions[1]];
+    const wildcardUrl = [{ ...exceptions[0], advisoryUrl: '*' }];
     assert.ok(evaluateAudit(currentAudit, wildcardUrl, beforeExpiry).some((p) => /invalid exception/.test(p)));
   });
 
   test('accept leap days only in leap years', () => {
-    const on = (expires: string) => evaluateAudit(currentAudit, [{ ...exceptions[0], expires }, exceptions[1]], new Date('2026-10-15T00:00:00Z'));
+    const on = (expires: string) => evaluateAudit(currentAudit, [{ ...exceptions[0], expires }], new Date('2026-10-15T00:00:00Z'));
     assert.deepEqual(on('2028-02-29'), []);
     assert.ok(on('2027-02-29').some((p) => /invalid expires/.test(p)));
   });
@@ -256,15 +274,15 @@ describe('every installed copy and the pinned CLI (fixtures)', () => {
     const files: Record<string, string | null> = {
       'node_modules/braces/package.json': '{"version":"3.0.3"}',
       'node_modules/micromatch/package.json': '{"version":"4.0.8"}',
-      'node_modules/node-forge/package.json': '{"version":"1.4.0"}',
+      'node_modules/node-forge/package.json': '{"version":"1.4.3"}',
       'node_modules/@expo/code-signing-certificates/package.json': '{"version":"0.0.6"}',
       'node_modules/@expo/metro/node_modules/metro-file-map/package.json': '{"version":"1"}',
       'node_modules/metro-file-map/package.json': '{"version":"1"}',
-      [`${CLI}/package.json`]: '{"version":"57.0.30"}',
+      [`${CLI}/package.json`]: '{"version":"57.0.33"}',
       'package-lock.json': lockOf({
         'node_modules/braces': '3.0.3',
         'node_modules/micromatch': '4.0.8',
-        'node_modules/node-forge': '1.4.0',
+        'node_modules/node-forge': '1.4.3',
         'node_modules/@expo/code-signing-certificates': '0.0.6',
       }),
       ...overrides,
@@ -335,7 +353,7 @@ describe('every installed copy and the pinned CLI (fixtures)', () => {
     assert.deepEqual(checkCliPin(fixture(copiedFiles)), []);
     assert.ok(checkCliPin(fixture()).some((p) => /codesigning\.js is unreadable/.test(p)));
     const changedVersion = fixture({ [`${CLI}/package.json`]: '{"version":"57.0.31"}' });
-    assert.ok(checkCliPin(changedVersion).some((p) => /@expo\/cli is 57\.0\.31, assessed 57\.0\.30/.test(p)));
+    assert.ok(checkCliPin(changedVersion).some((p) => /@expo\/cli is 57\.0\.31, assessed 57\.0\.33/.test(p)));
     const changedContent = fixture({
       [`${CLI}/build/src/utils/codesigning.js`]: readFileSync(join(root, CLI, 'build/src/utils/codesigning.js'), 'utf8') + '\n',
       [`${CLI}/build/src/run/ios/codeSigning/Security.js`]: readFileSync(join(root, CLI, 'build/src/run/ios/codeSigning/Security.js'), 'utf8'),
